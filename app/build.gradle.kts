@@ -180,7 +180,7 @@ afterEvaluate {
   "license": "GPL-3.0-or-later",
   "versionCode": $vCode,
   "versionName": "$vName",
-  "apkUrl": "https://github.com/hlebkukleuski/FullFileStudio/releases/latest/download/fullfilestudio-v$vName-hashtagfreeinternet-release.apk",
+  "apkUrl": "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-hashtagfreeinternet-release.apk",
   "releaseNotes": "FullFileStudio v$vName Release"
 }
 """
@@ -189,11 +189,11 @@ afterEvaluate {
             if (docsIndexFile.exists()) {
                 val oldHtml = docsIndexFile.readText()
                 val updatedHtml = oldHtml.replace(
-                    Regex("""https://github\.com/hlebkukleuski/FullFileStudio/releases/latest/download/fullfilestudio-v[0-9.]+-hashtagfreeinternet-release\.apk"""),
-                    "https://github.com/hlebkukleuski/FullFileStudio/releases/latest/download/fullfilestudio-v$vName-hashtagfreeinternet-release.apk"
+                    Regex("""https://github\.com/hlebkukleuski/FullFileStudio/releases/(?:latest/download|download/v[0-9.]+)/fullfilestudio-v[0-9.]+-hashtagfreeinternet-release\.apk"""),
+                    "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-hashtagfreeinternet-release.apk"
                 ).replace(
                     Regex("""https://github\.com/hlebkukleuski/FullFileStudio/releases/latest/download/fullfilestudio-[a-z0-9.\-]+\.apk"""),
-                    "https://github.com/hlebkukleuski/FullFileStudio/releases/latest/download/fullfilestudio-v$vName-hashtagfreeinternet-release.apk"
+                    "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-hashtagfreeinternet-release.apk"
                 )
                 docsIndexFile.writeText(updatedHtml)
             }
@@ -230,13 +230,6 @@ afterEvaluate {
             }
             into(targetReleaseDir)
             rename { "fullfilestudio-v${vName}-hashtagfreeinternet-release.apk" }
-            doLast {
-                val srcFile = File(targetReleaseDir, "fullfilestudio-v${vName}-hashtagfreeinternet-release.apk")
-                if (srcFile.exists()) {
-                    srcFile.copyTo(File(targetReleaseDir, "fullfilestudio-hashtagfreeinternet-release.apk"), overwrite = true)
-                    srcFile.copyTo(File(targetReleaseDir, "FullFileStudio-Github-Version.apk"), overwrite = true)
-                }
-            }
         }
         packageUniversalTask.finalizedBy(copyUniversalApk)
         assembleReleaseTask?.finalizedBy(copyUniversalApk)
