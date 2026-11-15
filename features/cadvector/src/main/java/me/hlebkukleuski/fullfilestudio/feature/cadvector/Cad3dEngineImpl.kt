@@ -3024,39 +3024,93 @@ class Stl3dMeshSession(
 
     private fun extractDwgGeometricEntities(bytes: ByteArray, bb: ByteBuffer, releaseName: String) {
         val scanStart = minOf(0x100, bytes.size)
-        val scanEnd = minOf(bytes.size - 48, 1024 * 1024)
+        val scanEnd = minOf(bytes.size - 32, 16 * 1024 * 1024)
         var i = scanStart
         var extractedSegments = 0
-        while (i <= scanEnd && extractedSegments < 4000) {
-            val x1 = bb.getDouble(i)
-            val y1 = bb.getDouble(i + 8)
-            val z1 = bb.getDouble(i + 16)
-            val x2 = bb.getDouble(i + 24)
-            val y2 = bb.getDouble(i + 32)
-            val z2 = bb.getDouble(i + 40)
+        while (i <= scanEnd && extractedSegments < 25_000) {
+            // 1. 3D line segment check (X1, Y1, Z1, X2, Y2, Z2)
+            if (i + 48 <= scanEnd) {
+                val x1 = bb.getDouble(i)
+                val y1 = bb.getDouble(i + 8)
+                val z1 = bb.getDouble(i + 16)
+                val x2 = bb.getDouble(i + 24)
+                val y2 = bb.getDouble(i + 32)
+                val z2 = bb.getDouble(i + 40)
 
-            val isPlausibleCoord = isPlausibleCadDouble(x1) && isPlausibleCadDouble(y1) && isPlausibleCadDouble(z1) &&
-                    isPlausibleCadDouble(x2) && isPlausibleCadDouble(y2) && isPlausibleCadDouble(z2)
-            if (isPlausibleCoord) {
-                val dx = (x2 - x1).toFloat()
-                val dy = (y2 - y1).toFloat()
-                val dz = (z2 - z1).toFloat()
-                val distSq = dx * dx + dy * dy + dz * dz
-                if (distSq in 0.25f..1_000_000f) {
-                    addLineSegment(
-                        x1.toFloat(), y1.toFloat(), z1.toFloat(),
-                        x2.toFloat(), y2.toFloat(), z2.toFloat(),
-                        aciToColor((extractedSegments % 5) + 1)
-                    )
+                val isPlausibleCoord = isPlausibleCadDouble(x1) && isPlausibleCadDouble(y1) && isPlausibleCadDouble(z1) &&
+                        isPlausibleCadDouble(x2) && isPlausibleCadDouble(y2) && isPlausibleCadDouble(z2)
+                if (isPlausibleCoord) {
+                    val dx = (x2 - x1).toFloat()
+                    val dy = (y2 - y1).toFloat()
+                    val dz = (z2 - z1).toFloat()
+                    val distSq = dx * dx + dy * dy + dz * dz
+                    if (distSq in 0.25f..25_000_000f) {
+                        addLineSegment(
+                            x1.toFloat(), y1.toFloat(), z1.toFloat(),
+                            x2.toFloat(), y2.toFloat(), z2.toFloat(),
+                            aciToColor((extractedSegments % 7) + 1)
+                        )
+                        extractedSegments++
+                        i += 48
+                        continue
+                    }
+                }
+            }
+
+            // 2. 2D line segment check (X1, Y1, X2, Y2)
+            if (i + 32 <= scanEnd) {
+                val x1_2d = bb.getDouble(i)
+                val y1_2d = bb.getDouble(i + 8)
+                val x2_2d = bb.getDouble(i + 16)
+                val y2_2d = bb.getDouble(i + 24)
+                if (isPlausibleCadDouble(x1_2d) && isPlausibleCadDouble(y1_2d) &&
+                    isPlausibleCadDouble(x2_2d) && isPlausibleCadDouble(y2_2d)
+                ) {
+                    val dx = (x2_2d - x1_2d).toFloat()
+                    val dy = (y2_2d - y1_2d).toFloat()
+                    val distSq = dx * dx + dy * dy
+                    if (distSq in 0.25f..25_000_000f) {
+                        addLineSegment(
+                            x1_2d.toFloat(), y1_2d.toFloat(), 0f,
+                            x2_2d.toFloat(), y2_2d.toFloat(), 0f,
+                            aciToColor((extractedSegments % 7) + 1)
+                        )
+                        extractedSegments++
+                        i += 32
+                        continue
+                    }
+                }
+            }
+
+            // 3. 2D circle/arc check (CX, CY, Radius)
+            if (i + 24 <= scanEnd) {
+                val cx = bb.getDouble(i)
+                val cy = bb.getDouble(i + 8)
+                val r = bb.getDouble(i + 16)
+                if (isPlausibleCadDouble(cx) && isPlausibleCadDouble(cy) && r.isFinite() && r in 1.0..5000.0) {
+                    val steps = 24
+                    val stepRad = (2.0 * Math.PI / steps).toFloat()
+                    val cf = cx.toFloat(); val sf = cy.toFloat(); val rf = r.toFloat()
+                    val col = aciToColor((extractedSegments % 7) + 1)
+                    for (s in 0 until steps) {
+                        val a1 = s * stepRad
+                        val a2 = (s + 1) * stepRad
+                        val px1 = cf + rf * cos(a1)
+                        val py1 = sf + rf * sin(a1)
+                        val px2 = cf + rf * cos(a2)
+                        val py2 = sf + rf * sin(a2)
+                        addLineSegment(px1, py1, 0f, px2, py2, 0f, col)
+                    }
                     extractedSegments++
-                    i += 48
+                    i += 24
                     continue
                 }
             }
+
             i += 8
         }
 
-        if (vertexCount == 0) {
+        if (vertexCount == 0 && dwgPreviewBitmap == null) {
             val w = 160f
             val h = 110f
             val frameColor = aciToColor(4)
