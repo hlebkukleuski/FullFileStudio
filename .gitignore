@@ -1,0 +1,44 @@
+# Gradle & Kotlin
+.gradle/
+.kotlin/
+build/
+**/build/
+
+# Android Studio / IntelliJ IDEA
+.idea/
+*.iml
+captures/
+local.properties
+/local.properties
+
+# Native C/C++ (CMake / NDK)
+.cxx/
+**/.cxx/
+.externalNativeBuild/
+
+# Build artifacts & Signing keys
+*.apk
+*.aab
+*.apks
+*.jks
+*.keystore
+*.p12
+*.pem
+*.pk8
+keystore.properties
+key.properties
+
+# Project exports, backups & local test assets
+project_source_code_export/
+project_export_part_*.txt
+PROJECT_FILE_TREE.txt
+test files/
+*.bak
+*.orig
+
+# OS & Editor temporary files
+.DS_Store
+**/.DS_Store
+Thumbs.db
+*.swp
+*~

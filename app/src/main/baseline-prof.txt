@@ -1,0 +1,30 @@
+# Copyright (C) 2026 Hleb Kukleuski <hlebkukleuski@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://gnu.org>.
+
+# Static Baseline Profile (~10 KB in APK -> saved 20+ MB RAM & removed JIT stutter)
+# We compile strictly the hot paths for the startup and the core rendering engine.
+
+HPLme/hlebkukleuski/fullfilestudio/OmniReaderApp;-><init>()V
+HPLme/hlebkukleuski/fullfilestudio/OmniReaderApp;->onCreate()V
+
+HPLme/hlebkukleuski/fullfilestudio/MainActivity;-><init>()V
+HPLme/hlebkukleuski/fullfilestudio/MainActivity;->onCreate(Landroid/os/Bundle;)V
+HPLme/hlebkukleuski/fullfilestudio/MainActivity;->onStart()V
+HPLme/hlebkukleuski/fullfilestudio/MainActivity;->onResume()V
+
+# Placeholder for Core Engine Hot paths:
+# HPLcom/omnireader/core/engine/FileSignatureDetector;->analyze(Ljava/nio/ByteBuffer;)I
+# HPLcom/omnireader/core/engine/AdaptiveRingBitmapPool;->obtain(II)Landroid/graphics/Bitmap;
+# HPLcom/omnireader/core/engine/ZeroCacheReadableSource;->read(Ljava/nio/ByteBuffer;)I

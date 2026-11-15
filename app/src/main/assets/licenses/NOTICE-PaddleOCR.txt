@@ -1,0 +1,14 @@
+========================================================================
+PaddleOCR NOTICE
+========================================================================
+
+PaddleOCR
+Copyright (c) 2020 PaddlePaddle Authors. All Rights Reserved.
+
+This product includes software developed at PaddlePaddle (https://github.com/PaddlePaddle/PaddleOCR).
+
+Component Details:
+- Pre-trained OCR detection and recognition models (ch_PP-OCRv4_det, ch_PP-OCRv4_rec, cyrillic_PP-OCRv3_rec)
+- Character dictionary files (ppocr_keys_v1.txt, cyrillic_dict.txt, latin_dict.txt, ppocrv5_dict.txt)
+
+Licensed under the Apache License, Version 2.0.
