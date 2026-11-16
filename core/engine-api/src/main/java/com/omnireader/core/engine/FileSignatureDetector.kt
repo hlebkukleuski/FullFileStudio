@@ -35,7 +35,7 @@ enum class DetectedFormat {
     DOC, XLS, PPT, RTF, APK,
     HEIC, AVIF, MP4, MP3, STL, OBJ, DXF, ISO, TAR, GZ, BZ2, XZ, PLAINTEXT,
     ONE, DWG, ACCDB, MDB, AZW3, MOBI, KFX, KINDLE_DRM, MAX, RVT, INDD,
-    FONT, DBF, PARQUET, GLTF, GLB, BLEND, USDZ
+    FONT, DBF, PARQUET, GLTF, GLB, BLEND, USDZ, MHTML
 }
 
 object FileSignatureDetector {
@@ -584,6 +584,9 @@ object FileSignatureDetector {
         val lowerHead = headText.lowercase(Locale.ROOT)
         val trimmedHead = lowerHead.trimStart()
 
+        if (lowerHead.contains("multipart/related") || lowerHead.contains("content-type: message/rfc822") || lowerHead.startsWith("from: <saved by blink>") || ext in setOf("mhtml", "mht")) {
+            return DetectedFormat.MHTML
+        }
         if (lowerHead.contains("<svg")) return DetectedFormat.SVG
         if (lowerHead.contains("<fictionbook")) return DetectedFormat.FB2
         if (lowerHead.contains("<collada")) return DetectedFormat.STL
@@ -672,6 +675,7 @@ object FileSignatureDetector {
             "mdb" -> DetectedFormat.MDB
             "dbf" -> DetectedFormat.DBF
             "parquet", "duckdb", "realm", "bson", "jsonl", "ndjson" -> DetectedFormat.PARQUET
+            "mhtml", "mht" -> DetectedFormat.MHTML
             "azw3", "azw" -> DetectedFormat.AZW3
             "mobi", "prc" -> DetectedFormat.MOBI
             "kfx" -> DetectedFormat.KFX

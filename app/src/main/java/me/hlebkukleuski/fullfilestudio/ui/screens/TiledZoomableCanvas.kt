@@ -166,6 +166,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.omnireader.core.engine.DocumentSession
 import com.omnireader.core.engine.impl.MediaPlaybackSession
+import me.hlebkukleuski.fullfilestudio.ui.theme.rememberActiveAudioDeviceCapabilities
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
@@ -181,8 +182,10 @@ import kotlinx.coroutines.withTimeoutOrNull
 import me.hlebkukleuski.fullfilestudio.MainActivity
 import me.hlebkukleuski.fullfilestudio.feature.office.SpreadsheetCoordinateUtils
 import me.hlebkukleuski.fullfilestudio.ocr.PaddleOcrManager
+import me.hlebkukleuski.fullfilestudio.ui.theme.AppAudioQualityMode
 import me.hlebkukleuski.fullfilestudio.ui.theme.AppLanguage
 import me.hlebkukleuski.fullfilestudio.ui.theme.LocalAppPalette
+import me.hlebkukleuski.fullfilestudio.ui.theme.LocalAppSettingsManager
 import me.hlebkukleuski.fullfilestudio.ui.theme.LocalAppStrings
 import me.hlebkukleuski.fullfilestudio.ui.theme.localizeEngineMessage
 import java.util.Locale
@@ -672,7 +675,8 @@ internal fun parseStructuredReflowDocument(
     rawFullText: String,
     baseFontSizeSp: Float,
     normalTextColor: Color,
-    accentHeadingColor: Color
+    accentHeadingColor: Color,
+    isHtmlSource: Boolean = false
 ): StructuredReflowDocument {
     if (rawFullText.isEmpty()) {
         return StructuredReflowDocument(
@@ -682,6 +686,8 @@ internal fun parseStructuredReflowDocument(
             imageAnchors = emptyList()
         )
     }
+
+    val isHtmlDetected = isHtmlSource || rawFullText.contains("<!DOCTYPE", ignoreCase = true) || rawFullText.contains("<html", ignoreCase = true)
 
     val rawLines = rawFullText.split('\n')
     val lines = ArrayList<String>(rawLines.size)
@@ -721,7 +727,7 @@ internal fun parseStructuredReflowDocument(
                 val nextNonBlank = lines.getOrNull(i + 1)?.trim() ?: ""
                 val isNextHeadingOrTable = nextNonBlank.startsWith("<h", ignoreCase = true) ||
                         nextNonBlank.startsWith("#") ||
-                        nextNonBlank.contains('\t')
+                        (!isHtmlDetected && nextNonBlank.contains('\t'))
                 if (!isNextHeadingOrTable) {
                     continue
                 }
@@ -736,20 +742,22 @@ internal fun parseStructuredReflowDocument(
             var workLine = rawLine
             var headingLevel = 0
 
-            val htmlHeading = REFLOW_HTML_HEADING_REGEX.find(trimmed)
-            if (htmlHeading != null) {
-                headingLevel = htmlHeading.groupValues[1].drop(1).toIntOrNull()?.coerceIn(1, 6) ?: 1
-                workLine = htmlHeading.groupValues[2]
-            } else if (trimmed.startsWith("#")) {
-                val hashes = trimmed.takeWhile { it == '#' }.length
-                if (hashes in 1..6 && trimmed.getOrNull(hashes) == ' ') {
-                    headingLevel = hashes
-                    workLine = trimmed.substring(hashes + 1)
+            if (!isHtmlDetected) {
+                val htmlHeading = REFLOW_HTML_HEADING_REGEX.find(trimmed)
+                if (htmlHeading != null) {
+                    headingLevel = htmlHeading.groupValues[1].drop(1).toIntOrNull()?.coerceIn(1, 6) ?: 1
+                    workLine = htmlHeading.groupValues[2]
+                } else if (trimmed.startsWith("#")) {
+                    val hashes = trimmed.takeWhile { it == '#' }.length
+                    if (hashes in 1..6 && trimmed.getOrNull(hashes) == ' ') {
+                        headingLevel = hashes
+                        workLine = trimmed.substring(hashes + 1)
+                    }
                 }
             }
 
             val lineStartOffset = plainBuilder.length
-            val isTableLine = workLine.contains('\t')
+            val isTableLine = !isHtmlDetected && workLine.contains('\t')
 
             if (isTableLine) {
                 val cells = workLine.split('\t').map { it.trim() }.dropLastWhile { it.isEmpty() }
@@ -1515,10 +1523,22 @@ fun TiledZoomableCanvas(
                 sessionName.contains("Font", ignoreCase = true)
     }
 
-    val isHtmlSession = remember(session, proxyExt) {
-        proxyExt in setOf("html", "htm", "xhtml")
+    val isHtmlSession = remember(session, proxyExt, sessionName) {
+        val firstPageHead = try { session.getPageText(0).take(500).lowercase(Locale.ROOT) } catch (_: Throwable) { "" }
+        proxyExt in setOf("html", "htm", "xhtml", "mhtml", "mht") ||
+                sessionName.contains("Mhtml", ignoreCase = true) ||
+                sessionName.contains("Html", ignoreCase = true) ||
+                firstPageHead.contains("<html") ||
+                firstPageHead.contains("<!doctype html") ||
+                firstPageHead.contains("content-type: multipart/related") ||
+                firstPageHead.contains("content-type: text/html")
     }
-    var isHtmlBrowserMode by remember(session) { mutableStateOf(false) }
+    var isHtmlBrowserMode by remember(session, isHtmlSession) { mutableStateOf(isHtmlSession) }
+    var htmlBrowserZoomPercent by remember(session) { mutableIntStateOf(100) }
+    var activeWebViewRef by remember(session) { mutableStateOf<WebView?>(null) }
+    var blockedExternalUrlPrompt by remember(session) { mutableStateOf<String?>(null) }
+    var reflowIllustrationOcrText by remember(session) { mutableStateOf("") }
+    var showIllustrationOcrDialog by remember(session) { mutableStateOf(false) }
 
     val isGraphicSession = remember(session, proxyExt, sessionName) {
         proxyExt in setOf(
@@ -1555,7 +1575,7 @@ fun TiledZoomableCanvas(
         val isTextExt = proxyExt in setOf(
             "fb2", "fbz", "epub", "azw3", "azw", "mobi", "prc", "one",
             "txt", "docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "rtf",
-            "json", "xml", "md", "ini", "cfg", "log", "html", "htm", "xhtml",
+            "json", "xml", "md", "ini", "cfg", "log", "html", "htm", "xhtml", "mhtml", "mht",
             "yaml", "yml", "py", "js", "ts", "kt", "java", "c", "cpp",
             "h", "hpp", "sh", "sql", "css", "properties", "toml", "gradle"
         )
@@ -1625,7 +1645,8 @@ fun TiledZoomableCanvas(
                     rawFullText = rawFullReflowText,
                     baseFontSizeSp = BASE_REFLOW_FONT_SIZE_SP * fontScaleMultiplier,
                     normalTextColor = normalReflowTextColor,
-                    accentHeadingColor = palette.accent
+                    accentHeadingColor = palette.accent,
+                    isHtmlSource = isHtmlSession
                 )
             }
             structuredDoc = parsed
@@ -1967,6 +1988,31 @@ fun TiledZoomableCanvas(
     val currentContext = LocalContext.current
     LaunchedEffect(Unit) {
         PaddleOcrManager.initialize(currentContext.applicationContext)
+    }
+
+    LaunchedEffect(useReflowLayout, activeReflowIllustrationIndex, renderVersion) {
+        if (!useReflowLayout || activeReflowIllustrationIndex < 0) {
+            reflowIllustrationOcrText = ""
+            return@LaunchedEffect
+        }
+        val bmp = activeBitmap ?: return@LaunchedEffect
+        if (bmp.isRecycled) return@LaunchedEffect
+        val copyBmp = try { bmp.copy(Bitmap.Config.ARGB_8888, false) } catch (_: Throwable) { null } ?: return@LaunchedEffect
+        val recognized = withContext(OCR_BACKGROUND_DISPATCHER) {
+            try {
+                val payload = PaddleOcrManager.recognize(
+                    bitmap = copyBmp,
+                    pageTextHint = "",
+                    preferredLanguageCode = activeLang.code
+                )
+                payload.lines.joinToString("\n") { it.text }.trim()
+            } catch (_: Throwable) {
+                ""
+            } finally {
+                if (!copyBmp.isRecycled) copyBmp.recycle()
+            }
+        }
+        reflowIllustrationOcrText = recognized
     }
 
     fun buildOcrCacheKey(
@@ -2371,12 +2417,21 @@ fun TiledZoomableCanvas(
         )
     } else Modifier
 
-    val isSearchSupported = !is3D && (useReflowLayout || isSpreadsheet || isPresentation || isPdfOrFontSession || totalPages > 1 || isHexSession)
+    val isSearchSupported = (isHtmlSession && isHtmlBrowserMode) ||
+            (!is3D && (useReflowLayout || isSpreadsheet || isPresentation || isPdfOrFontSession || totalPages > 1 || isHexSession))
 
     fun triggerDocumentSearch() {
         val trimmed = searchQuery.trim()
         if (trimmed.isEmpty()) return
         focusManager.clearFocus()
+
+        if (isHtmlSession && isHtmlBrowserMode) {
+            lastExecutedQuery = trimmed
+            hasExecutedSearch = true
+            activeWebViewRef?.findAllAsync(trimmed)
+            activeWebViewRef?.findNext(true)
+            return
+        }
 
         if (trimmed.equals(lastExecutedQuery, ignoreCase = false) && hasExecutedSearch && !isSearchingInProgress) {
             isSearchDropdownExpanded = true
@@ -2620,14 +2675,15 @@ fun TiledZoomableCanvas(
                                 Text(strings.reset3dButton)
                             }
                         } else {
-                            if (isSearchSupported && !isHtmlBrowserMode) {
+                            if (isSearchSupported) {
                                 Button(
                                     onClick = {
                                         isSearchVisible = !isSearchVisible
                                         if (!isSearchVisible) {
                                             isSearchDropdownExpanded = false
                                             clearActiveSearchHighlight()
-                                        } else if (hasExecutedSearch && searchResults.isNotEmpty()) {
+                                            activeWebViewRef?.clearMatches()
+                                        } else if (!isHtmlBrowserMode && hasExecutedSearch && searchResults.isNotEmpty()) {
                                             isSearchDropdownExpanded = true
                                         }
                                     }
@@ -2635,24 +2691,24 @@ fun TiledZoomableCanvas(
                                     Text(if (isSearchVisible) strings.closeSearchButton else strings.searchButton)
                                 }
                             }
-                            if (isHtmlSession) {
+                            if (!useReflowLayout && !isSpreadsheet && !isHtmlSession && (ocrChars.isNotEmpty() || cleanCurrentPageNativeText.isNotBlank())) {
                                 OutlinedButton(
                                     onClick = {
-                                        clearAllSelections()
-                                        isSearchVisible = false
-                                        isSearchDropdownExpanded = false
-                                        isHtmlBrowserMode = !isHtmlBrowserMode
+                                        if (ocrChars.isNotEmpty()) {
+                                            selStartChar = 0
+                                            selEndChar = ocrChars.lastIndex
+                                        } else if (cleanCurrentPageNativeText.isNotBlank()) {
+                                            clipManager?.setPrimaryClip(ClipData.newPlainText("OCR Text", cleanCurrentPageNativeText))
+                                        }
                                     },
                                     shape = RoundedCornerShape(12.dp),
-                                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp)
                                 ) {
                                     Text(
-                                        text = if (isHtmlBrowserMode) strings.viewHtmlSourceButton else strings.openAsInBrowserButton,
+                                        text = strings.copyActionButton,
                                         color = palette.accent,
                                         fontWeight = FontWeight.SemiBold,
-                                        fontSize = 13.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
+                                        fontSize = 13.sp
                                     )
                                 }
                             }
@@ -2896,10 +2952,124 @@ fun TiledZoomableCanvas(
 
             if (isHtmlSession && isHtmlBrowserMode) {
                 val htmlSource = rawFullReflowText.ifBlank { cleanCurrentPageNativeText }
-                val uriHandler = androidx.compose.ui.platform.LocalUriHandler.current
+                val bgHex = remember(palette.canvasBackground) {
+                    String.format(
+                        Locale.US,
+                        "#%02X%02X%02X",
+                        (palette.canvasBackground.red * 255).roundToInt().coerceIn(0, 255),
+                        (palette.canvasBackground.green * 255).roundToInt().coerceIn(0, 255),
+                        (palette.canvasBackground.blue * 255).roundToInt().coerceIn(0, 255)
+                    )
+                }
+                val fgHex = remember(palette.primaryText) {
+                    String.format(
+                        Locale.US,
+                        "#%02X%02X%02X",
+                        (palette.primaryText.red * 255).roundToInt().coerceIn(0, 255),
+                        (palette.primaryText.green * 255).roundToInt().coerceIn(0, 255),
+                        (palette.primaryText.blue * 255).roundToInt().coerceIn(0, 255)
+                    )
+                }
+                val accentHex = remember(palette.accent) {
+                    String.format(
+                        Locale.US,
+                        "#%02X%02X%02X",
+                        (palette.accent.red * 255).roundToInt().coerceIn(0, 255),
+                        (palette.accent.green * 255).roundToInt().coerceIn(0, 255),
+                        (palette.accent.blue * 255).roundToInt().coerceIn(0, 255)
+                    )
+                }
+
+                val sandboxedHtml = remember(htmlSource, bgHex, fgHex, accentHex) {
+                    val cspAndThemeHeader = """
+                        <meta charset="UTF-8">
+                        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                        <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' data:; img-src data: blob: file: about:; font-src data:; media-src data: blob:; connect-src 'none'; form-action 'none';">
+                        <style id="ffs-theme-defaults">
+                            :root { color-scheme: ${if (palette.isDark) "dark" else "light"}; }
+                            html, body {
+                                background-color: $bgHex !important;
+                                color: $fgHex !important;
+                                font-family: sans-serif;
+                                line-height: 1.5;
+                                margin: 12px;
+                                word-wrap: break-word;
+                            }
+                            a { color: $accentHex !important; }
+                            img, svg, video, canvas, table { max-width: 100%; height: auto; }
+                            pre, code { overflow-x: auto; max-width: 100%; }
+                        </style>
+                    """.trimIndent()
+                    if (htmlSource.contains("<head", ignoreCase = true)) {
+                        htmlSource.replaceFirst(Regex("(?i)<head[^>]*>"), "$0\n$cspAndThemeHeader")
+                    } else {
+                        "<!DOCTYPE html><html><head>$cspAndThemeHeader</head><body>$htmlSource</body></html>"
+                    }
+                }
+
+                LaunchedEffect(searchQuery, isSearchVisible) {
+                    val wv = activeWebViewRef ?: return@LaunchedEffect
+                    if (isSearchVisible && searchQuery.trim().isNotEmpty()) {
+                        wv.findAllAsync(searchQuery.trim())
+                    } else {
+                        wv.clearMatches()
+                    }
+                }
+
+                if (blockedExternalUrlPrompt != null) {
+                    val blockedUrl = blockedExternalUrlPrompt!!
+                    AlertDialog(
+                        onDismissRequest = { blockedExternalUrlPrompt = null },
+                        confirmButton = {
+                            Button(
+                                onClick = {
+                                    clipManager?.setPrimaryClip(ClipData.newPlainText("URL", blockedUrl))
+                                    blockedExternalUrlPrompt = null
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = palette.accent)
+                            ) {
+                                Text(
+                                    text = strings.copyActionButton,
+                                    color = if (palette.isDark) Color.Black else Color.White,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        },
+                        dismissButton = {
+                            TextButton(onClick = { blockedExternalUrlPrompt = null }) {
+                                Text(strings.closeBtn, color = palette.secondaryText)
+                            }
+                        },
+                        title = {
+                            Text(
+                                text = strings.securityBadge,
+                                color = palette.warningBadge,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 16.sp
+                            )
+                        },
+                        text = {
+                            Text(
+                                text = blockedUrl,
+                                color = palette.primaryText,
+                                fontSize = 14.sp
+                            )
+                        },
+                        containerColor = palette.surface,
+                        shape = RoundedCornerShape(20.dp)
+                    )
+                }
+
                 AndroidView(
                     factory = { ctx ->
                         WebView(ctx).apply {
+                            setBackgroundColor(
+                                android.graphics.Color.rgb(
+                                    (palette.canvasBackground.red * 255).roundToInt(),
+                                    (palette.canvasBackground.green * 255).roundToInt(),
+                                    (palette.canvasBackground.blue * 255).roundToInt()
+                                )
+                            )
                             settings.apply {
                                 javaScriptEnabled = false
                                 allowFileAccess = false
@@ -2908,33 +3078,69 @@ fun TiledZoomableCanvas(
                                 allowFileAccessFromFileURLs = false
                                 @Suppress("DEPRECATION")
                                 allowUniversalAccessFromFileURLs = false
+                                domStorageEnabled = false
+                                databaseEnabled = false
+                                setGeolocationEnabled(false)
+                                mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_NEVER_ALLOW
                                 builtInZoomControls = true
                                 displayZoomControls = false
                                 useWideViewPort = true
                                 loadWithOverviewMode = true
                                 defaultTextEncodingName = "UTF-8"
+                                textZoom = htmlBrowserZoomPercent
                             }
                             webViewClient = object : WebViewClient() {
+                                override fun shouldInterceptRequest(
+                                    view: WebView?,
+                                    request: WebResourceRequest?
+                                ): android.webkit.WebResourceResponse? {
+                                    val scheme = request?.url?.scheme?.lowercase(Locale.ROOT) ?: ""
+                                    if (scheme in setOf("about", "data")) {
+                                        return super.shouldInterceptRequest(view, request)
+                                    }
+                                    return android.webkit.WebResourceResponse(
+                                        "text/plain",
+                                        "UTF-8",
+                                        403,
+                                        "Blocked by FullFileStudio Offline Sandbox",
+                                        emptyMap(),
+                                        java.io.ByteArrayInputStream(ByteArray(0))
+                                    )
+                                }
+
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView?,
                                     request: WebResourceRequest?
                                 ): Boolean {
                                     val targetUrl = request?.url?.toString() ?: return true
-                                    if (targetUrl.startsWith("http://", true) || targetUrl.startsWith("https://", true)) {
-                                        try { uriHandler.openUri(targetUrl) } catch (_: Throwable) {}
+                                    if (targetUrl.startsWith("about:blank#")) {
+                                        return false
                                     }
+                                    blockedExternalUrlPrompt = targetUrl
                                     return true
                                 }
                             }
+                            activeWebViewRef = this
                         }
                     },
                     update = { webView ->
-                        val contentHash = htmlSource.hashCode()
+                        activeWebViewRef = webView
+                        webView.setBackgroundColor(
+                            android.graphics.Color.rgb(
+                                (palette.canvasBackground.red * 255).roundToInt(),
+                                (palette.canvasBackground.green * 255).roundToInt(),
+                                (palette.canvasBackground.blue * 255).roundToInt()
+                            )
+                        )
+                        if (webView.settings.textZoom != htmlBrowserZoomPercent) {
+                            webView.settings.textZoom = htmlBrowserZoomPercent
+                        }
+                        val contentHash = sandboxedHtml.hashCode()
                         if (webView.tag != contentHash) {
                             webView.tag = contentHash
                             webView.loadDataWithBaseURL(
                                 "about:blank",
-                                htmlSource,
+                                sandboxedHtml,
                                 "text/html",
                                 "UTF-8",
                                 null
@@ -3484,7 +3690,35 @@ fun TiledZoomableCanvas(
                                 val gestureDocH = latestDocHeight
                                 val gestureColWidths = latestColWidthsPx
 
+                                fun computeBitmapPlacement(curBmp: Bitmap): FloatArray {
+                                    val isLiveMatch = (latestRenderedPage == currentPage && !is3D && !isTableBoundedLayout)
+                                    val rScale = (latestRenderedZoomPermille / 1000f).coerceAtLeast(0.25f)
+                                    val liveRatio = if (isLiveMatch && abs(scale - rScale) > 0.005f) {
+                                        (scale / rScale).coerceIn(0.125f, 8.0f)
+                                    } else 1f
+                                    val baseScaleX = screenW / curBmp.width.toFloat().coerceAtLeast(1f)
+                                    val baseScaleY = screenH / curBmp.height.toFloat().coerceAtLeast(1f)
+                                    val panDeltaX = if (isLiveMatch) (offset.x + latestRenderedTileX * liveRatio) * baseScaleX else 0f
+                                    val panDeltaY = if (isLiveMatch) (offset.y + latestRenderedTileY * liveRatio) * baseScaleY else 0f
+                                    val dstW = (screenW * liveRatio).coerceAtLeast(1f)
+                                    val dstH = (screenH * liveRatio).coerceAtLeast(1f)
+                                    val dstX = (screenW - dstW) / 2f + panDeltaX
+                                    val dstY = (screenH - dstH) / 2f + panDeltaY
+                                    return floatArrayOf(dstX, dstY, dstW, dstH, baseScaleX * liveRatio, baseScaleY * liveRatio)
+                                }
+
                                 fun resolveCharScreenRect(ch: RecognizedCharUi, curBufW: Float, curBufH: Float): android.graphics.RectF {
+                                    if (isGraphicSession) {
+                                        val curBmp = latestActiveBitmap
+                                        if (curBmp != null && !curBmp.isRecycled) {
+                                            val placement = computeBitmapPlacement(curBmp)
+                                            val left = placement[0] + ch.rect.left * placement[4]
+                                            val top = placement[1] + ch.rect.top * placement[5]
+                                            val right = placement[0] + ch.rect.right * placement[4]
+                                            val bottom = placement[1] + ch.rect.bottom * placement[5]
+                                            return android.graphics.RectF(left, top, right, bottom)
+                                        }
+                                    }
                                     val livePageBoundsBuf = computeDocumentPageBoundsOnBuffer(
                                         bufWidth = curBufW,
                                         bufHeight = curBufH,
@@ -3501,30 +3735,6 @@ fun TiledZoomableCanvas(
                                         livePageBoundsBuf = livePageBoundsBuf,
                                         screenScaleX = screenW / curBufW.coerceAtLeast(1f),
                                         screenScaleY = screenH / curBufH.coerceAtLeast(1f)
-                                    )
-                                }
-
-                                fun computeBitmapPlacement(curBmp: Bitmap): FloatArray {
-                                    val isLiveMatch = (latestRenderedPage == currentPage && !is3D && !isTableBoundedLayout)
-                                    val rScale = (latestRenderedZoomPermille / 1000f).coerceAtLeast(0.25f)
-                                    val liveRatio = if (isLiveMatch && abs(scale - rScale) > 0.005f) {
-                                        (scale / rScale).coerceIn(0.125f, 8.0f)
-                                    } else 1f
-                                    val baseScaleX = screenW / curBmp.width.toFloat().coerceAtLeast(1f)
-                                    val baseScaleY = screenH / curBmp.height.toFloat().coerceAtLeast(1f)
-                                    val panDeltaX = if (isLiveMatch) (offset.x + latestRenderedTileX * liveRatio) * baseScaleX else 0f
-                                    val panDeltaY = if (isLiveMatch) (offset.y + latestRenderedTileY * liveRatio) * baseScaleY else 0f
-                                    val dstW = (screenW * liveRatio).coerceAtLeast(1f)
-                                    val dstH = (screenH * liveRatio).coerceAtLeast(1f)
-                                    val dstX = (screenW - dstW) / 2f + panDeltaX
-                                    val dstY = (screenH - dstH) / 2f + panDeltaY
-                                    return floatArrayOf(
-                                        dstX,
-                                        dstY,
-                                        dstW,
-                                        dstH,
-                                        dstW / curBmp.width.toFloat().coerceAtLeast(1f),
-                                        dstH / curBmp.height.toFloat().coerceAtLeast(1f)
                                     )
                                 }
 
@@ -3713,6 +3923,36 @@ fun TiledZoomableCanvas(
                                                     activeDragPoint = downScreenPos
                                                     isLongPressActive = true
                                                     haptic.performHapticFeedback(HapticFeedbackType.LongPress)
+
+                                                    val selectedChars = curChars.subList(wordRange.first, wordRange.last + 1)
+                                                    val screenRects = selectedChars.map {
+                                                        resolveCharScreenRect(it, curBmp.width.toFloat(), curBmp.height.toFloat())
+                                                    }
+                                                    val leftOnScreen = screenRects.minOf { it.left }
+                                                    val rightOnScreen = screenRects.maxOf { it.right }
+                                                    val topOnScreen = screenRects.minOf { it.top }
+                                                    val botOnScreen = screenRects.maxOf { it.bottom }
+
+                                                    val selectionRectOnScreen = Rect(
+                                                        leftOnScreen.coerceIn(0f, screenW),
+                                                        (topOnScreen - 40f).coerceIn(10f, screenH),
+                                                        rightOnScreen.coerceIn(0f, screenW),
+                                                        botOnScreen.coerceIn(10f, screenH)
+                                                    )
+
+                                                    textToolbar.showMenu(
+                                                        rect = selectionRectOnScreen,
+                                                        onCopyRequested = { copyActiveSelectionToClipboard("") },
+                                                        onSelectAllRequested = {
+                                                            val cChars = latestOcrChars
+                                                            if (cChars.isNotEmpty()) {
+                                                                selStartChar = 0
+                                                                selEndChar = cChars.lastIndex
+                                                            }
+                                                        },
+                                                        onCutRequested = null,
+                                                        onPasteRequested = null
+                                                    )
                                                 }
                                             }
                                         }
@@ -4396,6 +4636,20 @@ fun TiledZoomableCanvas(
                                         )
                                         drawCircle(handleColor, handleRadius, Offset(sLeft, sBot))
                                         drawCircle(handleColor, handleRadius, Offset(sRight, sBot))
+                                    }
+                                }
+
+                                // Inside Canvas draw block (before active selection highlight):
+                                if (isGraphicSession && selStartChar < 0 && ocrLines.isNotEmpty() && livePageBoundsBuf != null) {
+                                    for (lineUi in ocrLines) {
+                                        val sr = projectNormRectToScreen(lineUi.normRect, livePageBoundsBuf, screenScaleX, screenScaleY)
+                                        drawRoundRect(
+                                            color = palette.accent.copy(alpha = 0.22f),
+                                            topLeft = Offset(sr.left, sr.top),
+                                            size = Size((sr.right - sr.left).coerceAtLeast(4f), (sr.bottom - sr.top).coerceAtLeast(4f)),
+                                            cornerRadius = CornerRadius(4.dp.toPx()),
+                                            style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.dp.toPx())
+                                        )
                                     }
                                 }
 
@@ -5192,7 +5446,7 @@ fun TiledZoomableCanvas(
                     .padding(horizontal = 12.dp, vertical = 8.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                if (!is3D && totalPages > 1) {
+                if (!is3D && !isHtmlBrowserMode && totalPages > 1) {
                     var sliderValue by remember(session) { mutableFloatStateOf(currentPage.toFloat()) }
                     val maxPageIndexFloat = (totalPages - 1).coerceAtLeast(1).toFloat()
 
@@ -5232,12 +5486,14 @@ fun TiledZoomableCanvas(
                     )
                 }
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    if (!is3D && totalPages > 1) {
+                if (!is3D && !isHtmlBrowserMode && totalPages > 1) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
                         Button(
                             enabled = currentPage > 0,
                             onClick = {
@@ -5294,13 +5550,42 @@ fun TiledZoomableCanvas(
                         ) {
                             Text("▼", fontSize = 13.sp)
                         }
+                    }
+                }
 
-                        Spacer(Modifier.width(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    if (isHtmlSession) {
+                        OutlinedButton(
+                            onClick = {
+                                clearAllSelections()
+                                isSearchDropdownExpanded = false
+                                isHtmlBrowserMode = !isHtmlBrowserMode
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text(
+                                text = if (isHtmlBrowserMode) strings.viewHtmlSourceButton else strings.openAsInBrowserButton,
+                                color = palette.accent,
+                                fontWeight = FontWeight.SemiBold,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        Spacer(Modifier.width(12.dp))
                     }
 
                     Button(
                         onClick = {
-                            if (useReflowLayout) {
+                            if (isHtmlSession && isHtmlBrowserMode) {
+                                htmlBrowserZoomPercent = (htmlBrowserZoomPercent + 15).coerceAtMost(300)
+                            } else if (useReflowLayout) {
                                 fontScaleMultiplier = (fontScaleMultiplier + 0.15f).coerceAtMost(3.5f)
                             } else {
                                 applyZoomStep(0.25f)
@@ -5316,12 +5601,24 @@ fun TiledZoomableCanvas(
                     Spacer(Modifier.width(2.dp))
 
                     TextButton(
-                        onClick = { scale = 1f; fontScaleMultiplier = 1f; offset = Offset.Zero },
+                        onClick = {
+                            if (isHtmlSession && isHtmlBrowserMode) {
+                                htmlBrowserZoomPercent = 100
+                            } else {
+                                scale = 1f; fontScaleMultiplier = 1f; offset = Offset.Zero
+                            }
+                        },
                         contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
                         modifier = Modifier.height(36.dp)
                     ) {
                         Text(
-                            text = if (useReflowLayout) "${(fontScaleMultiplier * 100).roundToInt()}%" else "${(scale * 100).roundToInt()}%",
+                            text = if (isHtmlSession && isHtmlBrowserMode) {
+                                "${htmlBrowserZoomPercent}%"
+                            } else if (useReflowLayout) {
+                                "${(fontScaleMultiplier * 100).roundToInt()}%"
+                            } else {
+                                "${(scale * 100).roundToInt()}%"
+                            },
                             color = palette.accent,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold,
@@ -5333,7 +5630,9 @@ fun TiledZoomableCanvas(
 
                     Button(
                         onClick = {
-                            if (useReflowLayout) {
+                            if (isHtmlSession && isHtmlBrowserMode) {
+                                htmlBrowserZoomPercent = (htmlBrowserZoomPercent - 15).coerceAtLeast(50)
+                            } else if (useReflowLayout) {
                                 fontScaleMultiplier = (fontScaleMultiplier - 0.15f).coerceAtLeast(0.5f)
                             } else {
                                 applyZoomStep(-0.25f)
@@ -5381,21 +5680,7 @@ fun MediaRenderScreen(
         var lastVideoTapMs by remember { mutableLongStateOf(0L) }
         var lastVideoTapPos by remember { mutableStateOf(Offset.Zero) }
 
-        val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-        DisposableEffect(lifecycleOwner, session) {
-            val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
-                if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
-                    try {
-                        if (isPrepared && session.mediaPlayer.isPlaying) {
-                            session.mediaPlayer.pause()
-                            isPlaying = false
-                        }
-                    } catch (_: Exception) {}
-                }
-            }
-            lifecycleOwner.lifecycle.addObserver(observer)
-            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
-        }
+
 
         LaunchedEffect(isPrepared) {
             if (isPrepared) {
@@ -5439,25 +5724,92 @@ fun MediaRenderScreen(
             strings.defaultMediaArtist
         } else session.trackArtist
 
+        val activeAudioDevice = rememberActiveAudioDeviceCapabilities()
+        val context = LocalContext.current
+        val settingsManager = LocalAppSettingsManager.current
+        val currentAudioQualityModeState = settingsManager?.audioQualityMode?.collectAsState()
+        val currentAudioQualityMode = currentAudioQualityModeState?.value ?: AppAudioQualityMode.AUTO
+
+        val effectiveAudioQualityText = remember(currentAudioQualityMode, activeAudioDevice, strings) {
+            when (currentAudioQualityMode) {
+                AppAudioQualityMode.AUTO -> strings.localizedAudioQualityAuto(activeAudioDevice)
+                AppAudioQualityMode.STUDIO_96 -> strings.audioQuality96
+                AppAudioQualityMode.HIGH_48 -> strings.audioQuality48
+                AppAudioQualityMode.STANDARD_44 -> strings.audioQuality44
+            }
+        }
+
+        LaunchedEffect(currentAudioQualityMode, activeAudioDevice) {
+            val (rateHz, bitDepth) = when (currentAudioQualityMode) {
+                AppAudioQualityMode.AUTO -> activeAudioDevice.maxSampleRateHz to activeAudioDevice.maxBitDepth
+                AppAudioQualityMode.STUDIO_96 -> minOf(96000, activeAudioDevice.maxSampleRateHz) to 24
+                AppAudioQualityMode.HIGH_48 -> minOf(48000, activeAudioDevice.maxSampleRateHz) to 16
+                AppAudioQualityMode.STANDARD_44 -> minOf(44100, activeAudioDevice.maxSampleRateHz) to 16
+            }
+            session.updateAudioQualityConfig(rateHz, bitDepth)
+        }
+
+        DisposableEffect(session, context) {
+            me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onTogglePlayPauseListener = {
+                try {
+                    if (session.mediaPlayer.isPlaying) {
+                        session.mediaPlayer.pause()
+                        isPlaying = false
+                    } else {
+                        session.mediaPlayer.start()
+                        isPlaying = true
+                    }
+                } catch (_: Exception) {}
+            }
+            me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onSeekToListener = { posMs ->
+                try {
+                    session.mediaPlayer.seekTo(posMs.toInt())
+                    currentPosition = posMs.toFloat()
+                    sliderPosition = posMs.toFloat()
+                } catch (_: Exception) {}
+            }
+            onDispose {
+                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onTogglePlayPauseListener = null
+                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onSeekToListener = null
+                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.stopService(context)
+            }
+        }
+
+        LaunchedEffect(isPlaying, isPrepared, currentPosition, duration, resolvedTitle, resolvedArtist, effectiveAudioQualityText, activeAudioDevice, strings) {
+            if (isPrepared) {
+                val devName = activeAudioDevice.getLocalizedDeviceName(strings)
+                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.updateNotification(
+                    context = context,
+                    title = resolvedTitle,
+                    artist = resolvedArtist,
+                    audioInfo = "${activeAudioDevice.deviceTypeIcon} $devName • $effectiveAudioQualityText",
+                    isPlaying = isPlaying,
+                    positionMs = currentPosition.toLong(),
+                    durationMs = duration.toLong(),
+                    art = session.albumArt
+                )
+            }
+        }
+
         Column(
             modifier = modifier
                 .fillMaxSize()
                 .background(palette.background)
                 .statusBarsPadding()
                 .navigationBarsPadding()
+                .displayCutoutPadding()
         ) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .background(palette.surface)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedButton(onClick = onOpenSettingsRequest) {
                     Text("⚙", color = palette.primaryText)
                 }
-                Spacer(Modifier.width(8.dp))
                 Button(onClick = onOpenFileRequest) {
                     Text(strings.changeFileButton)
                 }
@@ -5562,8 +5914,11 @@ fun MediaRenderScreen(
                                 val boxW = constraints.maxWidth.toFloat().coerceAtLeast(1f)
                                 val boxH = constraints.maxHeight.toFloat().coerceAtLeast(1f)
                                 val containerRatio = boxW / boxH
-                                val fittedW = if (videoAspectRatio >= containerRatio) boxW else boxH * videoAspectRatio
-                                val fittedH = if (videoAspectRatio >= containerRatio) boxW / videoAspectRatio else boxH
+                                val (fittedW, fittedH) = if (videoAspectRatio >= containerRatio) {
+                                    boxW to (boxW / videoAspectRatio).coerceAtMost(boxH)
+                                } else {
+                                    (boxH * videoAspectRatio).coerceAtMost(boxW) to boxH
+                                }
                                 val fittedWidthDp = with(density) { fittedW.toDp() }
                                 val fittedHeightDp = with(density) { fittedH.toDp() }
 
@@ -5625,6 +5980,28 @@ fun MediaRenderScreen(
                                 Text(resolvedTitle, color = palette.primaryText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                                 Spacer(Modifier.height(4.dp))
                                 Text(resolvedArtist, color = palette.secondaryText, fontSize = 16.sp)
+
+                                val activeAudioDevice = rememberActiveAudioDeviceCapabilities()
+                                Spacer(Modifier.height(10.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = palette.surfaceElevated,
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, palette.border)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(activeAudioDevice.deviceTypeIcon, fontSize = 13.sp)
+                                        Text(
+                                            text = "${activeAudioDevice.getLocalizedDeviceName(strings)} • $effectiveAudioQualityText",
+                                            color = palette.accent,
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
+                                }
                             }
                         }
 

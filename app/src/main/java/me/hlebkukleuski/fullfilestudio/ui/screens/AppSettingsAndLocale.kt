@@ -17,7 +17,16 @@
 
 package me.hlebkukleuski.fullfilestudio.ui.theme
 
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -52,6 +61,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -83,7 +93,7 @@ enum class AppLanguage(val code: String, val nativeName: String, val flagEmoji: 
     ES("es", "Español", "🇪🇸"),
     FR("fr", "Français", "🇫🇷"),
     PL("pl", "Polski", "🇵🇱"),
-    UK("uk", "Українська", "🇺🇦"),
+    UK("uk", "Суржик", "🇺🇦"),
     ZH("zh", "中文", "🇨🇳");
 
     companion object {
@@ -113,6 +123,19 @@ enum class AppFrameRateMode(val id: String, val fps: Float) {
 
     companion object {
         fun fromId(id: String?): AppFrameRateMode {
+            return entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: AUTO
+        }
+    }
+}
+
+enum class AppAudioQualityMode(val id: String, val sampleRateHz: Int, val bitDepth: Int) {
+    AUTO("auto", 0, 0),
+    STUDIO_96("96k", 96000, 24),
+    HIGH_48("48k", 48000, 16),
+    STANDARD_44("44k", 44100, 16);
+
+    companion object {
+        fun fromId(id: String?): AppAudioQualityMode {
             return entries.firstOrNull { it.id.equals(id, ignoreCase = true) } ?: AUTO
         }
     }
@@ -257,6 +280,16 @@ data class AppStrings(
     val frameRate90: String = "90 Hz",
     val frameRate60: String = "60 Hz (Power Saver)",
     val frameRate25: String = "25 Hz (Ultra Battery Saver)",
+    val audioQualityLabel: String = "Audio Playback Quality",
+    val audioQualityAutoPattern: String = "Device Max (%s: %d kHz, %s)",
+    val audioQuality96: String = "96 kHz / 24-bit (Studio Quality)",
+    val audioQuality48: String = "48 kHz / 16-bit (High Quality)",
+    val audioQuality44: String = "44.1 kHz / 16-bit (Standard)",
+    val audioDeviceSpeaker: String = "Phone Speaker",
+    val audioDeviceWired: String = "Wired Headphones / Aux",
+    val audioDeviceBluetooth: String = "Bluetooth Headphones / Speaker",
+    val audioDeviceUsbDac: String = "USB DAC / Sound Card",
+    val audioDeviceGeneric: String = "Audio Device",
     val retryDownloadButton: String = "Retry Download",
     val openAsInBrowserButton: String = "🌐 Open as in Browser",
     val viewHtmlSourceButton: String = "📄 View Source",
@@ -290,6 +323,23 @@ data class AppStrings(
     fun localizedFrameRateAuto(maxHz: Int): String = when (frameRateAutoPattern) {
         "Максимум что может твой телефон (%d Гц)" -> "Максимум что может твой телефон ($maxHz Гц)"
         else -> String.format(Locale.US, frameRateAutoPattern, maxHz)
+    }
+
+    fun localizedAudioQualityAuto(activeDevice: ActiveAudioDeviceCapabilities): String {
+        val devName = activeDevice.getLocalizedDeviceName(this)
+        val fmtDesc = activeDevice.getLocalizedFormatDescription()
+        val rateKhz = activeDevice.maxSampleRateHz / 1000
+        return try {
+            if (audioQualityAutoPattern.contains("%s") && audioQualityAutoPattern.contains("%d")) {
+                String.format(Locale.US, audioQualityAutoPattern, devName, rateKhz, fmtDesc)
+            } else if (audioQualityAutoPattern.contains("%s")) {
+                String.format(Locale.US, audioQualityAutoPattern, devName)
+            } else {
+                "$audioQualityLabel ($devName: $rateKhz kHz)"
+            }
+        } catch (_: Exception) {
+            "$devName ($rateKhz kHz, $fmtDesc)"
+        }
     }
 }
 
@@ -453,6 +503,16 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         frameRateAutoPattern = "Максимум что может твой телефон (%d Гц)",
         frameRate60 = "60 Гц (Экономия батареи)",
         frameRate25 = "25 Гц (Супер-экономия / Чтение)",
+        audioQualityLabel = "Качество воспроизведения аудио",
+        audioQualityAutoPattern = "Максимум устройства (%s: %d кГц, %s)",
+        audioQuality96 = "96 кГц / 24 бита (Студийное качество)",
+        audioQuality48 = "48 кГц / 16 бит (Высокое качество)",
+        audioQuality44 = "44.1 кГц / 16 бит (Стандартное качество)",
+        audioDeviceSpeaker = "Динамик телефона",
+        audioDeviceWired = "Проводные наушники / Aux",
+        audioDeviceBluetooth = "Bluetooth-наушники / Колонка",
+        audioDeviceUsbDac = "USB ЦАП / Внешняя карта",
+        audioDeviceGeneric = "Аудиоустройство",
         termsOfUseLink = "1. Условия использования (Terms of Use)",
         privacyPolicyLink = "2. Политика конфиденциальности (Privacy Policy)",
         thirdPartyLicensesLink = "3. Сторонние компоненты и лицензии",
@@ -554,6 +614,16 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         frameRateAutoPattern = "Das absolute Maximum, das dein Handy schafft (%d Hz)",
         frameRate60 = "60 Hz (Energiesparmodus)",
         frameRate25 = "25 Hz (Super-Energiesparmodus / Lesen)",
+        audioQualityLabel = "Wiedergabequalität (Audio)",
+        audioQualityAutoPattern = "Geräte-Maximum (%s: %d kHz, %s)",
+        audioQuality96 = "96 kHz / 24-Bit (Studio-Qualität)",
+        audioQuality48 = "48 kHz / 16-Bit (Hohe Qualität)",
+        audioQuality44 = "44,1 kHz / 16-Bit (Standard-Qualität)",
+        audioDeviceSpeaker = "Smartphone-Lautsprecher",
+        audioDeviceWired = "Kabel-Kopfhörer / Aux",
+        audioDeviceBluetooth = "Bluetooth-Kopfhörer / Lautsprecher",
+        audioDeviceUsbDac = "USB-DAC / Externe Soundkarte",
+        audioDeviceGeneric = "Audiogerät",
         termsOfUseLink = "1. Nutzungsbedingungen (Terms of Use)",
         privacyPolicyLink = "2. Datenschutzerklärung (Privacy Policy)",
         thirdPartyLicensesLink = "3. Drittanbieter-Lizenzen",
@@ -655,6 +725,16 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         frameRateAutoPattern = "Lo máximo que aguanta tu teléfono (%d Hz)",
         frameRate60 = "60 Hz (Ahorro de batería)",
         frameRate25 = "25 Hz (Súper ahorro / Lectura)",
+        audioQualityLabel = "Calidad de reproducción de audio",
+        audioQualityAutoPattern = "Máximo del dispositivo (%s: %d kHz, %s)",
+        audioQuality96 = "96 kHz / 24 bits (Calidad de estudio)",
+        audioQuality48 = "48 kHz / 16 bits (Alta calidad)",
+        audioQuality44 = "44,1 kHz / 16 bits (Estándar)",
+        audioDeviceSpeaker = "Altavoz del teléfono",
+        audioDeviceWired = "Auriculares con cable / Aux",
+        audioDeviceBluetooth = "Auriculares Bluetooth / Altavoz",
+        audioDeviceUsbDac = "DAC USB / Tarjeta externa",
+        audioDeviceGeneric = "Dispositivo de audio",
         termsOfUseLink = "1. Condiciones de uso (Terms of Use)",
         privacyPolicyLink = "2. Política de privacidad (Privacy Policy)",
         thirdPartyLicensesLink = "3. Licencias de terceros",
@@ -756,6 +836,16 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         frameRateAutoPattern = "Le maximum absolu que ton téléphone peut donner (%d Hz)",
         frameRate60 = "60 Hz (Économie d'énergie)",
         frameRate25 = "25 Hz (Super économie / Lecture)",
+        audioQualityLabel = "Qualité de lecture audio",
+        audioQualityAutoPattern = "Maximum de l'appareil (%s : %d kHz, %s)",
+        audioQuality96 = "96 kHz / 24 bits (Qualité studio)",
+        audioQuality48 = "48 kHz / 16 bits (Haute qualité)",
+        audioQuality44 = "44,1 kHz / 16 bits (Qualité standard)",
+        audioDeviceSpeaker = "Haut-parleur du téléphone",
+        audioDeviceWired = "Casque filaire / Aux",
+        audioDeviceBluetooth = "Casque Bluetooth / Enceinte",
+        audioDeviceUsbDac = "DAC USB / Carte externe",
+        audioDeviceGeneric = "Périphérique audio",
         termsOfUseLink = "1. Conditions d'utilisation (Terms of Use)",
         privacyPolicyLink = "2. Politique de confidentialité (Privacy Policy)",
         thirdPartyLicensesLink = "3. Licences tierces",
@@ -857,6 +947,16 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         frameRateAutoPattern = "Maksimum, ile wyciągnie Twój telefon (%d Hz)",
         frameRate60 = "60 Hz (Oszczędzanie baterii)",
         frameRate25 = "25 Hz (Super oszczędzanie / Czytanie)",
+        audioQualityLabel = "Jakość odtwarzania dźwięku",
+        audioQualityAutoPattern = "Maksimum urządzenia (%s: %d kHz, %s)",
+        audioQuality96 = "96 kHz / 24-bit (Jakość studyjna)",
+        audioQuality48 = "48 kHz / 16-bit (Wysoka jakość)",
+        audioQuality44 = "44.1 kHz / 16-bit (Jakość standardowa)",
+        audioDeviceSpeaker = "Głośnik telefonu",
+        audioDeviceWired = "Słuchawki przewodowe / Aux",
+        audioDeviceBluetooth = "Słuchawki Bluetooth / Głośnik",
+        audioDeviceUsbDac = "USB DAC / Karta zewnętrzna",
+        audioDeviceGeneric = "Urządzenie audio",
         termsOfUseLink = "1. Warunki korzystania (Terms of Use)",
         privacyPolicyLink = "2. Polityka prywatności (Privacy Policy)",
         thirdPartyLicensesLink = "3. Licencje komponentów zewnętrznych",
@@ -898,104 +998,114 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
     )
     AppLanguage.UK -> AppStrings(
         appName = "FullFileStudio",
-        universalReaderSubtitle = "Універсальний безпечний рідер файлів",
-        openFileSaf = "Відкрити файл",
-        selectLanguageTitle = "Оберіть мову застосунку",
-        selectLanguageSubtitle = "Ви зможете змінити мову та тему будь-коли у висувному меню.",
-        continueButton = "Продовжити",
-        settingsMenuTitle = "Налаштування та вигляд",
+        universalReaderSubtitle = "Універсальний і бєзопасний рідєр файлів",
+        openFileSaf = "Одкрити файл",
+        selectLanguageTitle = "Вибирай мову приложєнія",
+        selectLanguageSubtitle = "Мову і тему мошно поміняти в любий момент у боковому меню.",
+        continueButton = "Погнали дальше",
+        settingsMenuTitle = "Настройки і зовнішній вид",
         languageLabel = "Мова інтерфейсу",
-        themeLabel = "Тема оформлення",
-        themeDark = "Темна",
-        themeLight = "Світла",
-        themeAsInPhone = "Як у телефоні",
-        engineCenterSubtitle = "Підтримувані формати та додаткові модулі",
-        builtinFormatsDescription = "Вже вбудовані: PDF, DjVu, шрифти (TTF, OTF, TTC, WOFF, WOFF2), зображення (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), текст і код (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), бази даних (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), прев'ю (MAX, RVT, INDD), аудіо та відео (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) та HEX.",
-        selectOptionalModulesPrompt = "Оберіть додаткові модулі Google Play:",
-        downloadAllOneClick = "⚡ Завантажити все одним кліком",
-        installSelectedPrefix = "Встановити обрані",
-        workLightweightCoreOnly = "Працювати налегке (Лише базові)",
-        moduleReady = "✓ Готовий",
+        themeLabel = "Тема оформлєнія",
+        themeDark = "Тьомна",
+        themeLight = "Свєтла",
+        themeAsInPhone = "Як у тєлєфоні",
+        engineCenterSubtitle = "Поддержувальні формати і доп-модулі",
+        builtinFormatsDescription = "Уже встроєні: PDF, DjVu, шрифти (TTF, OTF, TTC, WOFF, WOFF2), картиночки (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), текст і код (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), бази данних (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), прев'юшки (MAX, RVT, INDD), музочка і відоси (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) та HEX.",
+        selectOptionalModulesPrompt = "Вибирай доп-модулі з Google Play:",
+        downloadAllOneClick = "⚡ Скачати все в один клік",
+        installSelectedPrefix = "Установити вибранне",
+        workLightweightCoreOnly = "Робити налєгкє (Тільки базова основа)",
+        moduleReady = "✓ Готово",
         mbSuffix = "МБ",
         playModuleBadge = "📦 МОДУЛЬ GOOGLE PLAY",
-        playModuleRequiredTitle = "Потрібен модуль",
-        playModuleRequiredDesc = "Щоб прочитати цей файл, нам потрібно завантажити модуль для таких типів файлів із серверів Google Play. Ось які можливості це дасть:",
-        playModuleOpensFormatsPrefix = "Відкриття цих форматів:",
-        downloadModuleBtn = "Завантажити модуль",
-        cancelBtn = "Скасувати",
+        playModuleRequiredTitle = "Надо модуль",
+        playModuleRequiredDesc = "Шоб одкрити цей файл, надо скачати модуль для таких типів файлів з сервєрів Google Play. Ось шо воно дасть:",
+        playModuleOpensFormatsPrefix = "Одкриває оци формати:",
+        downloadModuleBtn = "Скачати модуль",
+        cancelBtn = "Отмєна",
         closeBtn = "Закрити",
-        openInHexBtn = "Відкрити в HEX",
-        securityBadge = "🔒 БЕЗПЕКА ТА ДОСТУП",
-        formatErrorBadge = "🛠 ДІАГНОСТИКА СТРУКТУРИ ФАЙЛУ",
+        openInHexBtn = "Одкрити в HEX",
+        securityBadge = "🔒 БЄЗОПАСНОСТЬ І ДОСТУП",
+        formatErrorBadge = "🛠 ДІАГНОСТИКА СТРУКТУРИ ФАЙЛА",
         closedLicenseBadge = "⚖️ ОБМЕЖЕННЯ ЗАКРИТОЇ ЛІЦЕНЗІЇ",
-        passwordRequiredBadge = "🔑 ПОТРІБЕН ПАРОЛЬ",
-        accessRestrictedTitle = "Обмеження доступу або безпеки",
-        formatReadErrorTitle = "Помилка читання структури файлу",
-        closedLicenseTitle = "Формат захищено закритою ліцензією",
-        passwordRequiredTitle = "Документ зашифровано",
-        hexFallbackHint = "Ви можете безпечно переглянути сирі байти цього файлу в інженерному HEX-інспекторі.",
-        archiveContentsTitle = "Вміст архіву / образу",
+        passwordRequiredBadge = "🔑 НАДО ПАРОЛЬ",
+        accessRestrictedTitle = "Ограничєніє доступу або бєзопасності",
+        formatReadErrorTitle = "Ошибочка читання структури файла",
+        closedLicenseTitle = "Формат защищон закритою ліцензією",
+        passwordRequiredTitle = "Документ зашифрований",
+        hexFallbackHint = "Мошно бєзопасно посмотрєти сирі байти цього файла в інженерному HEX-інспекторі.",
+        archiveContentsTitle = "Содержиме архіва / образа",
         backButton = "← Назад",
-        archiveEmptyMessage = "Архів порожній або структуру пошкоджено",
-        searchButton = "🔍 Пошук",
+        archiveEmptyMessage = "Архів пустий або структуру поламали",
+        searchButton = "🔍 Поіск",
         closeSearchButton = "✕ Закрити",
         searchPlaceholder = "Текст або HEX (50 4B)...",
-        findButton = "Знайти",
-        foundOnPagePrefix = "Знайдено: стор.",
-        notFoundMessage = "Збігів не знайдено",
+        findButton = "Найти",
+        foundOnPagePrefix = "Знайшли на стор.",
+        notFoundMessage = "Нічо не знайшли",
         reset3dButton = "Скинути 3D",
-        changeFileButton = "Змінити файл",
+        changeFileButton = "Поміняти файл",
         pageLabel = "Стор.",
-        preparingMedia = "Підготовка...",
-        playMedia = "▶ Відтворити",
+        preparingMedia = "Подготовка...",
+        playMedia = "▶ Грати",
         pauseMedia = "❚❚ Пауза",
-        audioLabel = "🎵 Аудіо",
-        legalComplianceTitle = "Про застосунок / Правова інформація",
-        serverEndpointStatus = "Сервер синхронізації підключено",
-        closeDrawerButton = "Закрити панель",
-        aboutLegalSectionTitle = "Про застосунок / Правова інформація",
-        frameRateLabel = "Ліміт частоти оновлення екрана",
-        frameRateAutoPattern = "Максимум що може твій телефон (%d Гц)",
+        audioLabel = "🎵 Аудіопотік",
+        legalComplianceTitle = "Про приложєніє / Інформація",
+        serverEndpointStatus = "Сервєр синхронізації подключон",
+        closeDrawerButton = "Закрити шторку",
+        aboutLegalSectionTitle = "Про приложєніє / Інформація",
+        frameRateLabel = "Ліміт частоти кадрів екрана",
+        frameRateAutoPattern = "Максимум шо може твій тєлєфон (%d Гц)",
         frameRate60 = "60 Гц (Економія батареї)",
-        frameRate25 = "25 Гц (Супер-економія / Читання)",
-        termsOfUseLink = "1. Умови використання (Terms of Use)",
-        privacyPolicyLink = "2. Політика конфіденційності (Privacy Policy)",
-        thirdPartyLicensesLink = "3. Сторонні компоненти та ліцензії",
-        thirdPartyLicensesDialogTitle = "Сторонні компоненти та ліцензії",
-        copyActionButton = "📋 Копіювати",
+        frameRate25 = "25 Гц (Супер-економія / Чітання)",
+        audioQualityLabel = "Качество аудіопотока",
+        audioQualityAutoPattern = "Максимум подключонного устройства (%s: %d кГц, %s)",
+        audioQuality96 = "96 кГц / 24-bit (Студійне качество)",
+        audioQuality48 = "48 кГц / 16-bit (Высоке качество)",
+        audioQuality44 = "44.1 кГц / 16-bit (Стандартне качество)",
+        audioDeviceSpeaker = "Динамік тєлєфона",
+        audioDeviceWired = "Проводні наушники / Aux",
+        audioDeviceBluetooth = "Bluetooth наушники / Колонка",
+        audioDeviceUsbDac = "USB ЦАП / Внєшня карта",
+        audioDeviceGeneric = "Аудіоустройство",
+        termsOfUseLink = "1. Условія використання (Terms of Use)",
+        privacyPolicyLink = "2. Політика конфідеціальності (Privacy Policy)",
+        thirdPartyLicensesLink = "3. Сторонні компоненти і ліцензії",
+        thirdPartyLicensesDialogTitle = "Сторонні компоненти і ліцензії",
+        copyActionButton = "📋 Скопірувати",
         selectAllActionButton = "Виділити все",
-        slideNotesButton = "📝 Нотатки",
-        bufferingCloudFile = "Буферизація файлу з хмари...",
+        slideNotesButton = "📝 Замєтки",
+        bufferingCloudFile = "Буферізація файла з облака...",
         defaultMediaTitle = "Аудіо / Відео файл",
-        defaultMediaArtist = "Невідомий виконавець",
-        errorDescriptorAccess = "Не вдалося отримати дескриптор файлу через системний провайдер (відсутні права доступу).",
-        errorBufferingStreamPrefix = "Помилка буферизації потоку",
-        errorSuspiciousHeader = "Підозрілу структуру заголовка файлу заблоковано.",
-        errorServiceTimeout = "Перевищено час очікування з'єднання з ізольованим сервісом рендерингу.",
-        errorServiceReconnecting = "Втрачено з'єднання з ізольованим процесом рендерингу. Відновлення...",
-        errorCorruptedOrUnsupported = "Файл пошкоджено, зашифровано або його формат не підтримується.",
-        errorFileReadPrefix = "Помилка читання файлу",
-        errorArchiveExtractFailed = "Не вдалося безпечно видобути запис з архіву",
-        errorNestedFileOpenFailed = "Не вдалося відкрити вкладений файл",
-        errorArchiveReadPrefix = "Помилка читання архіву",
-        errorHexOpenFailed = "Не вдалося відкрити файл у режимі HEX-інспектора.",
-        errorRenderFailed = "Збій рендерингу документа.",
-        bundleOfficeName = "Офісні документи, таблиці, презентації та книги",
+        defaultMediaArtist = "Неізвєстний ісполнітєль",
+        errorDescriptorAccess = "Не получилось получить дескриптор файла через системний провайдєр (нєту прав доступу).",
+        errorBufferingStreamPrefix = "Ошибочка буферізації потока",
+        errorSuspiciousHeader = "Подозрітєльну структуру заголовка файла заблокірували.",
+        errorServiceTimeout = "Превишено время жданія соєдінєнія з ізолірованним сервісом рендерінга.",
+        errorServiceReconnecting = "Потєрялося соєдінєніє з ізолірованним процесом. Восстанавливаєм...",
+        errorCorruptedOrUnsupported = "Файл пошкодьон, зашифрован або цей формат не поддержується.",
+        errorFileReadPrefix = "Ошибочка чтєнія файла",
+        errorArchiveExtractFailed = "Не получилось бєзопасно достати запись з архіва",
+        errorNestedFileOpenFailed = "Не получилось одкрити вложєнний файл",
+        errorArchiveReadPrefix = "Ошибочка чтєнія архіва",
+        errorHexOpenFailed = "Не получилось одкрити файл у режимі HEX-інспектора.",
+        errorRenderFailed = "Сбой рендерінга документа.",
+        bundleOfficeName = "Офісні документи, таблички, презентації і книжки",
         bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Векторна графіка та 3D CAD-моделі",
+        bundleCadName = "Векторна графіка і 3D CAD-модєлі",
         bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Архіви, пакети та образи дисків",
+        bundleArchivesName = "Архіви, пакєти і образи дисків",
         bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Повторити завантаження",
-        openAsInBrowserButton = "🌐 Відкрити як у браузері",
-        viewHtmlSourceButton = "📄 Вихідний код",
-        checkForUpdatesButton = "Перевірити оновлення",
-        checkingUpdatesStatus = "Перевірка оновлень...",
-        appUpToDateStatus = "✓ Встановлено останню версію",
-        updateAvailableTitle = "Доступне оновлення",
-        updateNowButton = "Оновити",
-        laterButton = "Пізніше",
-        downloadingUpdateStatus = "Завантаження оновлення..."
+        openAsInBrowserButton = "🌐 Одкрити як у браузері",
+        viewHtmlSourceButton = "📄 Ісходний код",
+        checkForUpdatesButton = "Проверити обновлєнія",
+        checkingUpdatesStatus = "Проверяєм обновлєнія...",
+        appUpToDateStatus = "✓ Установлєна сама послєдняя версія",
+        updateAvailableTitle = "Єсть обновлєніє!",
+        updateNowButton = "Обновити",
+        laterButton = "Позже",
+        downloadingUpdateStatus = "Качаєм обновлєніє..."
     )
     AppLanguage.ZH -> AppStrings(
         appName = "FullFileStudio",
@@ -1059,6 +1169,16 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         frameRateAutoPattern = "你的手机所能推到的极限频率 (%d Hz)",
         frameRate60 = "60 Hz (省电模式)",
         frameRate25 = "25 Hz (超级省电 / 阅读模式)",
+        audioQualityLabel = "音频流音质",
+        audioQualityAutoPattern = "设备最高支持 (%s: %d kHz, %s)",
+        audioQuality96 = "96 kHz / 24 位 (录音室级音质)",
+        audioQuality48 = "48 kHz / 16 位 (高清音质)",
+        audioQuality44 = "44.1 kHz / 16 位 (标准音质)",
+        audioDeviceSpeaker = "手机扬声器",
+        audioDeviceWired = "有线耳机 / Aux",
+        audioDeviceBluetooth = "蓝牙耳机 / 音响",
+        audioDeviceUsbDac = "USB DAC / 外置声卡",
+        audioDeviceGeneric = "音频设备",
         termsOfUseLink = "1. 使用条款 (Terms of Use)",
         privacyPolicyLink = "2. 隐私政策 (Privacy Policy)",
         thirdPartyLicensesLink = "3. 第三方开源组件许可",
@@ -1120,7 +1240,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "Este libro Kindle (KFX o AZW3/MOBI con DRM) está protegido por DRM criptográfico. La elusión de medidas tecnológicas de protección está prohibida por la ley (DMCA § 1201 / Directiva InfoSoc de la UE)."
             AppLanguage.FR -> "Ce livre Kindle (KFX ou AZW3/MOBI protégé par DRM) est chiffré par un verrou numérique DRM. Le contournement des mesures techniques de protection est interdit par la loi (DMCA § 1201 / Directive européenne InfoSoc)."
             AppLanguage.PL -> "Ta książka Kindle (KFX lub chroniony DRM plik AZW3/MOBI) jest zabezpieczona kryptograficznym systemem DRM. Obchodzenie technicznych zabezpieczeń (TPM/DRM) jest zabronione przez prawo (DMCA § 1201 / Dyrektywa UE InfoSoc)."
-            AppLanguage.UK -> "Цю книгу Kindle (KFX або захищений DRM примірник AZW3/MOBI) зашифровано криптографічним DRM-захистом. Обхід технічних засобів захисту авторських прав заборонено законом (DMCA § 1201 / Директива ЄС InfoSoc)."
+            AppLanguage.UK -> "Цю книжку Kindle (KFX або защищонний DRM примірник AZW3/MOBI) зашифровано криптографічно."
             AppLanguage.ZH -> "此 Kindle 电子书（KFX 或受 DRM 保护的 AZW3/MOBI）受加密数字版权管理 (DRM) 保护。根据 DMCA § 1201 和欧盟 InfoSoc 指令，禁止绕过技术保护措施。"
         }
         lower.contains("rar 5.0") || lower.contains("rar5") || lower.contains("unrar") -> when (lang) {
@@ -1130,7 +1250,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "El archivo RAR 5.0 está vacío, cifrado o su estructura de bloques está dañada."
             AppLanguage.FR -> "L'archive RAR 5.0 est vide, chiffrée ou sa structure de blocs est corrompue."
             AppLanguage.PL -> "Archiwum RAR 5.0 jest puste, zaszyfrowane lub jego struktura bloków jest uszkodzona."
-            AppLanguage.UK -> "Архів RAR 5.0 порожній, зашифрований або його блокова структура пошкоджена."
+            AppLanguage.UK -> "Архів RAR 5.0 пустий, зашифрований або його блочна структура поламалася."
             AppLanguage.ZH -> "RAR 5.0 压缩包为空、已加密或块结构已损坏。"
         }
         lower.contains("autodesk") || lower.contains("dwg") || lower.contains("3ds max") || lower.contains("revit") -> when (lang) {
@@ -1140,7 +1260,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "El contenedor CAD/BIM (.dwg / .max / .rvt) está dañado o no contiene vista previa ni geometría legible."
             AppLanguage.FR -> "Le conteneur CAO/BIM (.dwg / .max / .rvt) est corrompu ou ne contient aucun aperçu ni géométrie lisible."
             AppLanguage.PL -> "Plik CAD/BIM (.dwg / .max / .rvt) jest uszkodzony lub nie zawiera czytelnego podglądu ani geometrii."
-            AppLanguage.UK -> "Контейнер креслення або проєкту (.dwg / .max / .rvt) пошкоджено або він не містить читабельного прев'ю та геометрії."
+            AppLanguage.UK -> "Контейнер чертєжа або проєкта (.dwg / .max / .rvt) пошкодьон, усечон або не містить читаємого прев'ю."
             AppLanguage.ZH -> "CAD/BIM 容器（.dwg / .max / .rvt）已损坏，或不包含可读的预览图与几何数据。"
         }
         lower.contains("indesign") || lower.contains("onenote") || lower.contains("palmdb") || lower.contains("mobi") -> when (lang) {
@@ -1150,7 +1270,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "El contenedor del documento (.one / .indd / .mobi) está dañado, vacío o no contiene páginas legibles."
             AppLanguage.FR -> "Le conteneur de document (.one / .indd / .mobi) est corrompu, vide ou ne contient aucune page lisible."
             AppLanguage.PL -> "Kontener dokumentu (.one / .indd / .mobi) jest uszkodzony, pusty lub nie zawiera czytelnych stron."
-            AppLanguage.UK -> "Контейнер документа (.one / .indd / .mobi) пошкоджено, порожній або не містить читабельних сторінок."
+            AppLanguage.UK -> "Контейнер документа (.one / .indd / .mobi) пошкодьон, пустий або не містить читаємих сторінок."
             AppLanguage.ZH -> "文档容器（.one / .indd / .mobi）已损坏、为空或不包含可读页面。"
         }
         lower.contains("font") || lower.contains("sfnt") || lower.contains("ttf") || lower.contains("otf") || lower.contains("woff") -> when (lang) {
@@ -1160,7 +1280,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "El archivo de fuente (.ttf / .otf / .ttc / .woff) está dañado o no contiene tablas de glifos SFNT válidas."
             AppLanguage.FR -> "Le fichier de police (.ttf / .otf / .ttc / .woff) est corrompu ou ne contient aucune table de glyphes SFNT valide."
             AppLanguage.PL -> "Plik czcionki (.ttf / .otf / .ttc / .woff) jest uszkodzony lub nie zawiera prawidłowych tabel glifów SFNT."
-            AppLanguage.UK -> "Файл шрифту (.ttf / .otf / .ttc / .woff) пошкоджено або він не містить коректних таблиць гліфів SFNT."
+            AppLanguage.UK -> "Файл шрифта (.ttf / .otf / .ttc / .woff) пошкодьон, усечон або не містить правилних таблиць."
             AppLanguage.ZH -> "字体文件（.ttf / .otf / .ttc / .woff）已损坏或不包含有效的 SFNT 字形表。"
         }
         lower.contains("djvu") || lower.contains("gplv2") -> when (lang) {
@@ -1170,7 +1290,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "El documento DjVu está dañado o no contiene páginas legibles."
             AppLanguage.FR -> "Le document DjVu est corrompu ou ne contient aucune page lisible."
             AppLanguage.PL -> "Dokument DjVu jest uszkodzony lub nie zawiera czytelnych stron."
-            AppLanguage.UK -> "Документ DjVu пошкоджено або він не містить читабельних сторінок."
+            AppLanguage.UK -> "Документ DjVu пошкодьон або не містить читаємих сторінок."
             AppLanguage.ZH -> "DjVu 文档已损坏或不包含可读页面。"
         }
         lower.contains("xxe") || lower.contains("dtd") -> when (lang) {
@@ -1180,7 +1300,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "Intento de ataque XXE bloqueado (las entidades XML externas y DTD están prohibidas)."
             AppLanguage.FR -> "Tentative d'attaque XXE bloquée (les entités XML externes et DTD sont interdites)."
             AppLanguage.PL -> "Zablokowano próbę ataku XXE (zewnętrzne encje XML i DTD są zabronione)."
-            AppLanguage.UK -> "Заблоковано спробу XXE-атаки (зовнішні XML-сутності та DTD заборонені)."
+            AppLanguage.UK -> "Заблокіровано спробу XXE-атаки (внєшні XML-сущності і DTD запрєщєні)."
             AppLanguage.ZH -> "已拦截潜在的 XXE 注入攻击（禁止外部 XML 实体和 DTD）。"
         }
         lower.contains("внешний ресурс") || lower.contains("data:image") -> when (lang) {
@@ -1190,7 +1310,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "Recurso <image> externo bloqueado por seguridad (solo se permiten recursos data:image incrustados)."
             AppLanguage.FR -> "Ressource <image> externe bloquée par la politique de sécurité (seules les ressources data:image intégrées sont autorisées)."
             AppLanguage.PL -> "Zewnętrzny zasób <image> zablokowany przez politykę bezpieczeństwa (dozwolone są tylko osadzone zasoby data:image)."
-            AppLanguage.UK -> "Зовнішній ресурс <image> заблоковано політикою безпеки (дозволені лише вбудовані ресурси data:image)."
+            AppLanguage.UK -> "Внєшній ресурс <image> заблокіровано політикою бєзопасності (дозволені тільки встроєні data:image)."
             AppLanguage.ZH -> "安全策略已拦截外部 <image> 资源（仅允许内嵌 data:image 资源）。"
         }
         lower.contains("pe/mach-o") || lower.contains("машинный код") || lower.contains("machine code") || lower.contains("executable") -> when (lang) {
@@ -1200,7 +1320,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "Se detectó un encabezado binario ejecutable. La ejecución directa está bloqueada por seguridad."
             AppLanguage.FR -> "En-tête binaire exécutable détecté. L'exécution directe est bloquée par sécurité."
             AppLanguage.PL -> "Wykryto wykonywalny nagłówek binarny. Bezpośrednie wykonanie zostało zablokowane."
-            AppLanguage.UK -> "Виявлено виконуваний бінарний заголовок. Пряме виконання заблоковано політикою безпеки."
+            AppLanguage.UK -> "Знайшли ісполняємий бінарний заголовок. Пряме ісполнєніє заблокіровано політикою бєзопасності."
             AppLanguage.ZH -> "检测到可执行二进制文件头，安全策略已阻止直接执行。"
         }
         lower.contains("полиглот") || lower.contains("polyglot") -> when (lang) {
@@ -1210,7 +1330,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "Se detectó un contenedor políglota dentro del encabezado PDF."
             AppLanguage.FR -> "Conteneur polyglotte détecté dans l'en-tête PDF."
             AppLanguage.PL -> "Wykryto wstrzyknięcie kontenera poligloty w nagłówku PDF."
-            AppLanguage.UK -> "Виявлено поліглот-контейнер усередині заголовка PDF."
+            AppLanguage.UK -> "Знайшли поліглот-контейнер усередині заголовка PDF."
             AppLanguage.ZH -> "在 PDF 文件头中检测到多态容器注入。"
         }
         lower.contains("zip bomb") || lower.contains("zip-бомб") || lower.contains("лимит распаковки") || lower.contains("лимит декомпрессии") || lower.contains("предел извлечения") || lower.contains("extraction limit") -> when (lang) {
@@ -1220,7 +1340,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "Extracción cancelada: se superó el límite seguro de descomposición (protección contra bombas Zip)."
             AppLanguage.FR -> "Extraction interrompue : limite de décompression sécurisée dépassée (protection Zip Bomb)."
             AppLanguage.PL -> "Przerwano wypakowywanie: przekroczono bezpieczny limit dekompresji (ochrona przed Zip Bomb)."
-            AppLanguage.UK -> "Видобування перервано: перевищено безпечний ліміт розпакування (захист від Zip-бомб)."
+            AppLanguage.UK -> "Распаковка прервана: превишено бєзопасний ліміт распаковки (защита від Zip-бомб)."
             AppLanguage.ZH -> "提取已中止：超出安全解压限制（Zip 炸弹防护）。"
         }
         rawMessage.startsWith("PASSWORD_REQUIRED") || lower.contains("password protected") || lower.contains("защищён паролем") || lower.contains("защищена паролем") || lower.contains("защищён шифрованием") || lower.contains("is encrypted") -> when (lang) {
@@ -1230,7 +1350,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "Este documento o archivo está protegido con contraseña o cifrado."
             AppLanguage.FR -> "Ce document ou cette archive est protégé par mot de passe ou chiffré."
             AppLanguage.PL -> "Ten dokument lub archiwum jest chronione hasłem lub zaszyfrowane."
-            AppLanguage.UK -> "Документ або архів захищено паролем чи шифруванням доступу."
+            AppLanguage.UK -> "Документ або архів защищон паролєм чи шифрованієм доступу."
             AppLanguage.ZH -> "此文档或压缩包受密码保护或已加密。"
         }
         lower.contains("не найдено листов") || lower.contains("no data sheets") || lower.contains("missing workbook") -> when (lang) {
@@ -1240,7 +1360,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "No se encontraron hojas de datos legibles en el libro de cálculo."
             AppLanguage.FR -> "Aucune feuille de calcul lisible n'a été trouvée dans le classeur."
             AppLanguage.PL -> "W skoroszycie nie znaleziono arkuszy z danymi."
-            AppLanguage.UK -> "У книзі таблиці не знайдено аркушів із даними."
+            AppLanguage.UK -> "У книжці таблички не знайшли листи з даними."
             AppLanguage.ZH -> "在电子表格工作簿中未找到可读的数据工作表。"
         }
         lower.contains("слайдов") || lower.contains("presentation.xml") || lower.contains("no slides") || lower.contains("powerpoint document") -> when (lang) {
@@ -1250,7 +1370,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "No se encontraron diapositivas legibles en la presentación."
             AppLanguage.FR -> "Aucune diapositive lisible n'a été trouvée dans la présentation."
             AppLanguage.PL -> "W prezentacji nie znaleziono czytelnych slajdów."
-            AppLanguage.UK -> "У презентації не знайдено читабельних слайдів."
+            AppLanguage.UK -> "У презентації не знайшли читаємих слайдів."
             AppLanguage.ZH -> "在演示文稿中未找到可读的幻灯片。"
         }
         lower.contains("в архиве не найдено") || lower.contains("оглавление повреждено") || lower.contains("архива пуст") || lower.contains("формат архива") -> when (lang) {
@@ -1260,7 +1380,7 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.ES -> "El archivo comprimido está vacío o su índice está dañado."
             AppLanguage.FR -> "L'archive est vide ou son répertoire central est corrompu."
             AppLanguage.PL -> "Archiwum jest puste lub spis treści jest uszkodzony."
-            AppLanguage.UK -> "В архіві не знайдено файлів або зміст пошкоджено."
+            AppLanguage.UK -> "В архіві не знайшли файлів або оглавлєніє поламалося."
             AppLanguage.ZH -> "压缩包为空或目录结构已损坏。"
         }
         lower.contains("3d/cad") || lower.contains("геометрии") || lower.contains("бинарный stl") || lower.contains("gltf") || lower.contains("glb") || lower.contains("blender") || lower.contains("usdz") || lower.contains("fbx") -> when (lang) {
@@ -1334,6 +1454,11 @@ class AppSettingsManager(context: Context) {
     )
     val frameRateMode: StateFlow<AppFrameRateMode> = _frameRateMode.asStateFlow()
 
+    private val _audioQualityMode = MutableStateFlow(
+        AppAudioQualityMode.fromId(prefs.getString("app_audio_quality_mode", AppAudioQualityMode.AUTO.id))
+    )
+    val audioQualityMode: StateFlow<AppAudioQualityMode> = _audioQualityMode.asStateFlow()
+
     private val _isInitialLanguageChosen = MutableStateFlow(
         prefs.getBoolean("initial_language_chosen", false)
     )
@@ -1358,10 +1483,16 @@ class AppSettingsManager(context: Context) {
         prefs.edit().putString("app_frame_rate_mode", mode.id).apply()
         _frameRateMode.value = mode
     }
+
+    fun setAudioQualityMode(mode: AppAudioQualityMode) {
+        prefs.edit().putString("app_audio_quality_mode", mode.id).apply()
+        _audioQualityMode.value = mode
+    }
 }
 
 val LocalAppPalette = staticCompositionLocalOf { DarkPalette }
 val LocalAppStrings = staticCompositionLocalOf { stringsForLanguage(AppLanguage.EN) }
+val LocalAppSettingsManager = staticCompositionLocalOf<AppSettingsManager?> { null }
 
 @Composable
 fun FullFileStudioTheme(
@@ -1405,7 +1536,8 @@ fun FullFileStudioTheme(
 
     CompositionLocalProvider(
         LocalAppPalette provides palette,
-        LocalAppStrings provides strings
+        LocalAppStrings provides strings,
+        LocalAppSettingsManager provides settingsManager
     ) {
         MaterialTheme(
             colorScheme = colorScheme,
@@ -1671,6 +1803,243 @@ fun FrameRateDropdownSelector(
     }
 }
 
+enum class AudioDeviceCategory { SPEAKER, WIRED, BLUETOOTH, USB_DAC, GENERIC }
+
+data class ActiveAudioDeviceCapabilities(
+    val category: AudioDeviceCategory,
+    val rawProductName: String,
+    val deviceTypeIcon: String,
+    val maxSampleRateHz: Int,
+    val maxBitDepth: Int
+) {
+    fun getLocalizedDeviceName(strings: AppStrings): String = when (category) {
+        AudioDeviceCategory.SPEAKER -> strings.audioDeviceSpeaker
+        AudioDeviceCategory.WIRED -> strings.audioDeviceWired
+        AudioDeviceCategory.BLUETOOTH -> strings.audioDeviceBluetooth
+        AudioDeviceCategory.USB_DAC -> strings.audioDeviceUsbDac
+        AudioDeviceCategory.GENERIC -> rawProductName.ifBlank { strings.audioDeviceGeneric }
+    }
+
+    fun getLocalizedFormatDescription(): String = "$maxBitDepth-bit / ${maxSampleRateHz / 1000} kHz"
+}
+
+object AudioDeviceCapabilitiesDetector {
+
+    fun detectActiveAudioDevice(context: Context): ActiveAudioDeviceCapabilities {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            ?: return ActiveAudioDeviceCapabilities(AudioDeviceCategory.SPEAKER, "", "🔊", 48000, 16)
+
+        var category = AudioDeviceCategory.SPEAKER
+        var rawName = ""
+        var bestIcon = "🔊"
+        var maxSampleRate = 48000
+        var maxBitDepth = 16
+
+        try {
+            val devices = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            val activeDevice = devices.firstOrNull { dev ->
+                dev.type in setOf(
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                    AudioDeviceInfo.TYPE_LINE_ANALOG,
+                    AudioDeviceInfo.TYPE_LINE_DIGITAL,
+                    AudioDeviceInfo.TYPE_USB_DEVICE,
+                    AudioDeviceInfo.TYPE_USB_HEADSET,
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    AudioDeviceInfo.TYPE_HEARING_AID
+                ) || dev.type == 26 || dev.type == 27
+            } ?: devices.firstOrNull { dev ->
+                dev.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER || dev.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE
+            }
+
+            if (activeDevice != null) {
+                rawName = activeDevice.productName.toString()
+                when (activeDevice.type) {
+                    AudioDeviceInfo.TYPE_WIRED_HEADSET,
+                    AudioDeviceInfo.TYPE_WIRED_HEADPHONES,
+                    AudioDeviceInfo.TYPE_LINE_ANALOG,
+                    AudioDeviceInfo.TYPE_LINE_DIGITAL -> {
+                        category = AudioDeviceCategory.WIRED
+                        bestIcon = "🎧"
+                    }
+                    AudioDeviceInfo.TYPE_USB_DEVICE,
+                    AudioDeviceInfo.TYPE_USB_HEADSET -> {
+                        category = AudioDeviceCategory.USB_DAC
+                        bestIcon = "🔌"
+                    }
+                    AudioDeviceInfo.TYPE_BLUETOOTH_A2DP,
+                    AudioDeviceInfo.TYPE_HEARING_AID,
+                    26, 27 -> {
+                        category = AudioDeviceCategory.BLUETOOTH
+                        bestIcon = "📻"
+                    }
+                    AudioDeviceInfo.TYPE_BUILTIN_SPEAKER,
+                    AudioDeviceInfo.TYPE_BUILTIN_EARPIECE -> {
+                        category = AudioDeviceCategory.SPEAKER
+                        bestIcon = "🔊"
+                    }
+                    else -> {
+                        category = AudioDeviceCategory.GENERIC
+                        bestIcon = "🎧"
+                    }
+                }
+
+                val rates = activeDevice.sampleRates
+                if (rates != null && rates.isNotEmpty()) {
+                    maxSampleRate = rates.maxOrNull()?.coerceAtLeast(44100) ?: 48000
+                }
+
+                val encodings = activeDevice.encodings
+                if (encodings != null && encodings.isNotEmpty()) {
+                    if (encodings.contains(AudioFormat.ENCODING_PCM_FLOAT) || encodings.contains(AudioFormat.ENCODING_PCM_24BIT_PACKED) || encodings.contains(AudioFormat.ENCODING_PCM_32BIT)) {
+                        maxBitDepth = 24
+                    }
+                }
+            }
+        } catch (_: Throwable) {}
+
+        if (maxSampleRate <= 48000) {
+            val propRate = audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)?.toIntOrNull()
+            if (propRate != null && propRate > maxSampleRate) {
+                maxSampleRate = propRate
+            }
+        }
+
+        return ActiveAudioDeviceCapabilities(
+            category = category,
+            rawProductName = rawName,
+            deviceTypeIcon = bestIcon,
+            maxSampleRateHz = maxSampleRate,
+            maxBitDepth = maxBitDepth
+        )
+    }
+}
+
+@Composable
+fun rememberActiveAudioDeviceCapabilities(): ActiveAudioDeviceCapabilities {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var activeDevice by remember {
+        mutableStateOf(AudioDeviceCapabilitiesDetector.detectActiveAudioDevice(context))
+    }
+
+    DisposableEffect(context) {
+        val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val updateDevice = {
+            activeDevice = AudioDeviceCapabilitiesDetector.detectActiveAudioDevice(context)
+        }
+
+        val callback = object : AudioDeviceCallback() {
+            override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) {
+                updateDevice()
+            }
+
+            override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) {
+                updateDevice()
+            }
+        }
+
+        audioManager?.registerAudioDeviceCallback(callback, Handler(Looper.getMainLooper()))
+
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                updateDevice()
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+            addAction(Intent.ACTION_HEADSET_PLUG)
+            addAction("android.bluetooth.device.action.ACL_CONNECTED")
+            addAction("android.bluetooth.device.action.ACL_DISCONNECTED")
+        }
+        context.registerReceiver(receiver, filter)
+
+        onDispose {
+            audioManager?.unregisterAudioDeviceCallback(callback)
+            try { context.unregisterReceiver(receiver) } catch (_: Throwable) {}
+        }
+    }
+
+    return activeDevice
+}
+
+@Composable
+fun AudioQualityDropdownSelector(
+    currentMode: AppAudioQualityMode,
+    onModeSelected: (AppAudioQualityMode) -> Unit
+) {
+    val palette = LocalAppPalette.current
+    val strings = LocalAppStrings.current
+    val activeDevice = rememberActiveAudioDeviceCapabilities()
+    var expanded by remember { mutableStateOf(false) }
+
+    fun localizedModeName(mode: AppAudioQualityMode): String = when (mode) {
+        AppAudioQualityMode.AUTO -> strings.localizedAudioQualityAuto(activeDevice)
+        AppAudioQualityMode.STUDIO_96 -> strings.audioQuality96
+        AppAudioQualityMode.HIGH_48 -> strings.audioQuality48
+        AppAudioQualityMode.STANDARD_44 -> strings.audioQuality44
+    }
+
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = true },
+            shape = RoundedCornerShape(12.dp),
+            color = palette.surfaceElevated,
+            border = BorderStroke(1.dp, palette.border)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(text = activeDevice.deviceTypeIcon, fontSize = 16.sp)
+                    Text(
+                        text = localizedModeName(currentMode),
+                        color = palette.primaryText,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                }
+                Text(text = "▼", color = palette.secondaryText, fontSize = 11.sp)
+            }
+        }
+
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(palette.surfaceElevated)
+        ) {
+            val availableModes = remember(activeDevice) {
+                AppAudioQualityMode.entries.filter { mode ->
+                    mode == AppAudioQualityMode.AUTO || mode.sampleRateHz <= activeDevice.maxSampleRateHz
+                }
+            }
+            availableModes.forEach { mode ->
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            text = localizedModeName(mode),
+                            color = if (mode == currentMode) palette.accent else palette.primaryText,
+                            fontWeight = if (mode == currentMode) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    onClick = {
+                        onModeSelected(mode)
+                        expanded = false
+                    }
+                )
+            }
+        }
+    }
+}
+
 @Composable
 fun AppSettingsDrawerSheet(
     settingsManager: AppSettingsManager,
@@ -1684,6 +2053,7 @@ fun AppSettingsDrawerSheet(
     val currentLanguage by settingsManager.language.collectAsState()
     val currentThemeMode by settingsManager.themeMode.collectAsState()
     val currentFrameRateMode by settingsManager.frameRateMode.collectAsState()
+    val currentAudioQualityMode by settingsManager.audioQualityMode.collectAsState()
     val uriHandler = LocalUriHandler.current
     var showLicensesDialog by remember { mutableStateOf(false) }
 
@@ -1736,6 +2106,20 @@ fun AppSettingsDrawerSheet(
             FrameRateDropdownSelector(
                 currentMode = currentFrameRateMode,
                 onModeSelected = { settingsManager.setFrameRateMode(it) }
+            )
+
+            Spacer(Modifier.height(16.dp))
+
+            Text(
+                text = strings.audioQualityLabel,
+                color = palette.secondaryText,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
+            )
+            Spacer(Modifier.height(8.dp))
+            AudioQualityDropdownSelector(
+                currentMode = currentAudioQualityMode,
+                onModeSelected = { settingsManager.setAudioQualityMode(it) }
             )
 
             Spacer(Modifier.height(24.dp))

@@ -18,11 +18,13 @@
 
 package me.hlebkukleuski.fullfilestudio
 
+import android.Manifest
 import android.app.Application
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
@@ -44,6 +46,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -1811,6 +1815,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.POST_NOTIFICATIONS), 101)
+            }
+        }
+
         OmniServerEndpoints.baseUrl = BuildConfig.SERVER_BASE_URL
         val bootstrapper = viewModel.bootstrapper
 
@@ -2674,7 +2684,7 @@ class MainActivity : ComponentActivity() {
             "heic", "heif", "hif", "avif", "avifs", "ico", "cur",
             "mp4", "mkv", "webm", "mov", "avi", "mp3", "wav", "ogg", "flac", "m4a", "aac", "opus",
             "txt", "log", "json", "xml", "md", "ini", "cfg", "yaml", "yml",
-            "html", "htm", "py", "js", "ts", "kt", "java", "c", "cpp", "h", "hpp",
+            "html", "htm", "xhtml", "mhtml", "mht", "py", "js", "ts", "kt", "java", "c", "cpp", "h", "hpp",
             "sh", "sql", "css", "properties", "toml", "gradle",
             "hex", "bin", "elf", "dex", "so", "max", "rvt", "indd"
         )

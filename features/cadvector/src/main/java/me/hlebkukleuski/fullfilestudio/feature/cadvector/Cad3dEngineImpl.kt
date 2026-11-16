@@ -4383,8 +4383,8 @@ class Stl3dMeshSession(
             }
             val panX = (tileX - 25) * 4f
             val panY = (tileY - 20) * 4f
-            val left = (width - dstW) / 2f - panX
-            val top = (height - dstH) / 2f - panY
+            val left = (width - dstW) / 2f + panX
+            val top = (height - dstH) / 2f + panY
             canvas.drawBitmap(previewBmp, null, RectF(left, top, left + dstW, top + dstH), bitmapPaint)
 
             paint.color = if (isLightTheme) LIGHT_THEME_HUD_TEXT_COLOR else DARK_THEME_HUD_TEXT_COLOR
@@ -4401,15 +4401,11 @@ class Stl3dMeshSession(
         }
 
         val extLowerForOrientation = originalExtension.lowercase(Locale.ROOT)
-        val rangeYForOrientation = (maxY - minY).let { if (it.isFinite() && it > 0f) it else 1f }
-        val rangeZForOrientation = (maxZ - minZ).let { if (it.isFinite() && it > 0f) it else 1f }
-        val isYUpFormat = extLowerForOrientation in setOf("obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx", "dae", "stl") ||
-                modelType.contains("glTF", ignoreCase = true) ||
+        val isYUp = extLowerForOrientation in setOf(
+            "obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx"
+        ) || modelType.contains("glTF", ignoreCase = true) ||
                 modelType.contains("USD", ignoreCase = true) ||
-                modelType.contains("COLLADA", ignoreCase = true) ||
-                modelType.contains("STL", ignoreCase = true)
-        val isDxfOrDwg = extLowerForOrientation in setOf("dxf", "dwg") || modelType.contains("DXF") || modelType.startsWith("DWG")
-        val isYUp = isYUpFormat || (rangeYForOrientation > rangeZForOrientation && !isDxfOrDwg && !modelType.startsWith("Blender") && !modelType.startsWith("3MF"))
+                modelType.contains("FBX", ignoreCase = true)
 
         if (vertexCount > 0) {
             try {

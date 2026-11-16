@@ -309,10 +309,13 @@ class Gles30MeshRenderer {
 
         Matrix.setLookAtM(viewMatrix, 0, 0f, 0f, eyeDist, 0f, 0f, 0f, 0f, 1f, 0f)
 
+        val isFlat2dPlan = rangeZ < maxOf(rangeX, rangeY) * 0.005f
+
         Matrix.setIdentityM(modelMatrix, 0)
-        Matrix.rotateM(modelMatrix, 0, pitchDeg, 1f, 0f, 0f)
+        // Compensate vertical pitch sign for the Y-inverted FBO projection matrix
+        Matrix.rotateM(modelMatrix, 0, -pitchDeg, 1f, 0f, 0f)
         Matrix.rotateM(modelMatrix, 0, yawDeg, 0f, 1f, 0f)
-        if (!isYUp) {
+        if (!isYUp && !isFlat2dPlan) {
             Matrix.rotateM(modelMatrix, 0, -90f, 1f, 0f, 0f)
         }
         Matrix.translateM(modelMatrix, 0, -cx, -cy, -cz)

@@ -35,8 +35,8 @@ android {
         applicationId = "me.hlebkukleuski.fullfilestudio"
         minSdk = 30
         targetSdk = 37
-        versionCode = 1
-        versionName = "0.9.0"
+        versionCode = 2
+        versionName = "0.9.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -163,16 +163,24 @@ afterEvaluate {
     val vName = appExt.defaultConfig.versionName ?: "0.9.0"
     val docsVersionFile = rootProject.file("docs/version.json")
     val docsIndexFile = rootProject.file("docs/index.html")
+    val docsChangelogFile = rootProject.file("docs/changelog.html")
     val changelogFile = rootProject.file("CHANGELOG.txt")
+    val releaseNotesFile = rootProject.file("RELEASE_NOTES.txt")
 
     val generateVersionJsonTask = tasks.register("generateVersionJson") {
         inputs.property("versionCode", vCode)
         inputs.property("versionName", vName)
         outputs.file(docsVersionFile)
         outputs.file(docsIndexFile)
+        outputs.file(docsChangelogFile)
         outputs.file(changelogFile)
 
         doLast {
+            val customRelNotes = if (releaseNotesFile.exists()) {
+                releaseNotesFile.readText().lines().firstOrNull { it.isNotBlank() }?.trim() ?: ""
+            } else ""
+            val relNotesText = if (customRelNotes.isNotEmpty()) customRelNotes else "FullFileStudio v$vName Release"
+
             if (docsVersionFile.exists()) {
                 docsVersionFile.writeText(
                     """{
@@ -181,7 +189,7 @@ afterEvaluate {
   "versionCode": $vCode,
   "versionName": "$vName",
   "apkUrl": "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-hashtagfreeinternet-release.apk",
-  "releaseNotes": "FullFileStudio v$vName Release"
+  "releaseNotes": "$relNotesText"
 }
 """
                 )
@@ -201,7 +209,7 @@ afterEvaluate {
                 val existingText = changelogFile.readText()
                 val entryPrefix = "$vName - "
                 val dateStr = SimpleDateFormat("dd.MM.yyyy", Locale.US).format(Date())
-                val newEntry = "$vName - $dateStr - FullFileStudio First Public Release"
+                val newEntry = "$vName - $dateStr - $relNotesText"
 
                 val lines = existingText.lines().toMutableList()
                 val existingIndex = lines.indexOfFirst { it.startsWith(entryPrefix) }
@@ -211,6 +219,98 @@ afterEvaluate {
                 } else {
                     changelogFile.writeText("$newEntry\n$existingText")
                 }
+            }
+
+            if (docsChangelogFile.exists() && changelogFile.exists()) {
+                val changelogLines = changelogFile.readText().lines().filter { it.isNotBlank() }
+                val cardsHtml = changelogLines.joinToString("\n\n") { line ->
+                    val parts = line.split(" - ", limit = 3)
+                    val ver = parts.getOrNull(0)?.trim() ?: ""
+                    val date = parts.getOrNull(1)?.trim() ?: ""
+                    val desc = parts.getOrNull(2)?.trim() ?: ""
+                    """        <div class="changelog-card">
+            <div>
+                <span class="version-badge">v$ver</span>
+                <span class="release-date">$date</span>
+            </div>
+            <div class="release-title">FullFileStudio v$ver Release</div>
+            <div class="release-desc">
+                $desc
+            </div>
+        </div>"""
+                }
+
+                val fullHtml = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Release History — FullFileStudio</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #101014; color: #f5f7fa; margin: 0; padding: 0; line-height: 1.6; }
+        .container { max-width: 800px; margin: 0 auto; padding: 40px 20px; text-align: left; }
+        h1 { font-size: 2.5rem; color: #00E676; margin-bottom: 10px; text-align: center; }
+        p.subtitle { font-size: 1.1rem; color: #a6adc8; margin-bottom: 30px; text-align: center; }
+        .nav-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px 20px;
+            background: #1e1e2e;
+            color: #00E676;
+            border: 1px solid #00E676;
+            border-radius: 12px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            text-decoration: none;
+            transition: all 0.2s ease;
+            margin-bottom: 28px;
+        }
+        .nav-btn:hover {
+            background: #00E676;
+            color: #101014;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 230, 118, 0.25);
+        }
+        .nav-icon { width: 18px; height: 18px; }
+        .changelog-card { background: #1e1e2e; border: 1px solid #313244; border-radius: 14px; padding: 24px; margin-bottom: 20px; }
+        .version-badge { display: inline-block; background: #00E676; color: #101014; font-weight: bold; padding: 4px 12px; border-radius: 8px; font-size: 0.95rem; margin-right: 12px; }
+        .release-date { color: #a6adc8; font-size: 0.95rem; }
+        .release-title { font-weight: bold; font-size: 1.2rem; color: #cdd6f4; margin-top: 14px; margin-bottom: 8px; }
+        .release-desc { color: #bac2de; font-size: 0.98rem; }
+        .legal-footer { margin-top: 60px; font-size: 0.9rem; color: #6c7086; border-top: 1px solid #313244; padding-top: 20px; text-align: center; }
+        .legal-footer a { color: #00E676; text-decoration: none; margin: 0 10px; transition: color 0.2s; }
+        .legal-footer a:hover { color: #00C853; text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="index.html" class="nav-btn">
+            <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="19" y1="12" x2="5" y2="12"></line>
+                <polyline points="12 19 5 12 12 5"></polyline>
+            </svg>
+            <span>Home</span>
+        </a>
+
+        <h1>Release History</h1>
+        <p class="subtitle">Complete version changelog for FullFileStudio on Android</p>
+
+$cardsHtml
+
+        <div class="legal-footer">
+            <p>Developed by Hleb Kukleuski &bull; Licensed under GNU GPL v3.0</p>
+            <p>
+                <a href="index.html">Home</a> |
+                <a href="privacy.html">Privacy Policy</a> |
+                <a href="terms.html">Terms of Service</a>
+            </p>
+        </div>
+    </div>
+</body>
+</html>
+"""
+                docsChangelogFile.writeText(fullHtml)
             }
         }
     }
@@ -234,5 +334,19 @@ afterEvaluate {
         packageUniversalTask.finalizedBy(copyUniversalApk)
         assembleReleaseTask?.finalizedBy(copyUniversalApk)
         redirectTask?.mustRunAfter(copyUniversalApk)
+    }
+
+    val bundleGooglePlayReleaseTask = tasks.findByName("bundleGooglePlayRelease")
+    if (bundleGooglePlayReleaseTask != null) {
+        val targetAabDir = layout.buildDirectory.dir("outputs/bundle/googlePlayRelease").get().asFile
+        val copyGooglePlayAab = tasks.register<Copy>("copyGooglePlayReleaseAab") {
+            from(targetAabDir) {
+                include("app-googlePlay-release.aab")
+            }
+            into(targetAabDir)
+            rename { "fullfilestudio-v${vName}-googlePlay-release.aab" }
+        }
+        bundleGooglePlayReleaseTask.finalizedBy(copyGooglePlayAab)
+        tasks.findByName("produceGooglePlayReleaseBundleIdeListingFile")?.mustRunAfter(copyGooglePlayAab)
     }
 }

@@ -50,3 +50,13 @@
 
 # 7. Suppress R8 warnings for optional Zstandard JNI codec in commons-compress
 -dontwarn com.github.luben.zstd.**
+
+# 8. Keep MediaPlaybackNotificationService foreground service & callbacks
+-keep class me.hlebkukleuski.fullfilestudio.service.** { *; }
+
+# 9. Canonical AIDL IPC rules for IsolatedRenderService cross-process communication
+-keep class com.omnireader.core.engine.IIsolatedEngineService* { *; }
+-keep class com.omnireader.core.engine.ISessionStateCallback* { *; }
+-keep class * implements android.os.Parcelable {
+    public static final android.os.Parcelable$Creator *;
+}

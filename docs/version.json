@@ -1,8 +1,8 @@
 {
   "applicationId": "me.hlebkukleuski.fullfilestudio",
   "license": "GPL-3.0-or-later",
-  "versionCode": 1,
-  "versionName": "0.9.0",
-  "apkUrl": "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v0.9.0/fullfilestudio-v0.9.0-hashtagfreeinternet-release.apk",
-  "releaseNotes": "FullFileStudio v0.9.0 Release"
+  "versionCode": 2,
+  "versionName": "0.9.2",
+  "apkUrl": "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v0.9.2/fullfilestudio-v0.9.2-hashtagfreeinternet-release.apk",
+  "releaseNotes": "Audio Stream Quality Settings, Media Controls Notification, MHTML Sandbox & Bug Fixes"
 }

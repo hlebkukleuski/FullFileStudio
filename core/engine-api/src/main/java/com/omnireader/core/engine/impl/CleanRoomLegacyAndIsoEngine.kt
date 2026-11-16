@@ -2981,11 +2981,14 @@ class CleanRoomBuiltIn3dSession(
         val isLight = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0 || (pageIndex and 0xFF) == 1
         val langOrdinal = (pageIndex ushr LANG_ORDINAL_SHIFT) and 0xF
 
-        val extLower = originalExtension.lowercase(Locale.ROOT)
-        val rangeY = (maxY - minY).let { if (it.isFinite() && it > 0f) it else 1f }
-        val rangeZ = (maxZ - minZ).let { if (it.isFinite() && it > 0f) it else 1f }
-        val isYUp = extLower in setOf("obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx", "dae", "stl") ||
-                (rangeY > rangeZ && extLower !in setOf("blend", "dxf", "dwg", "3mf"))
+        val extLowerForOrientation = originalExtension.lowercase(Locale.ROOT)
+        // Strictly Y-Up formats: glTF/GLB, Wavefront OBJ, Pixar USD/USDZ, FBX, and COLLADA when <up_axis> == Y_UP.
+        // Engineering & 3D-printing formats (STL, 3MF, STEP, IGES, 3DS, BLEND, DXF, DWG, Z_UP COLLADA) are Z-Up!
+        val isYUp = extLowerForOrientation in setOf(
+            "obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx"
+        ) || modelType.contains("glTF", ignoreCase = true) ||
+                modelType.contains("USD", ignoreCase = true) ||
+                modelType.contains("FBX", ignoreCase = true)
 
         if (vertexCount > 0) {
             try {
@@ -3065,8 +3068,11 @@ class CleanRoomBuiltIn3dSession(
             } else {
                 dstW = availW; dstH = dstW / aspect
             }
-            val left = (width - dstW) / 2f - (tileX - 25) * 4f
-            val top = (height - dstH) / 2f - (tileY - 20) * 4f
+            // Direct 1:1 pan tracking for DWG preview (dragging right moves drawing right, dragging down moves drawing down)
+            val panX = (tileX - 25) * 4f
+            val panY = (tileY - 20) * 4f
+            val left = (width - dstW) / 2f + panX
+            val top = (height - dstH) / 2f + panY
             canvas.drawBitmap(prev, null, RectF(left, top, left + dstW, top + dstH), bitmapPaint)
         }
         if (vertexCount > 0) {
@@ -5526,27 +5532,32 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
 
     private fun parsePptRecordTree(stream: ByteArray) {
         val bb = ByteBuffer.wrap(stream).order(ByteOrder.LITTLE_ENDIAN)
-        var currentSlideTexts = mutableListOf<String>()
-        var currentSlideColors = mutableListOf<Int>()
+        val slideContainerList = mutableListOf<PptSlideData>()
+        val listWithTextGroups = mutableListOf<List<String>>()
+
+        var currentTexts = mutableListOf<String>()
+        var currentColors = mutableListOf<Int>()
         var currentPicIdx: Int? = null
         var nextAutoPicIdx = 0
 
-        fun flushCurrentSlide() {
-            val filteredTexts = currentSlideTexts
+        fun flushGroup(toSlideListWithText: Boolean) {
+            val filteredTexts = currentTexts
                 .map { it.trim() }
                 .filter { it.isNotEmpty() && !isBoilerplateMasterText(it) }
                 .distinct()
-            if (filteredTexts.isNotEmpty() || currentPicIdx != null) {
+            if (toSlideListWithText) {
+                if (filteredTexts.isNotEmpty()) listWithTextGroups.add(filteredTexts)
+            } else if (filteredTexts.isNotEmpty() || currentPicIdx != null) {
                 val assignedPic = currentPicIdx ?: if (nextAutoPicIdx < pictures.size) nextAutoPicIdx++ else null
-                slides.add(PptSlideData(filteredTexts, currentSlideColors.toList(), assignedPic))
+                slideContainerList.add(PptSlideData(filteredTexts, currentColors.toList(), assignedPic))
             }
-            currentSlideTexts = mutableListOf()
-            currentSlideColors = mutableListOf()
+            currentTexts = mutableListOf()
+            currentColors = mutableListOf()
             currentPicIdx = null
         }
 
-        fun walkRecords(start: Int, limit: Int, insideSlideContainer: Boolean, depth: Int) {
-            if (depth > MAX_PPT_RECORD_DEPTH || slides.size >= 2000) return
+        fun walkRecords(start: Int, limit: Int, mode: Int, depth: Int) {
+            if (depth > MAX_PPT_RECORD_DEPTH || slideContainerList.size >= 2000) return
             var pos = start
             while (pos + 8 <= limit) {
                 val verAndInstance = bb.getShort(pos).toInt() and 0xFFFF
@@ -5564,40 +5575,35 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
                         lastErrorMsg = "PASSWORD_REQUIRED: Microsoft PowerPoint presentation (.ppt) is password protected."
                         return
                     }
-                    0x03F8, 0x03F0 -> {
-                        // Skip MainMaster (0x03F8) and Notes (0x03F0) containers
-                    }
+                    0x03F8, 0x03F0 -> {}
                     0x03EE -> {
-                        flushCurrentSlide()
-                        walkRecords(dataStart, dataEnd, true, depth + 1)
-                        flushCurrentSlide()
+                        flushGroup(mode == 2)
+                        walkRecords(dataStart, dataEnd, 1, depth + 1)
+                        flushGroup(false)
                     }
                     0x0FF0 -> {
                         if (recInstance == 0) {
-                            flushCurrentSlide()
-                            walkRecords(dataStart, dataEnd, true, depth + 1)
-                            flushCurrentSlide()
+                            flushGroup(mode == 2)
+                            walkRecords(dataStart, dataEnd, 2, depth + 1)
+                            flushGroup(true)
                         }
                     }
                     0x03F3 -> {
-                        if (insideSlideContainer) {
-                            flushCurrentSlide()
-                        }
+                        if (mode == 2) flushGroup(true)
                     }
                     0xF00B -> {
                         val propCount = recInstance.coerceIn(0, 1024)
                         var pPos = dataStart
                         for (p in 0 until propCount) {
                             if (pPos + 6 > dataEnd) break
-                            val propIdRaw = bb.getShort(pPos).toInt() and 0xFFFF
-                            val propId = propIdRaw and 0x3FFF
+                            val propId = (bb.getShort(pPos).toInt() and 0xFFFF) and 0x3FFF
                             val propVal = bb.getInt(pPos + 2)
                             if (propId == 0x0181) {
                                 val r = propVal and 0xFF
                                 val g = (propVal ushr 8) and 0xFF
                                 val b = (propVal ushr 16) and 0xFF
-                                if (r + g + b in 15..730 && currentSlideColors.size < 64) {
-                                    currentSlideColors.add(Color.rgb(r, g, b))
+                                if (r + g + b in 15..730 && currentColors.size < 64) {
+                                    currentColors.add(Color.rgb(r, g, b))
                                 }
                             } else if (propId == 0x0104 && propVal >= 1 && (propVal - 1) in pictures.indices) {
                                 currentPicIdx = propVal - 1
@@ -5606,30 +5612,22 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
                         }
                     }
                     0x0FA0 -> {
-                        if (insideSlideContainer && dataEnd > dataStart && currentSlideTexts.size < 512) {
+                        if (mode != 0 && dataEnd > dataStart && currentTexts.size < 512) {
                             val txt = String(stream, dataStart, (dataEnd - dataStart) and -2, StandardCharsets.UTF_16LE)
-                                .replace('\r', '\n')
-                                .replace('\u000B', '\n')
-                                .trim()
-                            if (txt.isNotEmpty() && !isBoilerplateMasterText(txt)) {
-                                currentSlideTexts.add(txt)
-                            }
+                                .replace('\r', '\n').replace('\u000B', '\n').trim()
+                            if (txt.isNotEmpty() && !isBoilerplateMasterText(txt)) currentTexts.add(txt)
                         }
                     }
                     0x0FA8 -> {
-                        if (insideSlideContainer && dataEnd > dataStart && currentSlideTexts.size < 512) {
+                        if (mode != 0 && dataEnd > dataStart && currentTexts.size < 512) {
                             val txt = String(stream, dataStart, dataEnd - dataStart, PlainTextSession.CP1251)
-                                .replace('\r', '\n')
-                                .replace('\u000B', '\n')
-                                .trim()
-                            if (txt.isNotEmpty() && !isBoilerplateMasterText(txt)) {
-                                currentSlideTexts.add(txt)
-                            }
+                                .replace('\r', '\n').replace('\u000B', '\n').trim()
+                            if (txt.isNotEmpty() && !isBoilerplateMasterText(txt)) currentTexts.add(txt)
                         }
                     }
                     else -> {
                         if (recVer == 0x0F && dataEnd > dataStart) {
-                            walkRecords(dataStart, dataEnd, insideSlideContainer, depth + 1)
+                            walkRecords(dataStart, dataEnd, mode, depth + 1)
                         }
                     }
                 }
@@ -5637,8 +5635,16 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
             }
         }
 
-        walkRecords(0, stream.size, false, 0)
-        flushCurrentSlide()
+        walkRecords(0, stream.size, 0, 0)
+        val totalSlides = maxOf(slideContainerList.size, listWithTextGroups.size)
+        for (i in 0 until totalSlides) {
+            val sc = slideContainerList.getOrNull(i)
+            val lwt = listWithTextGroups.getOrNull(i).orEmpty()
+            val mergedTexts = (lwt + sc?.texts.orEmpty()).distinct()
+            if (mergedTexts.isNotEmpty() || sc?.pictureIndex != null) {
+                slides.add(PptSlideData(mergedTexts, sc?.fillColors.orEmpty(), sc?.pictureIndex))
+            }
+        }
     }
 
     private fun computeSlideCardSize(

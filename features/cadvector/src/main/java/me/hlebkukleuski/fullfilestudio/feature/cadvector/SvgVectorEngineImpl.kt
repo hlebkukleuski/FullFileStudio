@@ -1208,6 +1208,15 @@ class SvgSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
 
     override val pageCount: Int = 1
 
+    override fun getPageText(pageIndex: Int): String {
+        return texts.joinToString("\n") { it.text }
+    }
+
+    override fun search(query: String, startPage: Int): Long {
+        if (query.isBlank() || isClosed) return -1L
+        return if (texts.any { it.text.contains(query, ignoreCase = true) }) 0L else -1L
+    }
+
     @Synchronized
     override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
         if (isClosed) return

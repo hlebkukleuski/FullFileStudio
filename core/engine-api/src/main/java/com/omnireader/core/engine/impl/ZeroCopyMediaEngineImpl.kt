@@ -447,6 +447,20 @@ internal class HybridCleanRoomMediaPlayer : MediaPlayer() {
     @Volatile var isSoftwareAviMode = false
         private set
 
+    @Volatile var targetAudioSampleRate: Int = 0
+    @Volatile var targetAudioEncoding: Int = AudioFormat.ENCODING_PCM_16BIT
+
+    fun applyAudioQualityConfig(sampleRateHz: Int, bitDepth: Int) {
+        targetAudioSampleRate = sampleRateHz
+        targetAudioEncoding = if (bitDepth >= 24) AudioFormat.ENCODING_PCM_FLOAT else AudioFormat.ENCODING_PCM_16BIT
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+                val currentParams = try { playbackParams } catch (_: Throwable) { null } ?: android.media.PlaybackParams()
+                setPlaybackParams(currentParams)
+            }
+        } catch (_: Throwable) {}
+    }
+
     private var aviDemuxer: CleanRoomAviDemuxer? = null
     private var fallbackFd: FileDescriptor? = null
     private var fallbackFileSize: Long = -1L
@@ -811,20 +825,24 @@ internal class HybridCleanRoomMediaPlayer : MediaPlayer() {
             } else {
                 AudioFormat.ENCODING_PCM_16BIT
             }
-            val minBuf = AudioTrack.getMinBufferSize(demux.audioSampleRate, channelConfig, pcmEncoding)
+
+            val sampleRateToUse = if (targetAudioSampleRate > 0) targetAudioSampleRate else demux.audioSampleRate
+            val pcmEncodingToUse = if (targetAudioEncoding != 0) targetAudioEncoding else pcmEncoding
+
+            val minBuf = AudioTrack.getMinBufferSize(sampleRateToUse, channelConfig, pcmEncodingToUse)
                 .coerceAtLeast(8192)
             audioTrack = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_MOVIE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build()
                 )
                 .setAudioFormat(
                     AudioFormat.Builder()
-                        .setSampleRate(demux.audioSampleRate)
+                        .setSampleRate(sampleRateToUse)
                         .setChannelMask(channelConfig)
-                        .setEncoding(pcmEncoding)
+                        .setEncoding(pcmEncodingToUse)
                         .build()
                 )
                 .setBufferSizeInBytes(minBuf)
@@ -1041,6 +1059,10 @@ class MediaPlaybackSession(private val pfd: ParcelFileDescriptor) : DocumentSess
     private val hybridPlayer = HybridCleanRoomMediaPlayer()
     val mediaPlayer: MediaPlayer get() = hybridPlayer
 
+    fun updateAudioQualityConfig(sampleRateHz: Int, bitDepth: Int) {
+        hybridPlayer.applyAudioQualityConfig(sampleRateHz, bitDepth)
+    }
+
     private val _isPrepared = MutableStateFlow(false)
     val isPrepared: StateFlow<Boolean> = _isPrepared.asStateFlow()
 
@@ -1157,6 +1179,14 @@ class MediaPlaybackSession(private val pfd: ParcelFileDescriptor) : DocumentSess
 
             try {
                 try { Os.lseek(fd, 0L, OsConstants.SEEK_SET) } catch (_: Throwable) {}
+
+                try {
+                    val mediaAudioAttributes = AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                        .build()
+                    hybridPlayer.setAudioAttributes(mediaAudioAttributes)
+                } catch (_: Throwable) {}
 
                 hybridPlayer.setOnErrorListener { _, what, extra ->
                     synchronized(this@MediaPlaybackSession) {

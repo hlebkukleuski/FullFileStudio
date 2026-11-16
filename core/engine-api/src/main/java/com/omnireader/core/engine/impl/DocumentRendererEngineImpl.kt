@@ -3900,6 +3900,176 @@ class ImageRegionSession(
     }
 }
 
+object CleanRoomMhtmlParser {
+
+    data class MhtmlResult(
+        val htmlContent: String,
+        val plainText: String,
+        val embeddedImages: List<Bitmap>
+    )
+
+    fun parse(stream: ByteArray): MhtmlResult {
+        val fullContent = String(stream, StandardCharsets.UTF_8)
+        var boundary: String? = null
+
+        val boundaryMatch = Regex("""boundary\s*=\s*["']?([^"';\r\n]+)["']?""", RegexOption.IGNORE_CASE).find(fullContent)
+        if (boundaryMatch != null) {
+            boundary = boundaryMatch.groupValues[1].trim()
+        }
+
+        if (boundary == null) {
+            val lineMatch = Regex("""^--([A-Za-z0-9_=\-\.\+]+)""", RegexOption.MULTILINE).find(fullContent)
+            if (lineMatch != null) {
+                boundary = lineMatch.groupValues[1].trim()
+            }
+        }
+
+        if (boundary.isNullOrEmpty()) {
+            val plain = CleanRoomDocSession.extractPrintableRunsFromBinary(stream)
+            return MhtmlResult(
+                htmlContent = fullContent,
+                plainText = plain,
+                embeddedImages = emptyList()
+            )
+        }
+
+        val parts = fullContent.split("--$boundary")
+        var primaryHtml: String? = null
+        var fallbackHtml: String? = null
+        val resourceMap = HashMap<String, String>()
+        val imagesList = mutableListOf<Bitmap>()
+
+        for (part in parts) {
+            val trimmedPart = part.trim()
+            if (trimmedPart.isEmpty() || trimmedPart == "--") continue
+
+            val headerEnd = trimmedPart.indexOf("\r\n\r\n").let {
+                if (it >= 0) it else trimmedPart.indexOf("\n\n")
+            }
+            if (headerEnd < 0) continue
+
+            val rawHeaderText = trimmedPart.substring(0, headerEnd)
+            val bodyText = trimmedPart.substring(headerEnd).trimStart('\r', '\n')
+
+            val unfoldedHeaders = rawHeaderText.replace(Regex("""\r?\n[ \t]+"""), " ")
+
+            var contentType = ""
+            var encoding = ""
+            var location: String? = null
+            var contentId: String? = null
+            var charsetName = "utf-8"
+
+            for (hLine in unfoldedHeaders.split(Regex("""\r?\n"""))) {
+                val colon = hLine.indexOf(':')
+                if (colon < 0) continue
+                val name = hLine.substring(0, colon).trim().lowercase(Locale.ROOT)
+                val valStr = hLine.substring(colon + 1).trim()
+
+                when (name) {
+                    "content-type" -> {
+                        contentType = valStr.substringBefore(';').trim().lowercase(Locale.ROOT)
+                        val csMatch = Regex("""charset\s*=\s*["']?([^"';\r\n]+)["']?""", RegexOption.IGNORE_CASE).find(valStr)
+                        if (csMatch != null) charsetName = csMatch.groupValues[1].trim()
+                    }
+                    "content-transfer-encoding" -> encoding = valStr.lowercase(Locale.ROOT)
+                    "content-location" -> location = valStr
+                    "content-id" -> contentId = valStr.trim('<', '>', ' ')
+                }
+            }
+
+            val decodedBytes: ByteArray = when (encoding) {
+                "base64" -> {
+                    try {
+                        val cleanB64 = bodyText.replace(Regex("""\s+"""), "")
+                        android.util.Base64.decode(cleanB64, android.util.Base64.DEFAULT)
+                    } catch (_: Throwable) {
+                        bodyText.toByteArray(StandardCharsets.UTF_8)
+                    }
+                }
+                "quoted-printable" -> decodeQuotedPrintable(bodyText)
+                else -> bodyText.toByteArray(Charset.forName(try { charsetName } catch (_: Throwable) { "UTF-8" }))
+            }
+
+            val decodedStr = String(decodedBytes, Charset.forName(try { charsetName } catch (_: Throwable) { "UTF-8" }))
+
+            if (contentType.contains("text/html") || contentType.contains("application/xhtml") || decodedStr.contains("<html", true) || decodedStr.contains("<!DOCTYPE", true)) {
+                if (primaryHtml == null) {
+                    primaryHtml = decodedStr
+                } else if (fallbackHtml == null) {
+                    fallbackHtml = decodedStr
+                }
+            } else if (contentType.startsWith("image/")) {
+                val mime = if (contentType.isNotEmpty()) contentType else "image/png"
+                val b64Data = android.util.Base64.encodeToString(decodedBytes, android.util.Base64.NO_WRAP)
+                val dataUri = "data:$mime;base64,$b64Data"
+                location?.let {
+                    resourceMap[it] = dataUri
+                    val lastSeg = it.substringAfterLast('/')
+                    if (lastSeg.isNotEmpty()) resourceMap[lastSeg] = dataUri
+                }
+                contentId?.let {
+                    resourceMap["cid:$it"] = dataUri
+                    resourceMap[it] = dataUri
+                }
+
+                EmbeddedImageScanner.decodeMetafileOrSvgBitmap(decodedBytes, 0, decodedBytes.size)?.let { bmp ->
+                    if (imagesList.size < 32) imagesList.add(bmp)
+                }
+            } else if (contentType.contains("text/css")) {
+                val b64Data = android.util.Base64.encodeToString(decodedBytes, android.util.Base64.NO_WRAP)
+                val dataUri = "data:text/css;base64,$b64Data"
+                location?.let { resourceMap[it] = dataUri }
+                contentId?.let { resourceMap["cid:$it"] = dataUri }
+            }
+        }
+
+        var finalHtml = primaryHtml ?: fallbackHtml ?: fullContent
+        for ((resKey, dataUri) in resourceMap) {
+            finalHtml = finalHtml.replace(resKey, dataUri)
+        }
+
+        val plainText = stripMobiHtmlToRichText(finalHtml, imagesList.size)
+        return MhtmlResult(
+            htmlContent = finalHtml,
+            plainText = plainText,
+            embeddedImages = imagesList
+        )
+    }
+
+    private fun decodeQuotedPrintable(input: String): ByteArray {
+        val bos = ByteArrayOutputStream(input.length)
+        var i = 0
+        val len = input.length
+        val bytes = input.toByteArray(StandardCharsets.ISO_8859_1)
+        while (i < len) {
+            val c = bytes[i].toInt() and 0xFF
+            if (c == '='.code) {
+                if (i + 2 < len) {
+                    val h1 = (bytes[i + 1].toInt() and 0xFF).toChar()
+                    val h2 = (bytes[i + 2].toInt() and 0xFF).toChar()
+                    if (h1 == '\r' && h2 == '\n') {
+                        i += 3
+                        continue
+                    } else if (h1 == '\n') {
+                        i += 2
+                        continue
+                    }
+                    val hex = "$h1$h2"
+                    val bVal = hex.toIntOrNull(16)
+                    if (bVal != null) {
+                        bos.write(bVal)
+                        i += 3
+                        continue
+                    }
+                }
+            }
+            bos.write(c)
+            i++
+        }
+        return bos.toByteArray()
+    }
+}
+
 class EbookTextSession(
     private val pfd: ParcelFileDescriptor,
     private val format: DetectedFormat,
@@ -3966,7 +4136,11 @@ class EbookTextSession(
                 val bytes = ByteArray(total)
                 buf.get(bytes)
 
-                if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
+                if (format == DetectedFormat.MHTML || extension in setOf("mhtml", "mht")) {
+                    val result = CleanRoomMhtmlParser.parse(bytes)
+                    fullText = result.htmlContent
+                    embeddedImages.addAll(result.embeddedImages)
+                } else if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
                     val entries = extractSingleZipArchive(pfd.fileDescriptor, fileSize)
                     fullText = parseZipTextMap(entries)
                 } else {
@@ -3997,7 +4171,17 @@ class EbookTextSession(
             parseError = "Не удалось извлечь текст из контейнера ${format.name}: файл пуст, зашифрован или повреждён."
         }
 
-        paginateRichText(fullText, embeddedImages.size, pages)
+        val isHtmlContainer = format == DetectedFormat.MHTML ||
+                extension in setOf("mhtml", "mht", "html", "htm", "xhtml") ||
+                fullText.trimStart().startsWith("<html", ignoreCase = true) ||
+                fullText.trimStart().startsWith("<!DOCTYPE", ignoreCase = true)
+
+        if (isHtmlContainer && fullText.isNotBlank()) {
+            pages.clear()
+            pages.add(fullText)
+        } else {
+            paginateRichText(fullText, embeddedImages.size, pages)
+        }
     }
 
     fun getEmbeddedImagesCount(): Int = embeddedImages.size
@@ -5490,15 +5674,49 @@ class PalmDocMobiCleanRoomSession(
         }
 
         var charset: Charset = StandardCharsets.UTF_8
-        if (rec0Start + 28 <= rec0End &&
+        var extraDataFlags = 0
+        if (rec0Start + 24 <= rec0End &&
             bytes[rec0Start + 16] == 'M'.code.toByte() &&
             bytes[rec0Start + 17] == 'O'.code.toByte() &&
             bytes[rec0Start + 18] == 'B'.code.toByte() &&
             bytes[rec0Start + 19] == 'I'.code.toByte()
         ) {
-            val codepage = bb.getInt(rec0Start + 28)
-            if (codepage == 1251) charset = PlainTextSession.CP1251
-            else if (codepage == 1252) charset = Charset.forName("windows-1252")
+            val mobiHeaderLen = bb.getInt(rec0Start + 20)
+            if (rec0Start + 28 <= rec0End) {
+                val codepage = bb.getInt(rec0Start + 28)
+                if (codepage == 1251) charset = PlainTextSession.CP1251
+                else if (codepage == 1252) charset = Charset.forName("windows-1252")
+            }
+            if (mobiHeaderLen >= 0xE4 && rec0Start + 16 + 0xE4 <= rec0End) {
+                extraDataFlags = bb.getShort(rec0Start + 16 + 0xE2).toInt() and 0xFFFF
+            }
+        }
+
+        fun trimTrailingMobiBytes(data: ByteArray, start: Int, end: Int, flags: Int): Int {
+            if (flags == 0 || end <= start) return end
+            var curEnd = end
+            var f = flags ushr 1
+            while (f != 0 && curEnd > start) {
+                if ((f and 1) != 0) {
+                    var sz = 0
+                    var shift = 0
+                    var p = curEnd - 1
+                    while (p >= start && shift < 28) {
+                        val b = data[p].toInt() and 0xFF
+                        sz = sz or ((b and 0x7F) shl shift)
+                        if ((b and 0x80) != 0) break
+                        shift += 7
+                        p--
+                    }
+                    if (sz in 1..(curEnd - start)) curEnd -= sz
+                }
+                f = f ushr 1
+            }
+            if ((flags and 1) != 0 && curEnd > start) {
+                val overlap = (data[curEnd - 1].toInt() and 0x03) + 1
+                if (overlap <= curEnd - start) curEnd -= overlap
+            }
+            return curEnd.coerceAtLeast(start)
         }
 
         if (compression == 17480) {
@@ -5511,16 +5729,14 @@ class PalmDocMobiCleanRoomSession(
         for (recIdx in 1..textRecCount) {
             if (recIdx >= numRecords || rawTextOut.size() >= 16 * 1024 * 1024) break
             val start = recordOffsets[recIdx]
-            val end = if (recIdx + 1 < numRecords) recordOffsets[recIdx + 1] else bytes.size
+            val rawEnd = if (recIdx + 1 < numRecords) recordOffsets[recIdx + 1] else bytes.size
+            val end = trimTrailingMobiBytes(bytes, start, rawEnd, extraDataFlags)
             if (start < 0 || end <= start || end > bytes.size) continue
 
             val recLen = end - start
             when (compression) {
                 1 -> rawTextOut.write(bytes, start, recLen)
-                2 -> {
-                    val decompressed = decompressPalmDocLz77(bytes, start, end)
-                    rawTextOut.write(decompressed)
-                }
+                2 -> rawTextOut.write(decompressPalmDocLz77(bytes, start, end))
                 else -> rawTextOut.write(bytes, start, recLen)
             }
         }
@@ -5581,46 +5797,6 @@ class PalmDocMobiCleanRoomSession(
             }
         }
         return bos.toByteArray()
-    }
-
-    private fun stripMobiHtmlToRichText(html: String, imageCount: Int): String {
-        val withBreaks = html
-            .replace(Regex("<head[\\s\\S]*?</head>", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("<(br|p|div|tr|li|blockquote)[^>]*>", RegexOption.IGNORE_CASE), "\n")
-            .replace(Regex("<h1[^>]*>", RegexOption.IGNORE_CASE), "\n<h1>")
-            .replace(Regex("</h1>", RegexOption.IGNORE_CASE), "</h1>\n")
-            .replace(Regex("<h[2-4][^>]*>", RegexOption.IGNORE_CASE), "\n<h2>")
-            .replace(Regex("</h[2-4]>", RegexOption.IGNORE_CASE), "</h2>\n")
-            .replace(Regex("<(b|strong)[^>]*>", RegexOption.IGNORE_CASE), "<b>")
-            .replace(Regex("</(b|strong)>", RegexOption.IGNORE_CASE), "</b>")
-            .replace(Regex("<(i|em)[^>]*>", RegexOption.IGNORE_CASE), "<i>")
-            .replace(Regex("</(i|em)>", RegexOption.IGNORE_CASE), "</i>")
-            .replace(Regex("<[^>]+>"), "")
-            .replace("&nbsp;", " ")
-            .replace("&quot;", "\"")
-            .replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&mdash;", "—")
-            .replace("&ndash;", "–")
-            .replace("&laquo;", "«")
-            .replace("&raquo;", "»")
-
-        val sb = StringBuilder()
-        if (imageCount > 0) {
-            sb.append("[IMAGE:0]\n")
-        }
-        for (line in withBreaks.lines()) {
-            val trimmed = line.trim()
-            if (trimmed.isNotEmpty()) {
-                sb.append(trimmed).append('\n')
-            }
-        }
-        for (imgIdx in 1 until imageCount) {
-            sb.append("[IMAGE:$imgIdx]\n")
-        }
-        return sb.toString().trim()
     }
 
     override val pageCount: Int get() = pages.size.coerceAtLeast(1)
@@ -5687,6 +5863,46 @@ class PalmDocMobiCleanRoomSession(
         embeddedImages.clear()
         try { pfd.close() } catch (_: Exception) {}
     }
+}
+
+internal fun stripMobiHtmlToRichText(html: String, imageCount: Int): String {
+    val withBreaks = html
+        .replace(Regex("<head[\\s\\S]*?</head>", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), "")
+        .replace(Regex("<(br|p|div|tr|li|blockquote)[^>]*>", RegexOption.IGNORE_CASE), "\n")
+        .replace(Regex("<h1[^>]*>", RegexOption.IGNORE_CASE), "\n<h1>")
+        .replace(Regex("</h1>", RegexOption.IGNORE_CASE), "</h1>\n")
+        .replace(Regex("<h[2-4][^>]*>", RegexOption.IGNORE_CASE), "\n<h2>")
+        .replace(Regex("</h[2-4]>", RegexOption.IGNORE_CASE), "</h2>\n")
+        .replace(Regex("<(b|strong)[^>]*>", RegexOption.IGNORE_CASE), "<b>")
+        .replace(Regex("</(b|strong)>", RegexOption.IGNORE_CASE), "</b>")
+        .replace(Regex("<(i|em)[^>]*>", RegexOption.IGNORE_CASE), "<i>")
+        .replace(Regex("</(i|em)>", RegexOption.IGNORE_CASE), "</i>")
+        .replace(Regex("<[^>]+>"), "")
+        .replace("&nbsp;", " ")
+        .replace("&quot;", "\"")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&mdash;", "—")
+        .replace("&ndash;", "–")
+        .replace("&laquo;", "«")
+        .replace("&raquo;", "»")
+
+    val sb = StringBuilder()
+    if (imageCount > 0) {
+        sb.append("[IMAGE:0]\n")
+    }
+    for (line in withBreaks.lines()) {
+        val trimmed = line.trim()
+        if (trimmed.isNotEmpty()) {
+            sb.append(trimmed).append('\n')
+        }
+    }
+    for (imgIdx in 1 until imageCount) {
+        sb.append("[IMAGE:$imgIdx]\n")
+    }
+    return sb.toString().trim()
 }
 
 class KindleDrmNoticeSession(

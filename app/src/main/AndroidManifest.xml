@@ -22,6 +22,10 @@
     <!-- File access is handled via Storage Access Framework (SAF) and Intent URIs. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:name=".OmniReaderApp"
@@ -65,6 +69,11 @@
             android:process=":render"
             android:isolatedProcess="false"
             android:exported="false" />
+
+        <service
+            android:name=".service.MediaPlaybackNotificationService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
 
         <provider
             android:name="androidx.core.content.FileProvider"

@@ -589,7 +589,8 @@ object PaddleOcrManager {
                 }
             }
             if (isFontSpecimenOverviewPageHint(cleanHint)) {
-                val specimenPayload = buildFontSpecimenOverviewPayload(bitmap, cleanHint, zoom, tileX, tileY)
+                val specimenPayload =
+                    buildFontSpecimenOverviewPayload(bitmap, cleanHint, zoom, tileX, tileY)
                 if (specimenPayload.chars.isNotEmpty()) {
                     return specimenPayload
                 }
@@ -645,6 +646,19 @@ object PaddleOcrManager {
         coroutineContext.ensureActive()
         val detectedBoxes = detectTextLineBoxesHybrid(bitmap)
         coroutineContext.ensureActive()
+
+        if (detectedBoxes.isNotEmpty() && (primaryRecSession != null || cyrillicRecSession != null)) {
+            val neuralPayload = recognizeDetectedBoxesPureRaster(
+                bitmap = bitmap,
+                boxes = detectedBoxes,
+                startLineIndex = 0,
+                pageLexicon = pageLexicon,
+                preferredLanguageCode = preferredLanguageCode
+            )
+            if (neuralPayload.chars.isNotEmpty()) {
+                return neuralPayload
+            }
+        }
 
         if (cleanHint.isNotEmpty()) {
             val alignedPayload = alignDetectedBoxesWithPageHint(
@@ -1419,17 +1433,31 @@ object PaddleOcrManager {
         return Rect(minL, minT, maxR, maxB)
     }
 
+    private fun isPlausibleTextContrastBox(bitmap: Bitmap, box: Rect): Boolean {
+        val w = box.width()
+        val h = box.height()
+        if (w < 8 || h < 8) return false
+        if (h > bitmap.height * 0.25f) return false
+        // Filter out thin vertical divider lines or huge non-text photo texture blocks
+        val aspect = w.toFloat() / h.toFloat()
+        if (aspect < 0.45f && h > 28) return false
+        val glyphs = segmentLineIntoGlyphRects(bitmap, box)
+        return glyphs.isNotEmpty()
+    }
+
     private fun detectTextLineBoxesHybrid(bitmap: Bitmap): List<Rect> {
         val dbNetBoxes = runDbNetDetectionOnnx(bitmap)
         val contrastBoxes = detectBipolarHighContrastLineBoxes(bitmap)
 
-        if (dbNetBoxes.isEmpty()) return contrastBoxes
+        if (dbNetBoxes.isEmpty()) {
+            return contrastBoxes.filter { isPlausibleTextContrastBox(bitmap, it) }
+        }
         if (contrastBoxes.isEmpty()) {
             return dbNetBoxes.map { tightenBoxToForegroundInk(bitmap, it) }
         }
 
-        // Prefer tight contrast-split boxes whenever a DBNet box is overly tall (merged multiple lines)
-        // or overly wide (merged adjacent columns)
+        // Split DBNet boxes only when DBNet merged multiple vertical lines or wide table columns,
+        // while keeping intact DBNet boxes for normal single-line phrases on photos.
         val merged = ArrayList<Rect>(dbNetBoxes.size + contrastBoxes.size)
         for (dbBox in dbNetBoxes) {
             val subContrast = contrastBoxes.filter { cBox ->
@@ -1437,8 +1465,17 @@ object PaddleOcrManager {
                 val interTop = maxOf(dbBox.top, cBox.top)
                 val interRight = minOf(dbBox.right, cBox.right)
                 val interBot = minOf(dbBox.bottom, cBox.bottom)
-                interRight > interLeft && interBot > interTop &&
-                        (cBox.height() < dbBox.height() * 0.76f || cBox.width() < dbBox.width() * 0.72f)
+                if (interRight <= interLeft || interBot <= interTop) {
+                    false
+                } else {
+                    val interArea = (interRight - interLeft).toLong() * (interBot - interTop).toLong()
+                    val cArea = (cBox.width().toLong() * cBox.height().toLong()).coerceAtLeast(1L)
+                    val mostlyInsideDb = interArea.toFloat() / cArea.toFloat() > 0.70f
+                    val isMultiLineSplit = cBox.height() < dbBox.height() * 0.62f
+                    val isMultiColumnSplit = cBox.width() < dbBox.width() * 0.65f &&
+                            (dbBox.width().toFloat() / dbBox.height().coerceAtLeast(1)) > 6.5f
+                    mostlyInsideDb && (isMultiLineSplit || isMultiColumnSplit)
+                }
             }
             if (subContrast.size >= 2) {
                 merged.addAll(subContrast)
@@ -1447,6 +1484,7 @@ object PaddleOcrManager {
             }
         }
 
+        // Recover small or low-contrast text lines missed by DBNet, filtering out non-text photo edges
         for (cBox in contrastBoxes) {
             val overlapsExisting = merged.any { existing ->
                 val interLeft = maxOf(existing.left, cBox.left)
@@ -1461,10 +1499,10 @@ object PaddleOcrManager {
                         existing.width().toLong() * existing.height().toLong(),
                         cBox.width().toLong() * cBox.height().toLong()
                     ).coerceAtLeast(1L)
-                    interArea.toFloat() / minArea.toFloat() > 0.42f
+                    interArea.toFloat() / minArea.toFloat() > 0.35f
                 }
             }
-            if (!overlapsExisting) {
+            if (!overlapsExisting && isPlausibleTextContrastBox(bitmap, cBox)) {
                 merged.add(cBox)
             }
         }
@@ -1551,19 +1589,21 @@ object PaddleOcrManager {
             val scaleY = origH.toFloat() / detH.coerceAtLeast(1)
             val visited = BooleanArray(detH * detW)
             val queue = IntArray(detH * detW)
+            val thresh = 0.26f
 
             for (r in 0 until detH) {
                 val rowOff = r * detW
                 val probRow = probPlane[r]
                 for (c in 0 until detW) {
                     val flatIdx = rowOff + c
-                    if (!visited[flatIdx] && probRow[c] > 0.24f) {
+                    if (!visited[flatIdx] && probRow[c] > thresh) {
                         var minR = r
                         var maxR = r
                         var minC = c
                         var maxC = c
                         var probSum = 0f
                         var pixelCount = 0
+                        var perimeterCount = 0
 
                         var qHead = 0
                         var qTail = 0
@@ -1582,48 +1622,63 @@ object PaddleOcrManager {
                             if (cc < minC) minC = cc
                             if (cc > maxC) maxC = cc
 
+                            var isBoundary = false
                             if (cr > 0) {
                                 val nr = cr - 1
                                 val nIdx = nr * detW + cc
-                                if (!visited[nIdx] && probPlane[nr][cc] > 0.24f) {
-                                    visited[nIdx] = true
-                                    queue[qTail++] = (nr shl 16) or cc
-                                }
-                            }
+                                if (probPlane[nr][cc] > thresh) {
+                                    if (!visited[nIdx]) {
+                                        visited[nIdx] = true
+                                        queue[qTail++] = (nr shl 16) or cc
+                                    }
+                                } else isBoundary = true
+                            } else isBoundary = true
+
                             if (cr + 1 < detH) {
                                 val nr = cr + 1
                                 val nIdx = nr * detW + cc
-                                if (!visited[nIdx] && probPlane[nr][cc] > 0.24f) {
-                                    visited[nIdx] = true
-                                    queue[qTail++] = (nr shl 16) or cc
-                                }
-                            }
+                                if (probPlane[nr][cc] > thresh) {
+                                    if (!visited[nIdx]) {
+                                        visited[nIdx] = true
+                                        queue[qTail++] = (nr shl 16) or cc
+                                    }
+                                } else isBoundary = true
+                            } else isBoundary = true
+
                             if (cc > 0) {
                                 val nc = cc - 1
                                 val nIdx = cr * detW + nc
-                                if (!visited[nIdx] && probPlane[cr][nc] > 0.24f) {
-                                    visited[nIdx] = true
-                                    queue[qTail++] = (cr shl 16) or nc
-                                }
-                            }
+                                if (probPlane[cr][nc] > thresh) {
+                                    if (!visited[nIdx]) {
+                                        visited[nIdx] = true
+                                        queue[qTail++] = (cr shl 16) or nc
+                                    }
+                                } else isBoundary = true
+                            } else isBoundary = true
+
                             if (cc + 1 < detW) {
                                 val nc = cc + 1
                                 val nIdx = cr * detW + nc
-                                if (!visited[nIdx] && probPlane[cr][nc] > 0.24f) {
-                                    visited[nIdx] = true
-                                    queue[qTail++] = (cr shl 16) or nc
-                                }
-                            }
+                                if (probPlane[cr][nc] > thresh) {
+                                    if (!visited[nIdx]) {
+                                        visited[nIdx] = true
+                                        queue[qTail++] = (cr shl 16) or nc
+                                    }
+                                } else isBoundary = true
+                            } else isBoundary = true
+
+                            if (isBoundary) perimeterCount++
                         }
 
                         val boxW = maxC - minC + 1
                         val boxH = maxR - minR + 1
                         val meanProb = probSum / pixelCount.coerceAtLeast(1)
                         if (boxW >= 2 && boxH >= 2 && meanProb >= 0.32f) {
-                            // Anisotropic unclip: keep vertical expansion tight to the core line height
-                            // so adjacent lines never merge into a bloated rectangle.
-                            val unclipY = (boxH * 0.36f).roundToInt().coerceIn(1, 6)
-                            val unclipX = (boxH * 0.52f).roundToInt().coerceIn(2, 10)
+                            val rectPerimeter = 2f * (boxW + boxH)
+                            val effPerimeter = maxOf(perimeterCount.toFloat(), rectPerimeter * 0.75f).coerceAtLeast(4f)
+                            val unclipDist = (pixelCount.toFloat() * 1.65f) / effPerimeter
+                            val unclipY = unclipDist.roundToInt().coerceIn(1, maxOf(6, (boxH * 0.65f).roundToInt()))
+                            val unclipX = (unclipDist * 1.25f).roundToInt().coerceIn(2, maxOf(10, (boxH * 0.95f).roundToInt()))
 
                             val unclipLeft = ((minC - unclipX) * scaleX).roundToInt().coerceIn(0, origW - 2)
                             val unclipTop = ((minR - unclipY) * scaleY).roundToInt().coerceIn(0, origH - 2)
@@ -2353,6 +2408,54 @@ object PaddleOcrManager {
         return tightBox
     }
 
+    private fun refineBoxWithCtcTimesteps(
+        ctcResult: CtcDecodeResult,
+        paddedLeft: Int,
+        paddedW: Int,
+        fallbackBox: Rect
+    ): Rect {
+        val nonBlank = ctcResult.tokens.filter { it.text.isNotBlank() }
+        val totalSteps = ctcResult.totalTimesteps.coerceAtLeast(1).toFloat()
+        if (nonBlank.isEmpty()) return fallbackBox
+
+        val stepToPx = paddedW.toFloat() / totalSteps
+        val leftPx = (paddedLeft + (nonBlank.first().startStep - 0.65f) * stepToPx)
+            .roundToInt().coerceIn(fallbackBox.left, fallbackBox.right - 2)
+        val rightPx = (paddedLeft + (nonBlank.last().endStep + 1.65f) * stepToPx)
+            .roundToInt().coerceIn(leftPx + 2, fallbackBox.right)
+        return Rect(leftPx, fallbackBox.top, rightPx, fallbackBox.bottom)
+    }
+
+    private fun emitCharsUsingCtcSteps(
+        ctcResult: CtcDecodeResult,
+        paddedLeft: Int,
+        paddedW: Int,
+        boundedBox: Rect,
+        lineIndex: Int,
+        outChars: MutableList<OcrRecognizedChar>
+    ) {
+        val totalSteps = ctcResult.totalTimesteps.coerceAtLeast(1).toFloat()
+        val stepToPx = paddedW.toFloat() / totalSteps
+        var prevRight = boundedBox.left
+        for ((idx, tok) in ctcResult.tokens.withIndex()) {
+            val rawL = (paddedLeft + (tok.startStep - 0.35f) * stepToPx).roundToInt()
+            val rawR = (paddedLeft + (tok.endStep + 1.35f) * stepToPx).roundToInt()
+            val cLeft = maxOf(prevRight, rawL.coerceIn(boundedBox.left, boundedBox.right - 1))
+            val cRight = if (idx == ctcResult.tokens.lastIndex) {
+                maxOf(cLeft + 1, rawR.coerceIn(cLeft + 1, boundedBox.right))
+            } else {
+                rawR.coerceIn(cLeft + 1, boundedBox.right)
+            }
+            val graphemes = splitIntoGraphemes(tok.text)
+            if (graphemes.size <= 1) {
+                outChars.add(OcrRecognizedChar(tok.text, Rect(cLeft, boundedBox.top, cRight, boundedBox.bottom), lineIndex))
+            } else {
+                emitGraphemesIntoBox(tok.text, Rect(cLeft, boundedBox.top, cRight, boundedBox.bottom), lineIndex, outChars)
+            }
+            prevRight = cRight
+        }
+    }
+
     private suspend fun recognizeDetectedBoxesPureRaster(
         bitmap: Bitmap,
         boxes: List<Rect>,
@@ -2391,30 +2494,31 @@ object PaddleOcrManager {
 
                 val useOnnxResult = ctcResult != null &&
                         ctcResult.text.isNotBlank() &&
-                        ctcResult.arbitrationScore >= 0.42f
+                        ctcResult.arbitrationScore >= 0.40f
 
                 val globalTightBox = Rect(cropLeft, cropTop, cropLeft + cropW, cropTop + cropH)
 
                 if (useOnnxResult && ctcResult != null) {
                     val snappedText = snapLineToPageLexicon(ctcResult.text, pageLexicon)
-                    if (snappedText == ctcResult.text) {
+                    val ctcSpanBox = refineBoxWithCtcTimesteps(ctcResult, paddedLeft, paddedW, globalTightBox)
+                    val subGlyphs = segmentLineIntoGlyphRects(bitmap, ctcSpanBox)
+                    val nonSpaceCount = splitIntoGraphemes(snappedText).count { it.isNotBlank() }
+
+                    if (subGlyphs.size == nonSpaceCount || subGlyphs.isNotEmpty()) {
                         val refinedBox = emitAlignedGraphemesWithSubComponents(
                             bitmap = bitmap,
-                            box = globalTightBox,
+                            box = ctcSpanBox,
                             lineStr = snappedText,
                             lineIndex = lineIndex,
                             outChars = chars
                         )
                         lines.add(OcrRecognizedLine(snappedText, refinedBox))
+                    } else if (snappedText == ctcResult.text && ctcResult.tokens.isNotEmpty()) {
+                        emitCharsUsingCtcSteps(ctcResult, paddedLeft, paddedW, ctcSpanBox, lineIndex, chars)
+                        lines.add(OcrRecognizedLine(snappedText, ctcSpanBox))
                     } else {
-                        val refinedBox = emitAlignedGraphemesWithSubComponents(
-                            bitmap = bitmap,
-                            box = globalTightBox,
-                            lineStr = snappedText,
-                            lineIndex = lineIndex,
-                            outChars = chars
-                        )
-                        lines.add(OcrRecognizedLine(snappedText, refinedBox))
+                        emitGraphemesIntoBox(snappedText, ctcSpanBox, lineIndex, chars)
+                        lines.add(OcrRecognizedLine(snappedText, ctcSpanBox))
                     }
                     lineIndex++
                 } else {
@@ -2431,9 +2535,10 @@ object PaddleOcrManager {
                         lineIndex++
                     } else if (ctcResult != null && ctcResult.text.isNotBlank()) {
                         val snappedText = snapLineToPageLexicon(ctcResult.text, pageLexicon)
+                        val ctcSpanBox = refineBoxWithCtcTimesteps(ctcResult, paddedLeft, paddedW, globalTightBox)
                         val refinedBox = emitAlignedGraphemesWithSubComponents(
                             bitmap = bitmap,
-                            box = globalTightBox,
+                            box = ctcSpanBox,
                             lineStr = snappedText,
                             lineIndex = lineIndex,
                             outChars = chars

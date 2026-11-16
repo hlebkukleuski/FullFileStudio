@@ -41,5 +41,9 @@
 # Keep DocumentSession implementation names
 -keepnames class * implements com.omnireader.core.engine.DocumentSession
 
-# Keep generated AIDL interfaces
--keep class * extends android.os.IInterface { *; }
+# Keep generated AIDL IPC interfaces, stubs and proxies
+-keep class com.omnireader.core.engine.IIsolatedEngineService* { *; }
+-keep class com.omnireader.core.engine.ISessionStateCallback* { *; }
+-keep class * implements android.os.Parcelable {
+    public static final android.os.Parcelable$Creator *;
+}
