@@ -29,7 +29,6 @@ import android.os.SharedMemory
 import android.system.Os
 import android.system.OsConstants
 import android.util.Log
-import com.google.android.play.core.splitcompat.SplitCompat
 import com.omnireader.core.engine.AdaptiveRingBitmapPool
 import com.omnireader.core.engine.DetectedFormat
 import com.omnireader.core.engine.DocumentSession
@@ -46,7 +45,6 @@ import com.omnireader.core.engine.impl.DocumentRendererEngineImpl
 import com.omnireader.core.engine.impl.SqliteDatabaseSession
 import com.omnireader.core.engine.impl.UniversalHexInspectorImpl
 import com.omnireader.core.engine.modules.ArchiveSession
-import dalvik.system.PathClassLoader
 import java.io.File
 import java.io.FileDescriptor
 import java.nio.ByteBuffer
@@ -72,44 +70,29 @@ class IsolatedRenderService : Service() {
     private val sessionRenderLocks = ConcurrentHashMap<Int, Any>()
     private val stateCallbacks = ConcurrentHashMap<Int, ISessionStateCallback>()
     private val cachedFactories = ConcurrentHashMap<String, DynamicEngineFactory>()
-    private val cachedSplitLoaders = ConcurrentHashMap<String, ClassLoader>()
-
-    override fun attachBaseContext(newBase: Context?) {
-        super.attachBaseContext(newBase)
-        if (newBase != null) {
-            try { SplitCompat.install(newBase) } catch (_: Throwable) {}
-        }
-    }
 
     override fun onCreate() {
         super.onCreate()
-        try { SplitCompat.install(this) } catch (_: Throwable) {}
-        try { applicationContext?.let { SplitCompat.install(it) } } catch (_: Throwable) {}
-        try {
-            cacheDir?.absolutePath?.let { System.setProperty("omnireader.cache.dir", it) }
-        } catch (_: Throwable) {}
-        SecurityArena.safeInitArena(DEFAULT_ARENA_SIZE_BYTES)
-    }
-
-    private fun moduleNameForFactoryClass(className: String): String? = when {
-        className.contains(".office.") -> "office"
-        className.contains(".cadvector.") -> "cadvector"
-        className.contains(".archives.") -> "archives"
-        else -> null
+        if (!android.os.Process.isIsolated()) {
+            try {
+                cacheDir?.absolutePath?.let { System.setProperty("omnireader.cache.dir", it) }
+            } catch (_: Throwable) {}
+        }
+        try { com.omnireader.core.engine.impl.OfficeFonts.install(assets) } catch (_: Throwable) {}
+        if (android.os.Process.isIsolated()) {
+            val seccompActive = SecurityArena.safeSetupSeccomp()
+            android.util.Log.i("IsolatedRenderService", "seccomp deny-list active=$seccompActive")
+        }
     }
 
     private fun loadDynamicFactory(className: String): DynamicEngineFactory? {
         cachedFactories[className]?.let { return it }
-        val moduleName = moduleNameForFactoryClass(className)
-
         val candidateLoaders = listOfNotNull(
-            moduleName?.let { cachedSplitLoaders[it] },
             classLoader,
             applicationContext?.classLoader,
             IsolatedRenderService::class.java.classLoader,
             Thread.currentThread().contextClassLoader
         )
-
         for (loader in candidateLoaders) {
             try {
                 val clazz = Class.forName(className, true, loader)
@@ -120,84 +103,8 @@ class IsolatedRenderService : Service() {
                 }
             } catch (_: Throwable) {}
         }
-
-        if (moduleName != null) {
-            for (ctx in listOfNotNull(this, applicationContext)) {
-                try {
-                    val splitCtx = ctx.createContextForSplit(moduleName)
-                    val splitLoader = splitCtx.classLoader
-                    if (splitLoader != null) {
-                        val clazz = Class.forName(className, true, splitLoader)
-                        val instance = clazz.getDeclaredConstructor().newInstance() as? DynamicEngineFactory
-                        if (instance != null) {
-                            cachedSplitLoaders[moduleName] = splitLoader
-                            cachedFactories[className] = instance
-                            return instance
-                        }
-                    }
-                } catch (_: Throwable) {}
-            }
-        }
-
-        try {
-            val appInfo = applicationContext?.applicationInfo ?: applicationInfo
-            val splitDirs = appInfo?.splitSourceDirs
-            if (!splitDirs.isNullOrEmpty()) {
-                for (splitPath in splitDirs) {
-                    val fileName = File(splitPath).name.lowercase(Locale.ROOT)
-                    if (moduleName == null || fileName.contains(moduleName) || splitDirs.size <= 6) {
-                        try {
-                            val loader = cachedSplitLoaders.getOrPut(splitPath) {
-                                PathClassLoader(
-                                    splitPath,
-                                    appInfo.nativeLibraryDir,
-                                    applicationContext?.classLoader ?: classLoader
-                                )
-                            }
-                            val clazz = Class.forName(className, true, loader)
-                            val instance = clazz.getDeclaredConstructor().newInstance() as? DynamicEngineFactory
-                            if (instance != null) {
-                                if (moduleName != null) cachedSplitLoaders[moduleName] = loader
-                                cachedFactories[className] = instance
-                                return instance
-                            }
-                        } catch (_: Throwable) {}
-                    }
-                }
-            }
-        } catch (_: Throwable) {}
-
-        try {
-            try { SplitCompat.install(this) } catch (_: Throwable) {}
-            try { applicationContext?.let { SplitCompat.install(it) } } catch (_: Throwable) {}
-            val loader = applicationContext?.classLoader ?: classLoader
-            val clazz = Class.forName(className, true, loader)
-            val instance = clazz.getDeclaredConstructor().newInstance() as? DynamicEngineFactory
-            if (instance != null) {
-                cachedFactories[className] = instance
-                return instance
-            }
-        } catch (_: Throwable) {}
-
-        return try {
-            val pkgCtx = createPackageContext(
-                packageName,
-                Context.CONTEXT_INCLUDE_CODE or Context.CONTEXT_IGNORE_SECURITY
-            )
-            try { SplitCompat.install(pkgCtx) } catch (_: Throwable) {}
-            val modCtx = if (moduleName != null) {
-                try { pkgCtx.createContextForSplit(moduleName) } catch (_: Throwable) { pkgCtx }
-            } else pkgCtx
-            val clazz = Class.forName(className, true, modCtx.classLoader)
-            val instance = clazz.getDeclaredConstructor().newInstance() as? DynamicEngineFactory
-            if (instance != null) {
-                cachedFactories[className] = instance
-            }
-            instance
-        } catch (t: Throwable) {
-            Log.w(TAG, "Dynamic factory $className not in split classloader, using built-in clean-room engine", t)
-            null
-        }
+        Log.w(TAG, "Engine factory $className unavailable, using built-in clean-room engine")
+        return null
     }
 
     private fun resolveDescriptorSize(fd: FileDescriptor): Long {
@@ -225,7 +132,7 @@ class IsolatedRenderService : Service() {
                 "epub" -> return DetectedFormat.EPUB
                 "fb2", "fbz" -> return DetectedFormat.FB2
                 "usdz" -> return DetectedFormat.USDZ
-                "3mf" -> return DetectedFormat.STL
+                "3mf", "zae" -> return DetectedFormat.STL
             }
         }
         if (rawFormat == DetectedFormat.UNKNOWN || rawFormat == DetectedFormat.PLAINTEXT) {
@@ -239,7 +146,7 @@ class IsolatedRenderService : Service() {
                 "mobi", "prc" -> return DetectedFormat.MOBI
                 "svg" -> return DetectedFormat.SVG
                 "svgz" -> return DetectedFormat.SVGZ
-                "stl", "ply", "off", "3ds", "fbx", "3mf", "dae", "step", "stp", "iges", "igs" -> return DetectedFormat.STL
+                "stl", "ply", "off", "3ds", "fbx", "3mf", "dae", "zae", "step", "stp", "iges", "igs" -> return DetectedFormat.STL
                 "obj" -> return DetectedFormat.OBJ
                 "dxf" -> return DetectedFormat.DXF
                 "dwg" -> return DetectedFormat.DWG
@@ -252,8 +159,10 @@ class IsolatedRenderService : Service() {
         return rawFormat
     }
 
-    private fun routeSession(fd: FileDescriptor, ext: String): DocumentSession {
-        SecurityArena.safeInitArena(DEFAULT_ARENA_SIZE_BYTES)
+    private fun writableCacheDirOrNull(): File? =
+        if (android.os.Process.isIsolated()) null else try { cacheDir } catch (_: Throwable) { null }
+
+    private fun routeSession(fd: FileDescriptor, ext: String, password: String? = null): DocumentSession {
         val cleanExt = ext.lowercase(Locale.ROOT).trim()
 
         if (cleanExt in setOf("hex", "bin", "elf", "dex", "so")) {
@@ -297,7 +206,7 @@ class IsolatedRenderService : Service() {
             )
         ) {
             return try {
-                DatabaseInspectorEngineImpl().createSessionWithCacheDir(fd, cacheDir, cleanExt)
+                DatabaseInspectorEngineImpl().createSessionWithCacheDir(fd, writableCacheDirOrNull(), cleanExt, password)
             } catch (e: Throwable) {
                 ErrorReportingDocumentSession(
                     e.message ?: "Unable to read database schema or table records."
@@ -308,7 +217,7 @@ class IsolatedRenderService : Service() {
         val cadExtensions = setOf(
             "svg", "svgz", "stl", "obj", "dxf", "dwg", "ply", "off",
             "3ds", "gltf", "glb", "blend", "usdz", "usd", "usda", "usdc", "fbx",
-            "3mf", "dae", "step", "stp", "iges", "igs"
+            "3mf", "dae", "zae", "step", "stp", "iges", "igs"
         )
         if (format in setOf(
                 DetectedFormat.SVG, DetectedFormat.SVGZ,
@@ -332,8 +241,8 @@ class IsolatedRenderService : Service() {
                 else -> cleanExt
             }
             loadDynamicFactory("me.hlebkukleuski.fullfilestudio.feature.cadvector.CadVectorEngineFactory")
-                ?.let { return it.createSession(fd, resolvedCadExt) }
-            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedCadExt)
+                ?.let { return it.createSessionWithPassword(fd, resolvedCadExt, password) }
+            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedCadExt, password)
         }
 
         val officeExtensions = setOf(
@@ -372,7 +281,7 @@ class IsolatedRenderService : Service() {
                 else -> cleanExt
             }
             loadDynamicFactory("me.hlebkukleuski.fullfilestudio.feature.office.OfficeEngineFactory")
-                ?.let { return it.createSession(fd, resolvedOfficeExt) }
+                ?.let { return it.createSessionWithPassword(fd, resolvedOfficeExt, password) }
 
             if (format in setOf(
                     DetectedFormat.DOC, DetectedFormat.XLS, DetectedFormat.PPT,
@@ -385,9 +294,9 @@ class IsolatedRenderService : Service() {
                     "pptx", "pptm", "ppsx", "ppsm", "potx", "potm", "odp", "otp"
                 )
             ) {
-                return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedOfficeExt)
+                return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedOfficeExt, password)
             }
-            return DocumentRendererEngineImpl().createSessionForFormat(fd, format, resolvedOfficeExt)
+            return DocumentRendererEngineImpl().createSessionForFormat(fd, format, resolvedOfficeExt, password)
         }
 
         val isOfficeOrEbookOr3dZipExtension = cleanExt in setOf(
@@ -395,7 +304,7 @@ class IsolatedRenderService : Service() {
             "xlsx", "xlsm", "xlsb", "xltx", "xltm",
             "pptx", "pptm", "ppsx", "ppsm", "potx", "potm",
             "odt", "ott", "ods", "ots", "odp", "otp", "epub", "fb2", "fbz",
-            "usdz", "3mf"
+            "usdz", "3mf", "zae"
         )
         if ((format in setOf(
                 DetectedFormat.ZIP, DetectedFormat.SEVEN_ZIP, DetectedFormat.RAR_V4, DetectedFormat.RAR_V5,
@@ -417,11 +326,11 @@ class IsolatedRenderService : Service() {
                 else -> cleanExt
             }
             loadDynamicFactory("me.hlebkukleuski.fullfilestudio.feature.archives.ArchiveEngineFactory")
-                ?.let { return it.createSession(fd, resolvedArcExt) }
-            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedArcExt)
+                ?.let { return it.createSessionWithPassword(fd, resolvedArcExt, password) }
+            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedArcExt, password)
         }
 
-        return DocumentRendererEngineImpl().createSessionForFormat(fd, format, cleanExt)
+        return DocumentRendererEngineImpl().createSessionForFormat(fd, format, cleanExt, password)
     }
 
     private fun attachSessionListener(sessionId: Int, session: DocumentSession) {
@@ -442,12 +351,16 @@ class IsolatedRenderService : Service() {
 
     private val binder = object : IIsolatedEngineService.Stub() {
         override fun openSession(pfd: ParcelFileDescriptor?, extension: String?): Int {
+            return openSessionWithPassword(pfd, extension, null)
+        }
+
+        override fun openSessionWithPassword(pfd: ParcelFileDescriptor?, extension: String?, password: String?): Int {
             if (pfd == null) return -1
             return try {
                 val fd = pfd.fileDescriptor ?: return -1
                 val sessionId = sessionCounter.getAndIncrement()
                 val session = try {
-                    routeSession(fd, extension ?: "")
+                    routeSession(fd, extension ?: "", password)
                 } catch (e: Throwable) {
                     Log.e(TAG, "routeSession fallback error", e)
                     ErrorReportingDocumentSession(e.localizedMessage ?: "File structure parse error.")
@@ -488,8 +401,54 @@ class IsolatedRenderService : Service() {
             return activeSessions[sessionId]?.getLastError()
         }
 
+        override fun getMissingResources(sessionId: Int): Array<String> {
+            return try { activeSessions[sessionId]?.getMissingResources()?.toTypedArray() } catch (_: Throwable) { null } ?: emptyArray()
+        }
+
+        override fun provideResource(sessionId: Int, name: String?, pfd: ParcelFileDescriptor?): Boolean {
+            val session = activeSessions[sessionId] ?: return false
+            if (name.isNullOrBlank() || pfd == null) return false
+            return try {
+                pfd.use { session.provideResource(name, it.fileDescriptor) }
+            } catch (_: Throwable) {
+                false
+            }
+        }
+
+        override fun applyProvidedResources(sessionId: Int): Boolean {
+            val session = activeSessions[sessionId] ?: return false
+            val renderLock = sessionRenderLocks.getOrPut(sessionId) { Any() }
+            return synchronized(renderLock) {
+                try { session.applyProvidedResources() } catch (_: Throwable) { false }
+            }
+        }
+
         override fun getPageCount(sessionId: Int): Int = activeSessions[sessionId]?.pageCount ?: 1
         override fun is3dSession(sessionId: Int): Boolean = activeSessions[sessionId]?.is3dContent ?: false
+
+        override fun exportMeshScene(sessionId: Int): SharedMemory? {
+            val session = activeSessions[sessionId] as? com.omnireader.core.engine.MeshSceneSource ?: return null
+            val renderLock = sessionRenderLocks.getOrPut(sessionId) { Any() }
+            synchronized(renderLock) {
+                val scene = session.exportMeshScene() ?: return null
+                val size = com.omnireader.core.engine.MeshSceneCodec.encodedSize(scene)
+                val memory = SharedMemory.create("mesh_scene_$sessionId", size.coerceAtLeast(1))
+                var mapped: ByteBuffer? = null
+                return try {
+                    mapped = memory.mapReadWrite()
+                    com.omnireader.core.engine.MeshSceneCodec.encode(scene, mapped)
+                    SharedMemory.unmap(mapped)
+                    mapped = null
+                    memory.setProtect(android.system.OsConstants.PROT_READ)
+                    memory
+                } catch (e: Throwable) {
+                    Log.e(TAG, "exportMeshScene error", e)
+                    if (mapped != null) try { SharedMemory.unmap(mapped) } catch (_: Throwable) {}
+                    memory.close()
+                    null
+                }
+            }
+        }
 
         override fun renderTile(
             sessionId: Int,
@@ -578,12 +537,21 @@ class IsolatedRenderService : Service() {
             return if (widths.size > MAX_BINDER_COLUMNS) widths.copyOf(MAX_BINDER_COLUMNS) else widths
         }
 
+        override fun getRowHeights(sessionId: Int): FloatArray {
+            val heights = activeSessions[sessionId]?.getRowHeights() ?: return FloatArray(0)
+            return if (heights.size > MAX_BINDER_ROWS) heights.copyOf(MAX_BINDER_ROWS) else heights
+        }
+
         override fun getCellText(sessionId: Int, row: Int, col: Int): String {
-            return activeSessions[sessionId]?.getCellText(row, col) ?: ""
+            val session = activeSessions[sessionId] ?: return ""
+            if (session.isCopyRestricted) return ""
+            return session.getCellText(row, col)
         }
 
         override fun getSelectedRangeText(sessionId: Int, startRow: Int, startCol: Int, endRow: Int, endCol: Int): String {
-            val raw = activeSessions[sessionId]?.getSelectedRangeText(startRow, startCol, endRow, endCol) ?: ""
+            val session = activeSessions[sessionId] ?: return ""
+            if (session.isCopyRestricted) return ""
+            val raw = session.getSelectedRangeText(startRow, startCol, endRow, endCol)
             return if (raw.length > MAX_BINDER_TEXT_CHARS) {
                 raw.substring(0, MAX_BINDER_TEXT_CHARS)
             } else {
@@ -605,6 +573,10 @@ class IsolatedRenderService : Service() {
         override fun isArchiveSession(sessionId: Int): Boolean {
             val session = activeSessions[sessionId]
             return session is ArchiveSession || session?.javaClass?.name?.contains("ArchiveSession") == true
+        }
+
+        override fun isCopyRestricted(sessionId: Int): Boolean {
+            return activeSessions[sessionId]?.isCopyRestricted == true
         }
 
         override fun getArchiveEntries(sessionId: Int): Array<String> {
@@ -640,10 +612,7 @@ class IsolatedRenderService : Service() {
         }
     }
 
-    override fun onBind(intent: Intent?): IBinder {
-        SecurityArena.safeInitArena(DEFAULT_ARENA_SIZE_BYTES)
-        return binder
-    }
+    override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onUnbind(intent: Intent?): Boolean {
         closeAllActiveSessions()
@@ -659,12 +628,6 @@ class IsolatedRenderService : Service() {
         super.onTrimMemory(level)
         if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW || level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             AdaptiveRingBitmapPool.trimToZero()
-            if (SecurityArena.isNativeLoaded) {
-                try { SecurityArena.zeroBufferNeonNative() } catch (_: Throwable) {}
-            }
-            if (level == ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL) {
-                SecurityArena.safeReleaseArena()
-            }
         }
     }
 
@@ -682,13 +645,12 @@ class IsolatedRenderService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         closeAllActiveSessions()
-        SecurityArena.safeReleaseArena()
     }
 
     companion object {
         private const val TAG = "IsolatedRenderService"
         private const val MAX_BINDER_TEXT_CHARS = 360_000
         private const val MAX_BINDER_COLUMNS = 4096
-        private const val DEFAULT_ARENA_SIZE_BYTES = 16L * 1024L * 1024L
+        private const val MAX_BINDER_ROWS = 65536
     }
 }

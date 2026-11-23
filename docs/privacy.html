@@ -60,21 +60,27 @@
     </a>
 
     <h1>Privacy Policy for FullFileStudio</h1>
-    <p><strong>Effective Date:</strong> November 9, 2026</p>
+    <p><strong>Effective Date:</strong> November 22, 2026</p>
 
-    <p>FullFileStudio is developed by Hleb Kukleuski as an open-source, privacy-first mobile file reader. This Privacy Policy explains our commitment to protecting your privacy.</p>
+    <p>FullFileStudio is developed by Hleb Kukleuski as an open-source, privacy-first mobile file reader. This Privacy Policy accurately describes how the application handles your data and Android permissions.</p>
 
-    <h2>1. Data Collection & Processing</h2>
-    <p>FullFileStudio operates completely offline for document reading, OCR recognition, media playback, and database inspection. We do not collect, transmit, store, or sell any personal data, documents, telemetry, or user content.</p>
+    <h2>1. Zero Data Collection &amp; 100% Local Processing</h2>
+    <p>All document rendering, archive extraction, 3D/CAD viewing, database inspection, media playback, and neural OCR text recognition execute <strong>100% locally on your device</strong> inside an isolated Android sandbox process. FullFileStudio does not collect, transmit, store, profile, or sell any personal data, files, crash logs, analytics, or telemetry. No advertising or tracking SDKs are included in any build.</p>
 
-    <h2>2. Permissions</h2>
-    <p>FullFileStudio requests Android system permissions solely to access files selected directly by the user via the Storage Access Framework (SAF) or file picker. Permissions are never used for background data collection.</p>
+    <h2>2. Android Permissions</h2>
+    <p>FullFileStudio requests only the minimum system permissions required for its local features:</p>
+    <ul>
+        <li><strong>File access:</strong> Handled exclusively via Android's Storage Access Framework (SAF) and explicit user file picks; no broad storage permissions are requested.</li>
+        <li><strong><code>POST_NOTIFICATIONS</code>, <code>FOREGROUND_SERVICE</code>, <code>FOREGROUND_SERVICE_MEDIA_PLAYBACK</code>, <code>WAKE_LOCK</code>:</strong> Used solely to display media playback controls and keep audio/video playing smoothly when the user plays a local media file.</li>
+        <li><strong>Google Play build (<code>googlePlay</code>):</strong> Requests <strong>zero network permissions</strong> (no <code>INTERNET</code> and no <code>ACCESS_NETWORK_STATE</code>). All format engines are bundled inside the app and it cannot initiate network connections.</li>
+        <li><strong>Standalone GitHub build (<code>standalone</code> only):</strong> Requests <code>INTERNET</code>, <code>ACCESS_NETWORK_STATE</code>, and <code>REQUEST_INSTALL_PACKAGES</code> strictly for optional HTTPS (TLS 1.3) release update checks against <code>hlebkukleuski.github.io/FullFileStudio/version.json</code> and user-confirmed APK downloads from GitHub Releases. Standard HTTP metadata (such as your IP address and user-agent) is handled by GitHub's servers solely when fetching that update manifest or APK.</li>
+    </ul>
 
-    <h2>3. Third-Party Services</h2>
-    <p>The Google Play distribution of the app may use Google Play Dynamic Delivery to install optional format modules on demand. No personal identifiers are transmitted during module installation.</p>
+    <h2>3. Third-Party Services &amp; Embedded WebView Sandbox</h2>
+    <p>FullFileStudio includes no proprietary analytics, crash-reporting, or Google Play Services SDKs. When rendering local HTML/MHTML files in the built-in viewer, all external network requests are blocked by an offline WebView sandbox.</p>
 
     <h2>4. Open Source License</h2>
-    <p>FullFileStudio is licensed under the <a href="https://gnu.org/licenses/gpl-3.0.html">GNU General Public License v3.0</a>.</p>
+    <p>FullFileStudio is licensed under the <a href="https://www.gnu.org/licenses/gpl-3.0.html">GNU General Public License v3.0 or later</a>. See <a href="licenses.html">Open Source Licenses</a> for third-party notices.</p>
 
     <h2>5. Contact Information</h2>
     <p>If you have any questions regarding this Privacy Policy, contact us at: <a href="mailto:hlebkukleuski@gmail.com">hlebkukleuski@gmail.com</a>.</p>

@@ -3,12 +3,29 @@ PaddleOCR NOTICE
 ========================================================================
 
 PaddleOCR
-Copyright (c) 2020 PaddlePaddle Authors. All Rights Reserved.
+Copyright (c) 2020-2026 PaddlePaddle Authors. All Rights Reserved.
 
-This product includes software developed at PaddlePaddle (https://github.com/PaddlePaddle/PaddleOCR).
+This product includes software developed at PaddlePaddle
+(https://github.com/PaddlePaddle/PaddleOCR).
 
 Component Details:
-- Pre-trained OCR detection and recognition models (ch_PP-OCRv4_det, ch_PP-OCRv4_rec, cyrillic_PP-OCRv3_rec)
-- Character dictionary files (ppocr_keys_v1.txt, cyrillic_dict.txt, latin_dict.txt, ppocrv5_dict.txt)
+- Pre-trained PP-OCRv4 detection and recognition ONNX models:
+  det/inference.onnx, rec/inference.onnx
+- Pre-trained PP-OCRv5 multilingual recognition ONNX models:
+  rec/eslav_ppocrv5_rec.onnx, rec/latin_ppocrv5_rec.onnx
+- Character dictionary files:
+  ppocrv5_dict.txt, eslav_ppocrv5_dict.txt, latin_ppocrv5_dict.txt,
+  ppocr_keys_v1.txt, multilingual_keys.txt
+
+Modification & Asset Demarcation Notice (Apache-2.0 §4(b)):
+- The ONNX inference graphs under assets/models/det/ and assets/models/rec/ were
+  exported and converted to ONNX format from upstream PaddleOCR checkpoints, and
+  assets/models/rec/multilingual_keys.txt along with the embedded dictionary tables
+  in PaddleOcrManager.kt were adapted and combined from upstream PaddleOCR
+  character dictionaries (ppocr/utils/dict/) for FullFileStudio in 2026.
+- These pre-trained model weights and dictionary data assets are standalone
+  data files loaded at runtime via ONNX Runtime and remain licensed under the
+  Apache License, Version 2.0 (separate from FullFileStudio's GPL-3.0-or-later
+  application code).
 
 Licensed under the Apache License, Version 2.0.

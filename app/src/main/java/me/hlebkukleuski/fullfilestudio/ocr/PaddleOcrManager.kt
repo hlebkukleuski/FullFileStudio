@@ -13,6 +13,11 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://gnu.org>.
+ *
+ * Character recognition dictionaries and ONNX model integration adapted and modified from
+ * PaddleOCR (https://github.com/PaddlePaddle/PaddleOCR, ppocr/utils/dict/),
+ * Copyright (c) 2020-2026 PaddlePaddle Authors, licensed under the Apache License, Version 2.0.
+ * Modified for FullFileStudio in 2026.
  */
 
 package me.hlebkukleuski.fullfilestudio.ocr
@@ -93,10 +98,12 @@ object PaddleOcrManager {
 
     private val GLYPH_CELL_ENTRY_REGEX = Regex("""\[U\+([0-9A-Fa-f]{4,6})\s+'([\s\S]*?)'\]""")
     private val PDF_NATIVE_BOX_LINE_REGEX = Regex("""^\[PDF_BOX:([0-9.]+),([0-9.]+),([0-9.]+),([0-9.]+)\](.*)$""")
+    private val LEXICON_TOKEN_SPLIT_REGEX = Regex("[\\s,.;:!?()\\[\\]\"'«»—–]+")
 
     private enum class RecHeadKind {
         PRIMARY_MULTILINGUAL,
-        CYRILLIC_ESLAV
+        CYRILLIC_ESLAV,
+        LATIN
     }
 
     private val OFFICIAL_PADDLE_CYRILLIC_BASE_DICT: List<String> = listOf(
@@ -165,6 +172,15 @@ object PaddleOcrManager {
     private var cyrillicInputHeight: Int = 32
 
     @Volatile
+    private var latinRecSession: OrtSession? = null
+
+    @Volatile
+    private var latinSupportsDynamicWidth: Boolean = false
+
+    @Volatile
+    private var latinInputHeight: Int = 48
+
+    @Volatile
     private var isInitialized = false
 
     @Volatile
@@ -195,16 +211,6 @@ object PaddleOcrManager {
         val startStep: Int,
         val endStep: Int,
         val confidence: Float
-    )
-
-    private data class DecodedWordSpan(
-        val text: String,
-        val tokens: List<DecodedCtcToken>,
-        val startStep: Int,
-        val endStep: Int,
-        val totalSteps: Int,
-        val averageConfidence: Float,
-        val arbitrationScore: Float
     )
 
     private data class CtcDecodeResult(
@@ -251,7 +257,9 @@ object PaddleOcrManager {
                     listOf("ppocrv6_small_rec.onnx", "multilingual_rec.onnx", "inference.onnx", "rec.onnx")
                 )
                 val primaryRecCandidates = allRecCandidates.filter {
-                    !it.contains("cyrillic", ignoreCase = true) && !it.contains("eslav", ignoreCase = true)
+                    !it.contains("cyrillic", ignoreCase = true) &&
+                            !it.contains("eslav", ignoreCase = true) &&
+                            !it.contains("latin", ignoreCase = true)
                 }.ifEmpty { allRecCandidates }
                 val primaryRecFile = copyFirstAvailableAssetToCache(context, primaryRecCandidates)
 
@@ -264,8 +272,16 @@ object PaddleOcrManager {
                 }
                 val cyrillicRecFile = copyFirstAvailableAssetToCache(context, cyrillicRecCandidates)
 
+                val latinRecCandidates = discoverOnnxAssetsInFolder(
+                    context,
+                    "models/rec",
+                    listOf("latin_ppocrv5_rec.onnx", "latin_rec.onnx")
+                ).filter { it.contains("latin", ignoreCase = true) }
+                val latinRecFile = copyFirstAvailableAssetToCache(context, latinRecCandidates)
+
                 synchronized(ortRunLock) {
                     val env = try { OrtEnvironment.getEnvironment() } catch (_: Throwable) { null }
+                    try { env?.setTelemetry(false) } catch (_: Throwable) { }
                     ortEnv = env
                     if (env != null) {
                         val sessionOptions = OrtSession.SessionOptions().apply {
@@ -310,6 +326,18 @@ object PaddleOcrManager {
                                 cyrillicInputHeight = inH
                             } catch (_: Throwable) {
                                 cyrillicRecSession = null
+                            }
+                        }
+
+                        if (latinRecFile != null && latinRecFile.exists()) {
+                            try {
+                                val lRec = env.createSession(latinRecFile.absolutePath, sessionOptions)
+                                latinRecSession = lRec
+                                val (dynW, inH) = inspectAndProbeRecInputSpec(env, lRec, defaultHeight = 48)
+                                latinSupportsDynamicWidth = dynW
+                                latinInputHeight = inH
+                            } catch (_: Throwable) {
+                                latinRecSession = null
                             }
                         }
                     }
@@ -382,11 +410,14 @@ object PaddleOcrManager {
         cyrillicAssetDict.clear()
         latinAssetDict.clear()
 
-        loadDictionaryFromAsset(context, "models/rec/cyrillic_dict.txt", cyrillicAssetDict)
-        if (cyrillicAssetDict.isEmpty()) {
-            loadDictionaryFromAsset(context, "models/rec/cyrillic_keys.txt", cyrillicAssetDict)
+        for (asset in listOf("eslav_ppocrv5_dict.txt", "cyrillic_dict.txt", "cyrillic_keys.txt")) {
+            if (cyrillicAssetDict.isNotEmpty()) break
+            loadDictionaryFromAsset(context, "models/rec/$asset", cyrillicAssetDict)
         }
-        loadDictionaryFromAsset(context, "models/rec/latin_dict.txt", latinAssetDict)
+        for (asset in listOf("latin_ppocrv5_dict.txt", "latin_dict.txt")) {
+            if (latinAssetDict.isNotEmpty()) break
+            loadDictionaryFromAsset(context, "models/rec/$asset", latinAssetDict)
+        }
 
         loadDictionaryFromAsset(context, "models/rec/ppocr_keys_v1.txt", v1Dictionary)
         loadDictionaryFromAsset(context, "models/rec/multilingual_keys.txt", multilingualDictionary)
@@ -495,8 +526,34 @@ object PaddleOcrManager {
         return out
     }
 
-    private fun getRelativeGraphemeWeight(g: String): Float {
+    private val graphemeWeightCache = java.util.concurrent.ConcurrentHashMap<String, Float>()
+
+    private val graphemeMeasurePaint: Paint by lazy {
+        Paint().apply {
+            textSize = 100f
+            typeface = Typeface.SANS_SERIF
+        }
+    }
+
+    internal fun getRelativeGraphemeWeight(g: String): Float {
         if (g.isEmpty()) return 1.0f
+        graphemeWeightCache[g]?.let { return it }
+        val measuredEm = try {
+            synchronized(graphemeMeasurePaint) { graphemeMeasurePaint.measureText(g) } / 100f
+        } catch (_: Throwable) {
+            0f
+        }
+        val weight = if (measuredEm > 0.01f) {
+            (measuredEm / 0.56f).coerceIn(0.2f, 3.0f)
+        } else {
+            getTabulatedGraphemeWeight(g)
+        }
+        if (graphemeWeightCache.size > 4096) graphemeWeightCache.clear()
+        graphemeWeightCache[g] = weight
+        return weight
+    }
+
+    private fun getTabulatedGraphemeWeight(g: String): Float {
         val cp = g.codePointAt(0)
         return when {
             cp in 0x1D504..0x1D59F || cp in 0x10330..0x1034A -> 1.15f
@@ -647,8 +704,9 @@ object PaddleOcrManager {
         val detectedBoxes = detectTextLineBoxesHybrid(bitmap)
         coroutineContext.ensureActive()
 
-        if (detectedBoxes.isNotEmpty() && (primaryRecSession != null || cyrillicRecSession != null)) {
-            val neuralPayload = recognizeDetectedBoxesPureRaster(
+        var neuralPayload: OcrResultPayload? = null
+        if (detectedBoxes.isNotEmpty() && hasAnyRecSession()) {
+            neuralPayload = recognizeDetectedBoxesPureRaster(
                 bitmap = bitmap,
                 boxes = detectedBoxes,
                 startLineIndex = 0,
@@ -656,7 +714,11 @@ object PaddleOcrManager {
                 preferredLanguageCode = preferredLanguageCode
             )
             if (neuralPayload.chars.isNotEmpty()) {
-                return neuralPayload
+                val contradictsNativeText = zoom <= 1.18f &&
+                        isRecognizedTextInconsistentWithLexicon(neuralPayload.lines, pageLexicon)
+                if (!contradictsNativeText) {
+                    return neuralPayload
+                }
             }
         }
 
@@ -676,13 +738,54 @@ object PaddleOcrManager {
             }
         }
 
-        return recognizeDetectedBoxesPureRaster(
+        return neuralPayload ?: recognizeDetectedBoxesPureRaster(
             bitmap = bitmap,
             boxes = detectedBoxes,
             startLineIndex = 0,
             pageLexicon = pageLexicon,
             preferredLanguageCode = preferredLanguageCode
         )
+    }
+
+    private fun isRecognizedTextInconsistentWithLexicon(
+        lines: List<OcrRecognizedLine>,
+        pageLexicon: Set<String>
+    ): Boolean {
+        if (pageLexicon.size < 4) return false
+        val lexiconLower = HashSet<String>(pageLexicon.size * 2)
+        for (word in pageLexicon) lexiconLower.add(word.lowercase(Locale.ROOT))
+
+        var comparable = 0
+        var matched = 0
+        for (line in lines) {
+            for (token in line.text.split(LEXICON_TOKEN_SPLIT_REGEX)) {
+                if (token.length < 3) continue
+                comparable++
+                if (token.lowercase(Locale.ROOT) in lexiconLower) matched++
+            }
+        }
+        return comparable >= 4 && matched * 10 < comparable * 3
+    }
+
+    private fun <T> sortIntoVisualRows(
+        items: List<T>,
+        rectOf: (T) -> Rect,
+        isSameRow: (anchor: Rect, candidate: Rect) -> Boolean
+    ): List<T> {
+        if (items.size <= 1) return items
+        val byTop = items.sortedWith(compareBy({ rectOf(it).top }, { rectOf(it).left }))
+        val rows = ArrayList<ArrayList<T>>()
+        for (item in byTop) {
+            val rect = rectOf(item)
+            val row = rows.lastOrNull { isSameRow(rectOf(it[0]), rect) }
+            if (row != null) row.add(item) else rows.add(arrayListOf(item))
+        }
+        val out = ArrayList<T>(items.size)
+        for (row in rows) {
+            row.sortBy { rectOf(it).left }
+            out.addAll(row)
+        }
+        return out
     }
 
     /**
@@ -731,30 +834,38 @@ object PaddleOcrManager {
                 continue
             }
 
-            val boxH = (rawBottom - rawTop).coerceAtLeast(8)
+            val nativeBox = Rect(rawLeft, rawTop, maxOf(rawRight, rawLeft + 2), maxOf(rawBottom, rawTop + 2))
+            val boxH = nativeBox.height().coerceAtLeast(8)
             val padX = (boxH * 0.15f).roundToInt().coerceIn(2, 12)
             val padY = (boxH * 0.14f).roundToInt().coerceIn(2, 8)
-            val candidateBox = Rect(
-                (rawLeft - padX).coerceIn(0, bitmap.width - 2),
-                (rawTop - padY).coerceIn(0, bitmap.height - 2),
-                (rawRight + padX).coerceIn((rawLeft - padX).coerceIn(0, bitmap.width - 2) + 2, bitmap.width),
-                (rawBottom + padY).coerceIn((rawTop - padY).coerceIn(0, bitmap.height - 2) + 2, bitmap.height)
+            val paddedBox = Rect(
+                nativeBox.left - padX,
+                nativeBox.top - padY,
+                nativeBox.right + padX,
+                nativeBox.bottom + padY
             )
+            val inkBox = Rect(nativeBox.left - 1, nativeBox.top - 1, nativeBox.right + 1, nativeBox.bottom + 1)
+            val isFullyVisible = inkBox.left >= 0 && inkBox.top >= 0 &&
+                    inkBox.right <= bitmap.width && inkBox.bottom <= bitmap.height
 
-            val exactNativeBox = Rect(
-                rawLeft.coerceIn(0, bitmap.width - 2),
-                rawTop.coerceIn(0, bitmap.height - 2),
-                rawRight.coerceIn(rawLeft.coerceIn(0, bitmap.width - 2) + 2, bitmap.width),
-                rawBottom.coerceIn(rawTop.coerceIn(0, bitmap.height - 2) + 2, bitmap.height)
-            )
             val lineIdx = linesOut.size
-            emitGraphemesIntoBox(
-                lineText = text,
-                box = exactNativeBox,
-                lineIndex = lineIdx,
-                outChars = charsOut
-            )
-            linesOut.add(OcrRecognizedLine(text, candidateBox))
+            if (isFullyVisible) {
+                emitAlignedGraphemesWithSubComponents(
+                    bitmap = bitmap,
+                    box = inkBox,
+                    lineStr = text,
+                    lineIndex = lineIdx,
+                    outChars = charsOut
+                )
+            } else {
+                emitGraphemesIntoBox(
+                    lineText = text,
+                    box = nativeBox,
+                    lineIndex = lineIdx,
+                    outChars = charsOut
+                )
+            }
+            linesOut.add(OcrRecognizedLine(text, paddedBox))
         }
 
         return OcrResultPayload(linesOut, charsOut)
@@ -880,21 +991,15 @@ object PaddleOcrManager {
         }
 
         // Sort all lines in natural 2D reading order (same visual row left-to-right, then top-to-bottom)
-        combined.sortWith { a, b ->
-            val ra = a.line.rect
-            val rb = b.line.rect
-            val vOverlap = minOf(ra.bottom, rb.bottom) - maxOf(ra.top, rb.top)
-            val minH = minOf(ra.height(), rb.height()).coerceAtLeast(1)
-            if (vOverlap >= minH * 0.45f) {
-                ra.left.compareTo(rb.left)
-            } else {
-                ra.top.compareTo(rb.top)
-            }
+        val ordered = sortIntoVisualRows(combined, { it.line.rect }) { anchor, candidate ->
+            val vOverlap = minOf(anchor.bottom, candidate.bottom) - maxOf(anchor.top, candidate.top)
+            val minH = minOf(anchor.height(), candidate.height()).coerceAtLeast(1)
+            vOverlap >= minH * 0.45f
         }
 
-        val finalLines = ArrayList<OcrRecognizedLine>(combined.size)
+        val finalLines = ArrayList<OcrRecognizedLine>(ordered.size)
         val finalChars = ArrayList<OcrRecognizedChar>(nativePayload.chars.size + rasterPayload.chars.size)
-        for ((newLineIdx, item) in combined.withIndex()) {
+        for ((newLineIdx, item) in ordered.withIndex()) {
             finalLines.add(item.line)
             for (ch in item.chars) {
                 finalChars.add(ch.copy(lineIndex = newLineIdx))
@@ -909,7 +1014,7 @@ object PaddleOcrManager {
         for (rawLine in hint.lines()) {
             val m = PDF_NATIVE_BOX_LINE_REGEX.matchEntire(rawLine.trim())
             val lineText = m?.groupValues?.get(5) ?: rawLine
-            for (token in lineText.split(Regex("[\\s,.;:!?()\\[\\]\"'«»—–]+"))) {
+            for (token in lineText.split(LEXICON_TOKEN_SPLIT_REGEX)) {
                 val trimmed = token.trim()
                 if (trimmed.length in 2..42) {
                     out.add(trimmed)
@@ -943,6 +1048,7 @@ object PaddleOcrManager {
             }
         }
         if (cyrCount == 0 || latCount == 0) return word
+        if (hasUniqueCyrillic && hasUniqueLatin) return word
 
         val convertToCyrillic = when {
             hasUniqueCyrillic && !hasUniqueLatin -> true
@@ -1154,9 +1260,9 @@ object PaddleOcrManager {
             if (rawCodeBot <= 0 || rawGlyphTop >= bitmap.height) continue
 
             val glyphTopPx = rawGlyphTop.coerceIn(0, bitmap.height - 4)
-            val glyphBotPx = rawGlyphBot.coerceIn(glyphTopPx + 2, bitmap.height - 2)
-            val codeTopPx = rawCodeTop.coerceIn(glyphBotPx + 1, bitmap.height - 2)
-            val codeBotPx = rawCodeBot.coerceIn(codeTopPx + 1, bitmap.height)
+            val glyphBotPx = rawGlyphBot.clampTo(glyphTopPx + 2, bitmap.height - 2)
+            val codeTopPx = rawCodeTop.clampTo(glyphBotPx + 1, bitmap.height - 2)
+            val codeBotPx = rawCodeBot.clampTo(codeTopPx + 1, bitmap.height)
 
             var rowLeftPx = bitmap.width
             var rowRightPx = 0
@@ -1182,7 +1288,7 @@ object PaddleOcrManager {
                 if (rawRight <= 0 || rawLeft >= bitmap.width) continue
 
                 val cLeft = rawLeft.coerceIn(0, bitmap.width - 2)
-                val cRight = rawRight.coerceIn(cLeft + 1, bitmap.width)
+                val cRight = rawRight.clampTo(cLeft + 1, bitmap.width)
 
                 if (cLeft < rowLeftPx) rowLeftPx = cLeft
                 if (cRight > rowRightPx) rowRightPx = cRight
@@ -1313,9 +1419,9 @@ object PaddleOcrManager {
             if (rawBotPx <= 0 || rawTopPx >= bitmap.height || rawRightPx <= 0 || rawLeftPx >= bitmap.width) return
 
             val lPx = rawLeftPx.coerceIn(0, bitmap.width - 2)
-            val rPx = rawRightPx.coerceIn(lPx + 1, bitmap.width)
+            val rPx = rawRightPx.clampTo(lPx + 1, bitmap.width)
             val tPx = rawTopPx.coerceIn(0, bitmap.height - 2)
-            val bPx = rawBotPx.coerceIn(tPx + 1, bitmap.height)
+            val bPx = rawBotPx.clampTo(tPx + 1, bitmap.height)
             val rect = Rect(lPx, tPx, rPx, bPx)
             val lineIdx = linesOut.size
             linesOut.add(OcrRecognizedLine(text, rect))
@@ -1428,8 +1534,8 @@ object PaddleOcrManager {
         if (subGlyphs.isEmpty()) return candidate
         val minL = subGlyphs.minOf { it.left }.coerceAtLeast(candidate.left)
         val minT = subGlyphs.minOf { it.top }.coerceAtLeast(candidate.top)
-        val maxR = subGlyphs.maxOf { it.right }.coerceIn(minL + 2, candidate.right)
-        val maxB = subGlyphs.maxOf { it.bottom }.coerceIn(minT + 2, candidate.bottom)
+        val maxR = subGlyphs.maxOf { it.right }.clampTo(minL + 2, candidate.right)
+        val maxB = subGlyphs.maxOf { it.bottom }.clampTo(minT + 2, candidate.bottom)
         return Rect(minL, minT, maxR, maxB)
     }
 
@@ -1460,7 +1566,7 @@ object PaddleOcrManager {
         // while keeping intact DBNet boxes for normal single-line phrases on photos.
         val merged = ArrayList<Rect>(dbNetBoxes.size + contrastBoxes.size)
         for (dbBox in dbNetBoxes) {
-            val subContrast = contrastBoxes.filter { cBox ->
+            val insideDb = contrastBoxes.filter { cBox ->
                 val interLeft = maxOf(dbBox.left, cBox.left)
                 val interTop = maxOf(dbBox.top, cBox.top)
                 val interRight = minOf(dbBox.right, cBox.right)
@@ -1470,17 +1576,46 @@ object PaddleOcrManager {
                 } else {
                     val interArea = (interRight - interLeft).toLong() * (interBot - interTop).toLong()
                     val cArea = (cBox.width().toLong() * cBox.height().toLong()).coerceAtLeast(1L)
-                    val mostlyInsideDb = interArea.toFloat() / cArea.toFloat() > 0.70f
-                    val isMultiLineSplit = cBox.height() < dbBox.height() * 0.62f
-                    val isMultiColumnSplit = cBox.width() < dbBox.width() * 0.65f &&
-                            (dbBox.width().toFloat() / dbBox.height().coerceAtLeast(1)) > 6.5f
-                    mostlyInsideDb && (isMultiLineSplit || isMultiColumnSplit)
+                    interArea.toFloat() / cArea.toFloat() > 0.70f
                 }
             }
-            if (subContrast.size >= 2) {
-                merged.addAll(subContrast)
-            } else {
-                merged.add(tightenBoxToForegroundInk(bitmap, dbBox))
+
+            val stackedLines = insideDb
+                .filter { it.height() < dbBox.height() * 0.62f && it.height() >= dbBox.height() * 0.18f }
+                .sortedBy { it.top }
+            var stackedBands = 0
+            var stackedCoverage = 0
+            var bandBottom = Int.MIN_VALUE
+            for (cBox in stackedLines) {
+                if (cBox.top >= bandBottom - cBox.height() / 4) {
+                    stackedBands++
+                    stackedCoverage += cBox.height()
+                    bandBottom = cBox.bottom
+                } else if (cBox.bottom > bandBottom) {
+                    stackedCoverage += cBox.bottom - bandBottom
+                    bandBottom = cBox.bottom
+                }
+            }
+            val isMultiLineSplit = stackedBands >= 2 && stackedCoverage >= dbBox.height() * 0.70f
+
+            val isWideRow = (dbBox.width().toFloat() / dbBox.height().coerceAtLeast(1)) > 6.5f
+            val columnSegments = insideDb.filter {
+                it.width() < dbBox.width() * 0.65f && it.height() >= dbBox.height() * 0.55f
+            }.sortedBy { it.left }
+            val minColumnGap = dbBox.height() * 1.5f
+            var hasColumnGutters = columnSegments.size >= 2
+            for (segIdx in 1 until columnSegments.size) {
+                if (columnSegments[segIdx].left - columnSegments[segIdx - 1].right < minColumnGap) {
+                    hasColumnGutters = false
+                    break
+                }
+            }
+            val isMultiColumnSplit = isWideRow && hasColumnGutters
+
+            when {
+                isMultiLineSplit -> merged.addAll(stackedLines)
+                isMultiColumnSplit -> merged.addAll(columnSegments)
+                else -> merged.add(tightenBoxToForegroundInk(bitmap, dbBox))
             }
         }
 
@@ -1836,7 +1971,33 @@ object PaddleOcrManager {
             lineRanges.add(0 until boxGridH)
         }
 
-        for (range in lineRanges) {
+        val tallestRange = lineRanges.maxOf { it.last - it.first + 1 }
+        val mergedRanges = ArrayList<IntRange>(lineRanges.size)
+        var rangeIdx = 0
+        while (rangeIdx < lineRanges.size) {
+            val range = lineRanges[rangeIdx]
+            val isShortBand = (range.last - range.first + 1) * 100 < tallestRange * 45
+            if (isShortBand) {
+                val prev = mergedRanges.lastOrNull()
+                val next = lineRanges.getOrNull(rangeIdx + 1)
+                val gapToPrev = if (prev != null) range.first - prev.last else Int.MAX_VALUE
+                val gapToNext = if (next != null) next.first - range.last else Int.MAX_VALUE
+                if (next != null && gapToNext < gapToPrev) {
+                    lineRanges[rangeIdx + 1] = range.first..next.last
+                    rangeIdx++
+                    continue
+                }
+                if (prev != null) {
+                    mergedRanges[mergedRanges.lastIndex] = prev.first..range.last
+                    rangeIdx++
+                    continue
+                }
+            }
+            mergedRanges.add(range)
+            rangeIdx++
+        }
+
+        for (range in mergedRanges) {
             val subMinY = minY + range.first
             val subMaxY = minY + range.last
             splitRowIntoHorizontalSegments(
@@ -2101,18 +2262,14 @@ object PaddleOcrManager {
         }
 
         val blockRowBin = (medianH * 2.4f).coerceAtLeast(24f)
-        blocks.sortWith { a, b ->
-            val vOverlap = minOf(a.bounds.bottom, b.bounds.bottom) - maxOf(a.bounds.top, b.bounds.top)
-            val minBlockH = minOf(a.bounds.height(), b.bounds.height()).coerceAtLeast(1)
-            if (vOverlap >= minBlockH * 0.35f || abs(a.bounds.top - b.bounds.top) <= blockRowBin) {
-                a.bounds.left.compareTo(b.bounds.left)
-            } else {
-                a.bounds.top.compareTo(b.bounds.top)
-            }
+        val orderedBlocks = sortIntoVisualRows(blocks, { it.bounds }) { anchor, candidate ->
+            val vOverlap = minOf(anchor.bottom, candidate.bottom) - maxOf(anchor.top, candidate.top)
+            val minBlockH = minOf(anchor.height(), candidate.height()).coerceAtLeast(1)
+            vOverlap >= minBlockH * 0.35f || abs(anchor.top - candidate.top) <= blockRowBin
         }
 
         val orderedOut = ArrayList<Rect>(mergedLines.size)
-        for (blk in blocks) {
+        for (blk in orderedBlocks) {
             blk.lines.sortWith(compareBy({ (it.centerY() / lineBin).toInt() }, { it.left }))
             orderedOut.addAll(blk.lines)
         }
@@ -2154,7 +2311,7 @@ object PaddleOcrManager {
             val stepH = (availH / hintParagraphs.size.coerceAtLeast(1)).coerceIn(20f, 88f)
             for ((idx, para) in hintParagraphs.withIndex()) {
                 val top = (topStart + idx * stepH).roundToInt().coerceIn(0, bitmap.height - 8)
-                val bot = (top + stepH * 0.82f).roundToInt().coerceIn(top + 4, bitmap.height)
+                val bot = (top + stepH * 0.82f).roundToInt().clampTo(top + 4, bitmap.height)
                 val rect = Rect(padX, top, bitmap.width - padX, bot)
                 val lineIdx = linesOut.size
                 linesOut.add(OcrRecognizedLine(para, rect))
@@ -2216,7 +2373,7 @@ object PaddleOcrManager {
             val startFrac = (viewTopInDoc / totalDocH.coerceAtLeast(1f) - 0.08f).coerceIn(0f, 0.9f)
             val endFrac = (viewBotInDoc / totalDocH.coerceAtLeast(1f) + 0.08f).coerceIn(startFrac + 0.1f, 1.0f)
             val startIdx = (hintParagraphs.size * startFrac).toInt().coerceIn(0, hintParagraphs.lastIndex)
-            val endIdx = (hintParagraphs.size * endFrac).roundToInt().coerceIn(startIdx + 1, hintParagraphs.size)
+            val endIdx = (hintParagraphs.size * endFrac).roundToInt().clampTo(startIdx + 1, hintParagraphs.size)
             hintParagraphs.subList(startIdx, endIdx)
         } else {
             hintParagraphs
@@ -2341,14 +2498,16 @@ object PaddleOcrManager {
 
         val tightLeft = subGlyphRects.minOf { it.left }.coerceAtLeast(box.left)
         val tightTop = subGlyphRects.minOf { it.top }.coerceAtLeast(box.top)
-        val tightRight = subGlyphRects.maxOf { it.right }.coerceIn(tightLeft + 2, box.right)
-        val tightBottom = subGlyphRects.maxOf { it.bottom }.coerceIn(tightTop + 2, box.bottom)
+        val tightRight = subGlyphRects.maxOf { it.right }.clampTo(tightLeft + 2, box.right)
+        val tightBottom = subGlyphRects.maxOf { it.bottom }.clampTo(tightTop + 2, box.bottom)
         val tightBox = Rect(tightLeft, tightTop, tightRight, tightBottom)
 
         val nonSpaceGraphemes = graphemes.filter { it.isNotBlank() }
 
         // Case 1: Exact 1-to-1 match between connected ink components and non-space graphemes
-        if (subGlyphRects.size == nonSpaceGraphemes.size) {
+        if (subGlyphRects.size == nonSpaceGraphemes.size &&
+            doGlyphRectsFollowGraphemeOrder(subGlyphRects, graphemes, tightBox)
+        ) {
             var gIdx = 0
             for (g in graphemes) {
                 if (g.isBlank()) {
@@ -2384,7 +2543,9 @@ object PaddleOcrManager {
         }
 
         val textWords = lineStr.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
-        if (wordClusters.size == textWords.size && textWords.isNotEmpty()) {
+        if (wordClusters.size == textWords.size && textWords.isNotEmpty() &&
+            doWordClustersMatchWordWidths(wordClusters, textWords)
+        ) {
             for (wIdx in textWords.indices) {
                 val clusterRect = wordClusters[wIdx]
                 if (wIdx > 0) {
@@ -2408,22 +2569,39 @@ object PaddleOcrManager {
         return tightBox
     }
 
-    private fun refineBoxWithCtcTimesteps(
-        ctcResult: CtcDecodeResult,
-        paddedLeft: Int,
-        paddedW: Int,
-        fallbackBox: Rect
-    ): Rect {
-        val nonBlank = ctcResult.tokens.filter { it.text.isNotBlank() }
-        val totalSteps = ctcResult.totalTimesteps.coerceAtLeast(1).toFloat()
-        if (nonBlank.isEmpty()) return fallbackBox
+    private fun doGlyphRectsFollowGraphemeOrder(glyphRects: List<Rect>, graphemes: List<String>, lineBox: Rect): Boolean {
+        val weights = FloatArray(graphemes.size) { getRelativeGraphemeWeight(graphemes[it]) }
+        val totalWeight = weights.sum().coerceAtLeast(0.001f)
+        val lineWidth = lineBox.width().coerceAtLeast(1).toFloat()
+        val maxCenterDrift = lineWidth / graphemes.size * 0.9f
+        var consumedWeight = 0f
+        var glyphIdx = 0
+        for (i in graphemes.indices) {
+            if (graphemes[i].isNotBlank()) {
+                val expectedCenter = lineBox.left + lineWidth * (consumedWeight + weights[i] / 2f) / totalWeight
+                if (abs(glyphRects[glyphIdx].exactCenterX() - expectedCenter) > maxCenterDrift) return false
+                glyphIdx++
+            }
+            consumedWeight += weights[i]
+        }
+        return true
+    }
 
-        val stepToPx = paddedW.toFloat() / totalSteps
-        val leftPx = (paddedLeft + (nonBlank.first().startStep - 0.65f) * stepToPx)
-            .roundToInt().coerceIn(fallbackBox.left, fallbackBox.right - 2)
-        val rightPx = (paddedLeft + (nonBlank.last().endStep + 1.65f) * stepToPx)
-            .roundToInt().coerceIn(leftPx + 2, fallbackBox.right)
-        return Rect(leftPx, fallbackBox.top, rightPx, fallbackBox.bottom)
+    private fun doWordClustersMatchWordWidths(wordClusters: List<Rect>, textWords: List<String>): Boolean {
+        val wordWeights = FloatArray(textWords.size) { idx ->
+            var sum = 0f
+            for (g in splitIntoGraphemes(textWords[idx])) sum += getRelativeGraphemeWeight(g)
+            sum
+        }
+        val totalWeight = wordWeights.sum().coerceAtLeast(0.001f)
+        val totalWidth = wordClusters.sumOf { it.width() }.toFloat().coerceAtLeast(1f)
+        for (idx in textWords.indices) {
+            val expectedShare = wordWeights[idx] / totalWeight
+            val actualShare = wordClusters[idx].width() / totalWidth
+            val tolerance = maxOf(expectedShare * 0.45f, 0.035f)
+            if (abs(actualShare - expectedShare) > tolerance) return false
+        }
+        return true
     }
 
     private fun emitCharsUsingCtcSteps(
@@ -2440,11 +2618,11 @@ object PaddleOcrManager {
         for ((idx, tok) in ctcResult.tokens.withIndex()) {
             val rawL = (paddedLeft + (tok.startStep - 0.35f) * stepToPx).roundToInt()
             val rawR = (paddedLeft + (tok.endStep + 1.35f) * stepToPx).roundToInt()
-            val cLeft = maxOf(prevRight, rawL.coerceIn(boundedBox.left, boundedBox.right - 1))
+            val cLeft = maxOf(prevRight, rawL.clampTo(boundedBox.left, boundedBox.right - 1))
             val cRight = if (idx == ctcResult.tokens.lastIndex) {
-                maxOf(cLeft + 1, rawR.coerceIn(cLeft + 1, boundedBox.right))
+                maxOf(cLeft + 1, rawR.clampTo(cLeft + 1, boundedBox.right))
             } else {
-                rawR.coerceIn(cLeft + 1, boundedBox.right)
+                rawR.clampTo(cLeft + 1, boundedBox.right)
             }
             val graphemes = splitIntoGraphemes(tok.text)
             if (graphemes.size <= 1) {
@@ -2488,8 +2666,8 @@ object PaddleOcrManager {
 
             val croppedBmp = Bitmap.createBitmap(bitmap, paddedLeft, paddedTop, paddedW, paddedH)
             try {
-                val ctcResult: CtcDecodeResult? = if (env != null && (primaryRecSession != null || cyrillicRecSession != null)) {
-                    runDualRecArbitration(croppedBmp, env, pageLexicon, preferredLanguageCode)
+                val ctcResult: CtcDecodeResult? = if (env != null && hasAnyRecSession()) {
+                    runRecHeadArbitration(croppedBmp, env, pageLexicon, preferredLanguageCode)
                 } else null
 
                 val useOnnxResult = ctcResult != null &&
@@ -2500,7 +2678,7 @@ object PaddleOcrManager {
 
                 if (useOnnxResult && ctcResult != null) {
                     val snappedText = snapLineToPageLexicon(ctcResult.text, pageLexicon)
-                    val ctcSpanBox = refineBoxWithCtcTimesteps(ctcResult, paddedLeft, paddedW, globalTightBox)
+                    val ctcSpanBox = globalTightBox
                     val subGlyphs = segmentLineIntoGlyphRects(bitmap, ctcSpanBox)
                     val nonSpaceCount = splitIntoGraphemes(snappedText).count { it.isNotBlank() }
 
@@ -2535,7 +2713,7 @@ object PaddleOcrManager {
                         lineIndex++
                     } else if (ctcResult != null && ctcResult.text.isNotBlank()) {
                         val snappedText = snapLineToPageLexicon(ctcResult.text, pageLexicon)
-                        val ctcSpanBox = refineBoxWithCtcTimesteps(ctcResult, paddedLeft, paddedW, globalTightBox)
+                        val ctcSpanBox = globalTightBox
                         val refinedBox = emitAlignedGraphemesWithSubComponents(
                             bitmap = bitmap,
                             box = ctcSpanBox,
@@ -2557,116 +2735,114 @@ object PaddleOcrManager {
         return OcrResultPayload(lines, chars)
     }
 
-    /**
-     * Unbiased Dual-Head Recognizer Arbitration:
-     * Evaluates both `cyrillicRecSession` (`CYRILLIC_ESLAV`) and `primaryRecSession` (`PRIMARY_MULTILINGUAL`)
-     * with their exact head-specific vocabularies and merges/arbitrates at both the word-interval level and line level.
-     */
-    private fun runDualRecArbitration(
+    private fun Int.clampTo(min: Int, max: Int): Int = if (max <= min) min else coerceIn(min, max)
+
+    private fun hasAnyRecSession(): Boolean =
+        primaryRecSession != null || cyrillicRecSession != null || latinRecSession != null
+
+    private fun runRecHead(
+        headKind: RecHeadKind,
+        cropBmp: Bitmap,
+        env: OrtEnvironment,
+        pageLexicon: Set<String>
+    ): CtcDecodeResult? {
+        val session: OrtSession
+        val supportsDynamicW: Boolean
+        val targetH: Int
+        when (headKind) {
+            RecHeadKind.PRIMARY_MULTILINGUAL -> {
+                session = primaryRecSession ?: return null
+                supportsDynamicW = primarySupportsDynamicWidth
+                targetH = primaryInputHeight
+            }
+            RecHeadKind.CYRILLIC_ESLAV -> {
+                session = cyrillicRecSession ?: return null
+                supportsDynamicW = cyrillicSupportsDynamicWidth
+                targetH = cyrillicInputHeight
+            }
+            RecHeadKind.LATIN -> {
+                session = latinRecSession ?: return null
+                supportsDynamicW = latinSupportsDynamicWidth
+                targetH = latinInputHeight
+            }
+        }
+        return runOnnxRecognitionWithDynamicSlicing(
+            cropBmp = cropBmp,
+            env = env,
+            rec = session,
+            supportsDynamicW = supportsDynamicW,
+            targetH = targetH,
+            headKind = headKind,
+            pageLexicon = pageLexicon
+        )
+    }
+
+    private fun containsHan(text: String): Boolean =
+        text.any { Character.UnicodeScript.of(it.code) == Character.UnicodeScript.HAN }
+
+    private fun isCyrillicDominant(text: String): Boolean {
+        var letters = 0
+        var cyrillic = 0
+        for (ch in text) {
+            if (!ch.isLetter()) continue
+            letters++
+            if (ch in '\u0400'..'\u052F') cyrillic++
+        }
+        return cyrillic > 0 && cyrillic * 5 >= letters
+    }
+
+    private fun countNonBlankChars(text: String): Int = text.count { !it.isWhitespace() }
+
+    private fun computeTimelineCoverage(res: CtcDecodeResult): Float {
+        var firstStep = -1
+        var lastStep = -1
+        for (tok in res.tokens) {
+            if (tok.text.isBlank()) continue
+            if (firstStep < 0) firstStep = tok.startStep
+            lastStep = tok.endStep
+        }
+        if (firstStep < 0) return 0f
+        return (lastStep - firstStep + 1).toFloat() / res.totalTimesteps.coerceAtLeast(1)
+    }
+
+    private fun runRecHeadArbitration(
         cropBmp: Bitmap,
         env: OrtEnvironment,
         pageLexicon: Set<String> = emptySet(),
         preferredLanguageCode: String = ""
     ): CtcDecodeResult? {
-        val pSession = primaryRecSession
-        val cSession = cyrillicRecSession
+        val lang = preferredLanguageCode.lowercase(Locale.ROOT)
+        val expectsHan = lang.startsWith("zh") || lang.startsWith("ja") || pageLexicon.any { containsHan(it) }
 
-        if (cSession == null && pSession != null) {
-            return runOnnxRecognitionWithDynamicSlicing(
-                cropBmp = cropBmp,
-                env = env,
-                rec = pSession,
-                supportsDynamicW = primarySupportsDynamicWidth,
-                targetH = primaryInputHeight,
-                headKind = RecHeadKind.PRIMARY_MULTILINGUAL,
-                pageLexicon = pageLexicon
-            )
-        }
-        if (pSession == null && cSession != null) {
-            return runOnnxRecognitionWithDynamicSlicing(
-                cropBmp = cropBmp,
-                env = env,
-                rec = cSession,
-                supportsDynamicW = cyrillicSupportsDynamicWidth,
-                targetH = cyrillicInputHeight,
-                headKind = RecHeadKind.CYRILLIC_ESLAV,
-                pageLexicon = pageLexicon
-            )
-        }
-        if (pSession == null || cSession == null) return null
-
-        val lexiconHasCyr = pageLexicon.any { w -> w.any { it in 'Ѐ'..'ԯ' } }
-        val preferCyrillicFirst = preferredLanguageCode.lowercase(Locale.ROOT) in setOf("ru", "uk") || lexiconHasCyr
-
-        if (preferCyrillicFirst) {
-            val cyrRes = runOnnxRecognitionWithDynamicSlicing(
-                cropBmp = cropBmp,
-                env = env,
-                rec = cSession,
-                supportsDynamicW = cyrillicSupportsDynamicWidth,
-                targetH = cyrillicInputHeight,
-                headKind = RecHeadKind.CYRILLIC_ESLAV,
-                pageLexicon = pageLexicon
-            )
-            // Fast-path accept when Cyrillic head decodes high-confidence pure Cyrillic text
-            if (cyrRes != null &&
-                cyrRes.text.isNotBlank() &&
-                cyrRes.averageConfidence >= 0.90f &&
-                cyrRes.text.any { it in 'Ѐ'..'ӿ' } &&
-                cyrRes.text.none { it in 'A'..'Z' || it in 'a'..'z' }
-            ) {
-                return cyrRes.copy(
-                    text = cyrRes.text.split(' ').joinToString(" ") { normalizeIntraWordHomoglyphs(it) }
-                )
+        var primaryRes: CtcDecodeResult? = null
+        var primaryTried = false
+        if (expectsHan) {
+            primaryRes = runRecHead(RecHeadKind.PRIMARY_MULTILINGUAL, cropBmp, env, pageLexicon)
+            primaryTried = true
+            if (primaryRes != null && containsHan(primaryRes.text) && primaryRes.averageConfidence >= 0.80f) {
+                return primaryRes
             }
-            val primRes = runOnnxRecognitionWithDynamicSlicing(
-                cropBmp = cropBmp,
-                env = env,
-                rec = pSession,
-                supportsDynamicW = primarySupportsDynamicWidth,
-                targetH = primaryInputHeight,
-                headKind = RecHeadKind.PRIMARY_MULTILINGUAL,
-                pageLexicon = pageLexicon
-            )
-            if (cyrRes == null) return primRes
-            if (primRes == null) return cyrRes
-            if (cyrRes.text.isBlank()) return primRes
-            if (primRes.text.isBlank()) return cyrRes
-            return mergeDualRecResultsAtWordLevel(cyrRes, primRes, pageLexicon)
-        } else {
-            val primRes = runOnnxRecognitionWithDynamicSlicing(
-                cropBmp = cropBmp,
-                env = env,
-                rec = pSession,
-                supportsDynamicW = primarySupportsDynamicWidth,
-                targetH = primaryInputHeight,
-                headKind = RecHeadKind.PRIMARY_MULTILINGUAL,
-                pageLexicon = pageLexicon
-            )
-            // Fast-path accept when Multilingual head decodes high-confidence Latin/CJK text
-            if (primRes != null &&
-                primRes.text.isNotBlank() &&
-                primRes.averageConfidence >= 0.88f
-            ) {
-                return primRes.copy(
-                    text = primRes.text.split(' ').joinToString(" ") { normalizeIntraWordHomoglyphs(it) }
-                )
-            }
-            val cyrRes = runOnnxRecognitionWithDynamicSlicing(
-                cropBmp = cropBmp,
-                env = env,
-                rec = cSession,
-                supportsDynamicW = cyrillicSupportsDynamicWidth,
-                targetH = cyrillicInputHeight,
-                headKind = RecHeadKind.CYRILLIC_ESLAV,
-                pageLexicon = pageLexicon
-            )
-            if (cyrRes == null) return primRes
-            if (primRes == null) return cyrRes
-            if (cyrRes.text.isBlank()) return primRes
-            if (primRes.text.isBlank()) return cyrRes
-            return mergeDualRecResultsAtWordLevel(cyrRes, primRes, pageLexicon)
         }
+
+        val eslavRes = runRecHead(RecHeadKind.CYRILLIC_ESLAV, cropBmp, env, pageLexicon)
+        var best: CtcDecodeResult? = eslavRes?.takeIf { it.text.isNotBlank() }
+        if (best == null || !isCyrillicDominant(best.text)) {
+            val latinRes = runRecHead(RecHeadKind.LATIN, cropBmp, env, pageLexicon)?.takeIf { it.text.isNotBlank() }
+            if (latinRes != null &&
+                (best == null || countNonBlankChars(latinRes.text) * 10 >= countNonBlankChars(best.text) * 7)
+            ) {
+                best = latinRes
+            }
+        }
+
+        if (!primaryTried && (best == null || computeTimelineCoverage(best) < 0.70f)) {
+            primaryRes = runRecHead(RecHeadKind.PRIMARY_MULTILINGUAL, cropBmp, env, pageLexicon)
+        }
+        if (primaryRes != null && primaryRes.text.isNotBlank()) {
+            if (best == null) return primaryRes
+            if (containsHan(primaryRes.text) && primaryRes.averageConfidence >= 0.60f) return primaryRes
+        }
+        return best ?: primaryRes
     }
 
     /**
@@ -2776,144 +2952,6 @@ object PaddleOcrManager {
         }
 
         return (calibratedBaseConf - penalty + bonus.coerceAtMost(0.26f)).coerceIn(0f, 1f)
-    }
-
-    private fun splitResultIntoWordSpans(
-        res: CtcDecodeResult,
-        pageLexicon: Set<String>,
-        counterpartText: String,
-        counterpartConfidence: Float
-    ): List<DecodedWordSpan> {
-        if (res.tokens.isEmpty()) return emptyList()
-        val spans = ArrayList<DecodedWordSpan>()
-        val curTokens = ArrayList<DecodedCtcToken>()
-        val curSb = StringBuilder()
-        val totalT = res.totalTimesteps.coerceAtLeast(1)
-
-        fun flushWord() {
-            if (curTokens.isNotEmpty() && curSb.isNotEmpty()) {
-                val rawWordStr = curSb.toString()
-                val wordStr = normalizeIntraWordHomoglyphs(rawWordStr)
-                val avgConf = curTokens.sumOf { it.confidence.toDouble() }.toFloat() / curTokens.size
-                val score = computeScriptArbitrationScore(
-                    text = wordStr,
-                    avgMarginalConfidence = avgConf,
-                    headKind = res.headKind,
-                    pageLexicon = pageLexicon,
-                    counterpartText = counterpartText,
-                    counterpartConfidence = counterpartConfidence
-                )
-                spans.add(
-                    DecodedWordSpan(
-                        text = wordStr,
-                        tokens = curTokens.toList(),
-                        startStep = curTokens.first().startStep,
-                        endStep = curTokens.last().endStep,
-                        totalSteps = totalT,
-                        averageConfidence = avgConf,
-                        arbitrationScore = score
-                    )
-                )
-            }
-            curTokens.clear()
-            curSb.setLength(0)
-        }
-
-        for (tok in res.tokens) {
-            if (tok.text.isBlank()) {
-                flushWord()
-            } else {
-                curTokens.add(tok)
-                curSb.append(tok.text)
-            }
-        }
-        flushWord()
-        return spans
-    }
-
-    /**
-     * Merges results from `cyrRes` and `primRes` at the word level when word spans align horizontally
-     * (supporting mixed English + Russian / multilingual lines), or selects the higher-scoring line.
-     */
-    private fun mergeDualRecResultsAtWordLevel(
-        cyrRes: CtcDecodeResult,
-        primRes: CtcDecodeResult,
-        pageLexicon: Set<String>
-    ): CtcDecodeResult {
-        val wordsCyr = splitResultIntoWordSpans(cyrRes, pageLexicon, primRes.text, primRes.averageConfidence)
-        val wordsPrim = splitResultIntoWordSpans(primRes, pageLexicon, cyrRes.text, cyrRes.averageConfidence)
-
-        if (wordsCyr.size == wordsPrim.size && wordsCyr.size > 1) {
-            val mergedTokens = ArrayList<DecodedCtcToken>()
-            val mergedSb = StringBuilder()
-            var scoreSum = 0f
-            var confSum = 0f
-            val normTotalSteps = cyrRes.totalTimesteps.coerceAtLeast(1)
-
-            for (i in wordsCyr.indices) {
-                val wC = wordsCyr[i]
-                val wP = wordsPrim[i]
-                val winner = if (wC.arbitrationScore >= wP.arbitrationScore) wC else wP
-                val stepScale = normTotalSteps.toFloat() / winner.totalSteps.coerceAtLeast(1).toFloat()
-
-                if (mergedTokens.isNotEmpty()) {
-                    val prevEnd = mergedTokens.last().endStep
-                    val mappedStart = (winner.startStep * stepScale).roundToInt()
-                    val spaceStep = maxOf(prevEnd + 1, mappedStart - 1)
-                    mergedTokens.add(DecodedCtcToken(" ", prevEnd + 1, spaceStep, 0.92f))
-                    mergedSb.append(' ')
-                }
-                for (tok in winner.tokens) {
-                    mergedTokens.add(
-                        tok.copy(
-                            startStep = (tok.startStep * stepScale).roundToInt(),
-                            endStep = (tok.endStep * stepScale).roundToInt()
-                        )
-                    )
-                }
-                mergedSb.append(winner.text)
-                scoreSum += winner.arbitrationScore
-                confSum += winner.averageConfidence
-            }
-
-            return CtcDecodeResult(
-                text = mergedSb.toString(),
-                tokens = mergedTokens,
-                totalTimesteps = normTotalSteps,
-                averageConfidence = confSum / wordsCyr.size,
-                arbitrationScore = scoreSum / wordsCyr.size,
-                headKind = cyrRes.headKind
-            )
-        }
-
-        val scoreCyr = computeScriptArbitrationScore(
-            text = cyrRes.text,
-            avgMarginalConfidence = cyrRes.averageConfidence,
-            headKind = RecHeadKind.CYRILLIC_ESLAV,
-            pageLexicon = pageLexicon,
-            counterpartText = primRes.text,
-            counterpartConfidence = primRes.averageConfidence
-        )
-        val scorePrim = computeScriptArbitrationScore(
-            text = primRes.text,
-            avgMarginalConfidence = primRes.averageConfidence,
-            headKind = RecHeadKind.PRIMARY_MULTILINGUAL,
-            pageLexicon = pageLexicon,
-            counterpartText = cyrRes.text,
-            counterpartConfidence = cyrRes.averageConfidence
-        )
-
-        return if (scoreCyr >= scorePrim) {
-            cyrRes.copy(
-                text = cyrRes.text.split(' ').joinToString(" ") { normalizeIntraWordHomoglyphs(it) },
-                arbitrationScore = scoreCyr
-            )
-        } else {
-            primRes.copy(
-                text = primRes.text.split(' ').joinToString(" ") { normalizeIntraWordHomoglyphs(it) },
-                arbitrationScore = scorePrim
-            )
-        }
     }
 
     private fun runOnnxRecognitionWithDynamicSlicing(
@@ -3129,11 +3167,6 @@ object PaddleOcrManager {
                             sb.append(activeTokenText)
                             confSum += activeMaxProb
                             tokenCount++
-                        }
-                        if (tokens.isNotEmpty() && activeTokenText == null && t - tokens.last().endStep >= 3 && !sb.endsWith(" ")) {
-                            val lastEnd = tokens.last().endStep
-                            tokens.add(DecodedCtcToken(" ", lastEnd + 1, t - 1, 0.90f))
-                            sb.append(' ')
                         }
                         activeTokenText = tokenStr
                         activeStartStep = t
@@ -3372,7 +3405,7 @@ object PaddleOcrManager {
         val lineSb = StringBuilder()
 
         val tightTop = glyphRects.minOf { it.top }.coerceAtLeast(globalBox.top)
-        val tightBot = glyphRects.maxOf { it.bottom }.coerceIn(tightTop + 2, globalBox.bottom)
+        val tightBot = glyphRects.maxOf { it.bottom }.clampTo(tightTop + 2, globalBox.bottom)
 
         for (i in glyphRects.indices) {
             val gRect = glyphRects[i]
@@ -3658,11 +3691,13 @@ object PaddleOcrManager {
                     detSession?.close()
                     primaryRecSession?.close()
                     cyrillicRecSession?.close()
+                    latinRecSession?.close()
                 } catch (_: Throwable) {
                 }
                 detSession = null
                 primaryRecSession = null
                 cyrillicRecSession = null
+                latinRecSession = null
             }
         }
     }

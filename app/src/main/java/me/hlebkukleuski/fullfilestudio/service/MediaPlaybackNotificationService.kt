@@ -25,9 +25,6 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
-import android.media.MediaMetadata
-import android.media.session.MediaSession
-import android.media.session.PlaybackState
 import android.os.Build
 import android.os.IBinder
 import me.hlebkukleuski.fullfilestudio.MainActivity
@@ -35,24 +32,33 @@ import me.hlebkukleuski.fullfilestudio.R
 
 class MediaPlaybackNotificationService : Service() {
 
+    class State(
+        val title: String,
+        val artist: String,
+        val audioInfo: String,
+        val isPlaying: Boolean,
+        val positionMs: Long,
+        val durationMs: Long,
+        val speed: Float,
+        val hasNext: Boolean,
+        val hasPrevious: Boolean
+    )
+
     companion object {
         const val CHANNEL_ID = "fullfilestudio_media_playback_channel"
         const val NOTIFICATION_ID = 1001
 
         const val ACTION_START_OR_UPDATE = "me.hlebkukleuski.fullfilestudio.ACTION_MEDIA_UPDATE"
         const val ACTION_STOP = "me.hlebkukleuski.fullfilestudio.ACTION_MEDIA_STOP"
-        const val ACTION_TOGGLE_PLAY_PAUSE = "me.hlebkukleuski.fullfilestudio.ACTION_TOGGLE_PLAY_PAUSE"
-
-        const val EXTRA_TITLE = "extra_title"
-        const val EXTRA_ARTIST = "extra_artist"
-        const val EXTRA_AUDIO_INFO = "extra_audio_info"
-        const val EXTRA_IS_PLAYING = "extra_is_playing"
-        const val EXTRA_POSITION_MS = "extra_position_ms"
-        const val EXTRA_DURATION_MS = "extra_duration_ms"
+        const val ACTION_PLAY = "me.hlebkukleuski.fullfilestudio.ACTION_MEDIA_PLAY"
+        const val ACTION_PAUSE = "me.hlebkukleuski.fullfilestudio.ACTION_MEDIA_PAUSE"
+        const val ACTION_NEXT = "me.hlebkukleuski.fullfilestudio.ACTION_MEDIA_NEXT"
+        const val ACTION_PREVIOUS = "me.hlebkukleuski.fullfilestudio.ACTION_MEDIA_PREVIOUS"
+        const val ACTION_CLOSE = "me.hlebkukleuski.fullfilestudio.ACTION_MEDIA_CLOSE"
 
         @Volatile var activeAlbumArt: Bitmap? = null
-        @Volatile var onTogglePlayPauseListener: (() -> Unit)? = null
-        @Volatile var onSeekToListener: ((Long) -> Unit)? = null
+        @Volatile private var pendingState: State? = null
+        @Volatile private var instance: MediaPlaybackNotificationService? = null
 
         fun updateNotification(
             context: Context,
@@ -62,99 +68,80 @@ class MediaPlaybackNotificationService : Service() {
             isPlaying: Boolean,
             positionMs: Long = 0L,
             durationMs: Long = 0L,
+            speed: Float = 1f,
+            hasNext: Boolean = false,
+            hasPrevious: Boolean = false,
             art: Bitmap? = null
         ) {
-            if (art != null) {
-                activeAlbumArt = art
+            activeAlbumArt = art
+            val state = State(title, artist, audioInfo, isPlaying, positionMs, durationMs, speed, hasNext, hasPrevious)
+            pendingState = state
+            val running = instance
+            if (running != null) {
+                running.render(state)
+                return
             }
-            val intent = Intent(context, MediaPlaybackNotificationService::class.java).apply {
-                action = ACTION_START_OR_UPDATE
-                putExtra(EXTRA_TITLE, title)
-                putExtra(EXTRA_ARTIST, artist)
-                putExtra(EXTRA_AUDIO_INFO, audioInfo)
-                putExtra(EXTRA_IS_PLAYING, isPlaying)
-                putExtra(EXTRA_POSITION_MS, positionMs)
-                putExtra(EXTRA_DURATION_MS, durationMs)
-            }
+            if (!isPlaying) return
+            val intent = Intent(context, MediaPlaybackNotificationService::class.java).apply { action = ACTION_START_OR_UPDATE }
             try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    context.startForegroundService(intent)
-                } else {
-                    context.startService(intent)
-                }
+                context.startForegroundService(intent)
             } catch (_: Throwable) {}
         }
 
         fun stopService(context: Context) {
-            val intent = Intent(context, MediaPlaybackNotificationService::class.java).apply {
-                action = ACTION_STOP
-            }
-            try { context.startService(intent) } catch (_: Throwable) {}
+            pendingState = null
+            instance?.shutdown()
         }
     }
 
-    private var mediaSession: MediaSession? = null
+    private var foreground = false
+    private var wakeLock: android.os.PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
+        instance = this
+        MediaPlaybackController.init(this)
         createNotificationChannel()
-        initMediaSession()
-    }
-
-    private fun initMediaSession() {
-        try {
-            mediaSession = MediaSession(this, "FullFileStudioMediaSession").apply {
-                setCallback(object : MediaSession.Callback() {
-                    override fun onPlay() {
-                        onTogglePlayPauseListener?.invoke()
-                    }
-
-                    override fun onPause() {
-                        onTogglePlayPauseListener?.invoke()
-                    }
-
-                    override fun onSeekTo(pos: Long) {
-                        onSeekToListener?.invoke(pos)
-                    }
-                })
-                isActive = true
-            }
-        } catch (_: Throwable) {}
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent == null) return START_NOT_STICKY
-
-        when (intent.action) {
-            ACTION_STOP -> {
-                updateWakeLock(false)
-                mediaSession?.isActive = false
-                stopForeground(true)
-                stopSelf()
+        when (intent?.action) {
+            ACTION_PLAY -> MediaPlaybackController.play()
+            ACTION_PAUSE -> MediaPlaybackController.pause()
+            ACTION_NEXT -> MediaPlaybackController.next()
+            ACTION_PREVIOUS -> MediaPlaybackController.previous()
+            ACTION_CLOSE, ACTION_STOP -> {
+                MediaPlaybackController.stop()
+                shutdown()
                 return START_NOT_STICKY
             }
-            ACTION_TOGGLE_PLAY_PAUSE -> {
-                onTogglePlayPauseListener?.invoke()
-                return START_STICKY
-            }
-            ACTION_START_OR_UPDATE -> {
-                val title = intent.getStringExtra(EXTRA_TITLE) ?: "FullFileStudio Media"
-                val artist = intent.getStringExtra(EXTRA_ARTIST) ?: ""
-                val audioInfo = intent.getStringExtra(EXTRA_AUDIO_INFO) ?: ""
-                val isPlaying = intent.getBooleanExtra(EXTRA_IS_PLAYING, false)
-                val positionMs = intent.getLongExtra(EXTRA_POSITION_MS, 0L)
-                val durationMs = intent.getLongExtra(EXTRA_DURATION_MS, 0L)
-
-                updateWakeLock(isPlaying)
-                showMediaNotification(title, artist, audioInfo, isPlaying, positionMs, durationMs)
-            }
         }
-        return START_STICKY
+        val st = pendingState
+        if (st != null) render(st, intent?.action == ACTION_START_OR_UPDATE) else if (!foreground) {
+            if (intent?.action == ACTION_START_OR_UPDATE) render(State("", "", "", false, 0, 0, 1f, false, false), true)
+            shutdown()
+            return START_NOT_STICKY
+        }
+        return START_NOT_STICKY
     }
 
-    private var wakeLock: android.os.PowerManager.WakeLock? = null
+    private fun shutdown() {
+        updateWakeLock(false)
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Throwable) {}
+        try { getSystemService(NotificationManager::class.java)?.cancel(NOTIFICATION_ID) } catch (_: Throwable) {}
+        foreground = false
+        stopSelf()
+    }
+
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (pendingState?.isPlaying != true) {
+            MediaPlaybackController.stop()
+            shutdown()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
 
     private fun updateWakeLock(isPlaying: Boolean) {
         try {
@@ -165,178 +152,113 @@ class MediaPlaybackNotificationService : Service() {
                         setReferenceCounted(false)
                     }
                 }
-                if (wakeLock?.isHeld == false) {
-                    wakeLock?.acquire(12 * 60 * 60 * 1000L)
-                }
-            } else {
-                if (wakeLock?.isHeld == true) {
-                    wakeLock?.release()
-                }
+                if (wakeLock?.isHeld == false) wakeLock?.acquire(12 * 60 * 60 * 1000L)
+            } else if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
             }
         } catch (_: Throwable) {}
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        instance = null
         updateWakeLock(false)
-        try {
-            mediaSession?.isActive = false
-            mediaSession?.release()
-        } catch (_: Throwable) {}
+        super.onDestroy()
     }
 
-    private fun getLocalizedPlayPauseTitle(isPlaying: Boolean): String {
+    private fun label(key: String): String {
         val lang = java.util.Locale.getDefault().language.lowercase()
-        return if (isPlaying) {
-            when (lang) {
-                "ru" -> "Пауза"
-                "uk" -> "Пауза"
-                "de" -> "Pause"
-                "es" -> "Pausa"
-                "fr" -> "Pause"
-                "pl" -> "Pauza"
-                "zh" -> "暂停"
-                else -> "Pause"
-            }
-        } else {
-            when (lang) {
-                "ru" -> "Воспроизвести"
-                "uk" -> "Грати"
-                "de" -> "Wiedergabe"
-                "es" -> "Reproducir"
-                "fr" -> "Lecture"
-                "pl" -> "Odtwórz"
-                "zh" -> "播放"
-                else -> "Play"
-            }
-        }
+        val table = mapOf(
+            "pause" to mapOf("ru" to "Пауза", "uk" to "Пауза", "de" to "Pause", "es" to "Pausa", "fr" to "Pause", "pl" to "Pauza", "zh" to "暂停", "en" to "Pause"),
+            "play" to mapOf("ru" to "Воспроизвести", "uk" to "Грати", "de" to "Wiedergabe", "es" to "Reproducir", "fr" to "Lecture", "pl" to "Odtwórz", "zh" to "播放", "en" to "Play"),
+            "next" to mapOf("ru" to "Следующий", "uk" to "Наступний", "de" to "Weiter", "es" to "Siguiente", "fr" to "Suivant", "pl" to "Następny", "zh" to "下一个", "en" to "Next"),
+            "prev" to mapOf("ru" to "Предыдущий", "uk" to "Попередній", "de" to "Zurück", "es" to "Anterior", "fr" to "Précédent", "pl" to "Poprzedni", "zh" to "上一个", "en" to "Previous"),
+            "close" to mapOf("ru" to "Закрыть", "uk" to "Закрити", "de" to "Schließen", "es" to "Cerrar", "fr" to "Fermer", "pl" to "Zamknij", "zh" to "关闭", "en" to "Close")
+        )
+        val row = table[key] ?: return key
+        return row[lang] ?: row["en"] ?: key
     }
 
     private fun createNotificationChannel() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val lang = java.util.Locale.getDefault().language.lowercase()
-            val name = when (lang) {
-                "ru" -> "FullFileStudio Воспроизведение"
-                "uk" -> "FullFileStudio Грати музочку"
-                "de" -> "FullFileStudio Medienwiedergabe"
-                "es" -> "FullFileStudio Reproducción de medios"
-                "fr" -> "FullFileStudio Lecture média"
-                "pl" -> "FullFileStudio Odtwarzanie mediów"
-                "zh" -> "FullFileStudio 媒体播放"
-                else -> "FullFileStudio Media Playback"
-            }
-            val channel = NotificationChannel(CHANNEL_ID, name, NotificationManager.IMPORTANCE_LOW).apply {
-                description = "Media controls notification"
-                setShowBadge(false)
-                lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-            }
-            val nm = getSystemService(NotificationManager::class.java)
-            nm?.createNotificationChannel(channel)
+        val lang = java.util.Locale.getDefault().language.lowercase()
+        val name = when (lang) {
+            "ru" -> "FullFileStudio Воспроизведение"
+            "uk" -> "FullFileStudio Грати музочку"
+            "de" -> "FullFileStudio Medienwiedergabe"
+            "es" -> "FullFileStudio Reproducción de medios"
+            "fr" -> "FullFileStudio Lecture média"
+            "pl" -> "FullFileStudio Odtwarzanie mediów"
+            "zh" -> "FullFileStudio 媒体播放"
+            else -> "FullFileStudio Media Playback"
         }
+        val channel = NotificationChannel(CHANNEL_ID, name, NotificationManager.IMPORTANCE_LOW).apply {
+            description = "Media controls notification"
+            setShowBadge(false)
+            lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+        }
+        getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
     }
 
-    private fun showMediaNotification(
-        title: String,
-        artist: String,
-        audioInfo: String,
-        isPlaying: Boolean,
-        positionMs: Long,
-        durationMs: Long
-    ) {
+    private fun serviceIntent(action: String, code: Int): PendingIntent = PendingIntent.getService(
+        this, code, Intent(this, MediaPlaybackNotificationService::class.java).apply { this.action = action },
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+    )
+
+    fun render(st: State, mustStartForeground: Boolean = false) {
+        updateWakeLock(st.isPlaying)
         val openAppIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
-        val openAppPendingIntent = PendingIntent.getActivity(
-            this, 0, openAppIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val openAppPendingIntent = PendingIntent.getActivity(this, 0, openAppIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
-        val toggleIntent = Intent(this, MediaPlaybackNotificationService::class.java).apply {
-            action = ACTION_TOGGLE_PLAY_PAUSE
-        }
-        val togglePendingIntent = PendingIntent.getService(
-            this, 1, toggleIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val playPauseIcon = if (isPlaying) android.R.drawable.ic_media_pause else android.R.drawable.ic_media_play
-        val playPauseTitle = getLocalizedPlayPauseTitle(isPlaying)
-
-        try {
-            val metaBuilder = MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, audioInfo)
-
-            if (durationMs > 0L) {
-                metaBuilder.putLong(MediaMetadata.METADATA_KEY_DURATION, durationMs)
-            }
-            activeAlbumArt?.let { art ->
-                if (!art.isRecycled) {
-                    metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, art)
-                    metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, art)
-                }
-            }
-            mediaSession?.setMetadata(metaBuilder.build())
-
-            val actions = PlaybackState.ACTION_PLAY or
-                    PlaybackState.ACTION_PAUSE or
-                    PlaybackState.ACTION_PLAY_PAUSE or
-                    PlaybackState.ACTION_SEEK_TO
-
-            val pbState = PlaybackState.Builder()
-                .setActions(actions)
-                .setState(
-                    if (isPlaying) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
-                    positionMs.coerceAtLeast(0L),
-                    if (isPlaying) 1.0f else 0.0f
-                )
-                .build()
-
-            mediaSession?.setPlaybackState(pbState)
-        } catch (_: Throwable) {}
-
-        val subText = if (audioInfo.isNotEmpty()) "$artist • $audioInfo" else artist
-
+        val subText = if (st.audioInfo.isNotEmpty()) "${st.artist} • ${st.audioInfo}" else st.artist
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle(title)
+            .setContentTitle(st.title)
             .setContentText(subText)
-            .setSubText(audioInfo.ifEmpty { null })
-            .setLargeIcon(activeAlbumArt)
+            .setLargeIcon(activeAlbumArt?.takeIf { !it.isRecycled })
             .setContentIntent(openAppPendingIntent)
-            .setOngoing(isPlaying)
+            .setDeleteIntent(serviceIntent(ACTION_CLOSE, 6))
+            .setOngoing(st.isPlaying)
+            .setShowWhen(false)
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
-            .addAction(
-                Notification.Action.Builder(
-                    playPauseIcon,
-                    playPauseTitle,
-                    togglePendingIntent
-                ).build()
-            )
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val token = mediaSession?.sessionToken
-            if (token != null) {
-                builder.setStyle(
-                    Notification.MediaStyle()
-                        .setMediaSession(token)
-                        .setShowActionsInCompactView(0)
-                )
-            }
+        builder.addAction(Notification.Action.Builder(android.R.drawable.ic_media_previous, label("prev"), serviceIntent(ACTION_PREVIOUS, 2)).build())
+        builder.addAction(
+            if (st.isPlaying) Notification.Action.Builder(android.R.drawable.ic_media_pause, label("pause"), serviceIntent(ACTION_PAUSE, 3)).build()
+            else Notification.Action.Builder(android.R.drawable.ic_media_play, label("play"), serviceIntent(ACTION_PLAY, 4)).build()
+        )
+        val compact = ArrayList<Int>()
+        compact.add(0); compact.add(1)
+        if (st.hasNext) {
+            builder.addAction(Notification.Action.Builder(android.R.drawable.ic_media_next, label("next"), serviceIntent(ACTION_NEXT, 5)).build())
+            compact.add(2)
         }
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                builder.build(),
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
-                } else 0
-            )
+        builder.addAction(Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel, label("close"), serviceIntent(ACTION_CLOSE, 7)).build())
+        MediaPlaybackController.sessionToken?.let { token ->
+            builder.setStyle(Notification.MediaStyle().setMediaSession(token).setShowActionsInCompactView(*compact.toIntArray()))
+        }
+        val notification = builder.build()
+        if (st.isPlaying || mustStartForeground) {
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(NOTIFICATION_ID, notification, android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+                } else {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+                foreground = true
+            } catch (_: Throwable) {
+                getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification)
+            }
+            if (!st.isPlaying) {
+                try { stopForeground(STOP_FOREGROUND_DETACH) } catch (_: Throwable) {}
+                foreground = false
+            }
         } else {
-            startForeground(NOTIFICATION_ID, builder.build())
+            if (foreground) {
+                try { stopForeground(STOP_FOREGROUND_DETACH) } catch (_: Throwable) {}
+                foreground = false
+            }
+            getSystemService(NotificationManager::class.java)?.notify(NOTIFICATION_ID, notification)
         }
     }
 }

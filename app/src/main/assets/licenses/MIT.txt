@@ -1,6 +1,14 @@
 MIT License
 
 Copyright (c) Microsoft Corporation. All rights reserved.
+Copyright (c) 2016-2026 Arseny Kapoulkine (meshoptimizer).
+Copyright (c) 2009, 2010, 2013-2016 by the Brotli Authors / Google Inc.
+Copyright (c) Yevhenii Reizner, The resvg Authors, and The Linebender Authors (resvg, usvg, fontdb, svgtypes, simplecss, roxmltree).
+Copyright (c) 2018 The Kurbo Authors / Raph Levien (kurbo).
+Copyright (c) Felix Schütt and Ivan Kutskir (fastblur).
+Copyright (c) 2020-2026 DomCR (ACadSharp).
+Copyright (c) 2020-2026 Samuli Raivio (ufbx).
+Copyright (c) 2018-2026 Stichting DuckDB Foundation (DuckDB).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

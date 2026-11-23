@@ -1,1 +1,1 @@
-Audio Stream Quality Settings, Media Controls Notification, MHTML Sandbox & Bug Fixes
+License update, new engines, text copying fix and user experience improvement.

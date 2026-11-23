@@ -28,23 +28,13 @@ object SecurityArena {
         false
     }
 
-    external fun initArenaNative(size: Long)
-    external fun releaseArenaNative()
     external fun fadviseDontNeedNative(fd: FileDescriptor, offset: Long, len: Long)
-    external fun zeroBufferNeonNative()
     external fun setupSeccompBPF(): Boolean
     external fun findSequenceNeonNative(fd: FileDescriptor, startOffset: Long, size: Long, sequence: ByteArray): Long
 
-    fun safeInitArena(size: Long) {
-        if (isNativeLoaded) {
-            try { initArenaNative(size) } catch (_: Throwable) {}
-        }
-    }
-
-    fun safeReleaseArena() {
-        if (isNativeLoaded) {
-            try { releaseArenaNative() } catch (_: Throwable) {}
-        }
+    fun safeSetupSeccomp(): Boolean {
+        if (!isNativeLoaded) return false
+        return try { setupSeccompBPF() } catch (_: Throwable) { false }
     }
 
     fun safeFindSequence(fd: FileDescriptor, startOffset: Long, size: Long, sequence: ByteArray): Long {

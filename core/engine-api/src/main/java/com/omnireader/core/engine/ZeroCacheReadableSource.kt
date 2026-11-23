@@ -21,6 +21,8 @@ import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import java.io.FileDescriptor
+import java.io.FileInputStream
+import java.nio.channels.FileChannel
 import java.nio.ByteBuffer
 
 class ZeroCacheReadableSource(
@@ -28,6 +30,9 @@ class ZeroCacheReadableSource(
 ) : AutoCloseable {
 
     private val fallbackSeekLock = Any()
+    private val fallbackChannel: FileChannel? by lazy {
+        try { FileInputStream(fd).channel } catch (_: Throwable) { null }
+    }
     val size: Long
 
     init {
@@ -49,6 +54,11 @@ class ZeroCacheReadableSource(
             if (end > 0L) {
                 return end
             }
+        } catch (_: Throwable) {}
+
+        try {
+            val channelSize = fallbackChannel?.size() ?: 0L
+            if (channelSize > 0L) return channelSize
         } catch (_: Throwable) {}
 
         return try {
@@ -76,9 +86,25 @@ class ZeroCacheReadableSource(
             }
             if (totalRead > 0) return totalRead
         } catch (_: Throwable) {
-            return readViaSeekFallback(offset, buffer)
+            val read = readViaSeekFallback(offset, buffer)
+            return if (read > 0) read else readViaChannel(offset, buffer)
         }
-        return -1
+        return if (offset < size) readViaChannel(offset, buffer) else -1
+    }
+
+    private fun readViaChannel(offset: Long, buffer: ByteBuffer): Int {
+        val channel = fallbackChannel ?: return -1
+        return try {
+            var totalRead = 0
+            while (buffer.hasRemaining()) {
+                val read = channel.read(buffer, offset + totalRead)
+                if (read <= 0) break
+                totalRead += read
+            }
+            if (totalRead > 0) totalRead else -1
+        } catch (_: Throwable) {
+            -1
+        }
     }
 
     private fun readViaSeekFallback(offset: Long, buffer: ByteBuffer): Int {

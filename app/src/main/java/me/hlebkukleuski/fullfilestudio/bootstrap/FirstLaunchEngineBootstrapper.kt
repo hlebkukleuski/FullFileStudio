@@ -68,7 +68,7 @@ class FirstLaunchEngineBootstrapper(context: Context) {
         _state.value = _state.value.copy(
             isDownloading = true,
             progressPercent = 0,
-            currentModule = "Google Play Feature Delivery (${bundleIds.joinToString(", ")})...",
+            currentModule = bundleIds.joinToString(", "),
             errorMessage = null
         )
 
@@ -78,7 +78,7 @@ class FirstLaunchEngineBootstrapper(context: Context) {
                 val percent = (progress * 100).toInt().coerceIn(0, 100)
                 _state.value = _state.value.copy(
                     progressPercent = percent,
-                    currentModule = "Google Play ($percent%)"
+                    currentModule = "$percent%"
                 )
             },
             onSuccess = {
@@ -96,7 +96,7 @@ class FirstLaunchEngineBootstrapper(context: Context) {
             onError = { errorCode ->
                 _state.value = _state.value.copy(
                     isDownloading = false,
-                    errorMessage = "Google Play SplitInstall Error (code: $errorCode)"
+                    errorMessage = "Engine initialization error (code: $errorCode)"
                 )
             }
         )

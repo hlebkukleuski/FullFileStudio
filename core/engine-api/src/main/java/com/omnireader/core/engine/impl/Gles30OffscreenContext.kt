@@ -133,11 +133,18 @@ class Gles30OffscreenContext(
         GLES30.glViewport(0, 0, width, height)
     }
 
-    fun makeCurrent() {
-        if (!isInitialized) return
-        EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)
+    fun makeCurrent(): Boolean {
+        if (!isInitialized) return false
+        if (!EGL14.eglMakeCurrent(eglDisplay, eglSurface, eglSurface, eglContext)) return false
         GLES30.glBindFramebuffer(GLES30.GL_FRAMEBUFFER, fboId)
         GLES30.glViewport(0, 0, width, height)
+        return true
+    }
+
+    fun releaseCurrent() {
+        if (eglDisplay != EGL14.EGL_NO_DISPLAY) {
+            EGL14.eglMakeCurrent(eglDisplay, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT)
+        }
     }
 
     fun readPixelsToBitmap(bitmap: Bitmap) {

@@ -28,6 +28,7 @@ interface IIsolatedEngineService {
     void closeSession(int sessionId);
     int getPageCount(int sessionId);
     boolean is3dSession(int sessionId);
+    SharedMemory exportMeshScene(int sessionId);
     String getPageText(int sessionId, int pageIndex);
     float getDocumentWidth(int sessionId);
     float getDocumentHeight(int sessionId);
@@ -36,6 +37,9 @@ interface IIsolatedEngineService {
     void registerSessionStateCallback(int sessionId, ISessionStateCallback callback);
     long getStateVersion(int sessionId);
     String getLastError(int sessionId);
+    String[] getMissingResources(int sessionId);
+    boolean provideResource(int sessionId, String name, in ParcelFileDescriptor pfd);
+    boolean applyProvidedResources(int sessionId);
 
     // Archive Support
     boolean isArchiveSession(int sessionId);
@@ -49,4 +53,7 @@ interface IIsolatedEngineService {
     float[] getColumnWidths(int sessionId);
     String getCellText(int sessionId, int row, int col);
     String getSelectedRangeText(int sessionId, int startRow, int startCol, int endRow, int endCol);
+    float[] getRowHeights(int sessionId);
+    int openSessionWithPassword(in ParcelFileDescriptor pfd, String extension, String password);
+    boolean isCopyRestricted(int sessionId);
 }

@@ -24,6 +24,8 @@
 #include <linux/filter.h>
 #include <linux/audit.h>
 #include <sys/prctl.h>
+#include <sys/socket.h>
+#include <cstddef>
 #if defined(__aarch64__)
 #include <arm_neon.h>
 #endif
@@ -41,9 +43,6 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
-static void* g_arena_ptr = nullptr;
-static size_t g_arena_size = 0;
-static std::mutex g_arena_mutex;
 static std::once_flag g_signal_once_flag;
 static pthread_key_t g_altstack_key;
 
@@ -132,37 +131,123 @@ static void EnsureThreadAltStack() {
     }
 }
 
+#if defined(__aarch64__)
+#define FFS_AUDIT_ARCH AUDIT_ARCH_AARCH64
+#elif defined(__x86_64__)
+#define FFS_AUDIT_ARCH AUDIT_ARCH_X86_64
+#endif
+
+#define FFS_DENY(nr) BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, (nr), 0, 1), BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM)
+
+static std::mutex g_seccomp_mutex;
+static bool g_seccomp_installed = false;
+
+static bool VerifySeccompDenyList() {
+    errno = 0;
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd >= 0) {
+        close(fd);
+        return false;
+    }
+    return errno == EPERM;
+}
+
 extern "C" JNIEXPORT jboolean JNICALL
 Java_com_omnireader_core_engine_SecurityArena_setupSeccompBPF(JNIEnv*, jobject) {
+#if defined(FFS_AUDIT_ARCH)
+    std::lock_guard<std::mutex> lock(g_seccomp_mutex);
+    if (g_seccomp_installed) return VerifySeccompDenyList() ? JNI_TRUE : JNI_FALSE;
+
+    struct sock_filter filter[] = {
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, FFS_AUDIT_ARCH, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+#if defined(__x86_64__)
+        BPF_JUMP(BPF_JMP | BPF_JGE | BPF_K, 0x40000000, 0, 1),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+#endif
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, __NR_socket, 0, 3),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, args[0])),
+        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 1, 0),
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM),
+        BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        FFS_DENY(__NR_ptrace),
+        FFS_DENY(__NR_process_vm_readv),
+        FFS_DENY(__NR_process_vm_writev),
+        FFS_DENY(__NR_execve),
+        FFS_DENY(__NR_execveat),
+        FFS_DENY(__NR_bpf),
+        FFS_DENY(__NR_perf_event_open),
+        FFS_DENY(__NR_keyctl),
+        FFS_DENY(__NR_add_key),
+        FFS_DENY(__NR_request_key),
+        FFS_DENY(__NR_mount),
+        FFS_DENY(__NR_umount2),
+        FFS_DENY(__NR_pivot_root),
+        FFS_DENY(__NR_init_module),
+        FFS_DENY(__NR_finit_module),
+        FFS_DENY(__NR_delete_module),
+        FFS_DENY(__NR_kexec_load),
+#if defined(__NR_kexec_file_load)
+        FFS_DENY(__NR_kexec_file_load),
+#endif
+        FFS_DENY(__NR_swapon),
+        FFS_DENY(__NR_swapoff),
+        FFS_DENY(__NR_reboot),
+        FFS_DENY(__NR_setns),
+        FFS_DENY(__NR_unshare),
+        FFS_DENY(__NR_acct),
+#if defined(__NR_io_uring_setup)
+        FFS_DENY(__NR_io_uring_setup),
+        FFS_DENY(__NR_io_uring_enter),
+        FFS_DENY(__NR_io_uring_register),
+#endif
+        BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+    };
+    struct sock_fprog prog = {
+        static_cast<unsigned short>(sizeof(filter) / sizeof(filter[0])),
+        filter,
+    };
+
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) {
+        LOGE("seccomp: PR_SET_NO_NEW_PRIVS failed: %d", errno);
+        return JNI_FALSE;
+    }
+    if (syscall(__NR_seccomp, SECCOMP_SET_MODE_FILTER, SECCOMP_FILTER_FLAG_TSYNC, &prog) != 0) {
+        LOGE("seccomp: filter install failed: %d", errno);
+        return JNI_FALSE;
+    }
+    g_seccomp_installed = true;
+    bool verified = VerifySeccompDenyList();
+    LOGI("seccomp: deny-list installed, socket(AF_INET) blocked=%d", verified ? 1 : 0);
+    return verified ? JNI_TRUE : JNI_FALSE;
+#else
     return JNI_FALSE;
+#endif
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_omnireader_core_engine_SecurityArena_initArenaNative(JNIEnv*, jobject, jlong size) {
-    std::lock_guard<std::mutex> lock(g_arena_mutex);
-    if (g_arena_ptr || size <= 0) return;
-
-    std::call_once(g_signal_once_flag, InitSignalHandlersOnce);
-
-    size_t page_size = sysconf(_SC_PAGESIZE);
-    size_t aligned_size = (static_cast<size_t>(size) + page_size - 1) & ~(page_size - 1);
-
-    void* ptr = mmap(nullptr, aligned_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (ptr != MAP_FAILED) {
-        g_arena_ptr = ptr;
-        g_arena_size = aligned_size;
+static void WipeBufferNeon(void* buffer, size_t size) {
+    if (!buffer || size == 0) return;
+#if defined(__aarch64__)
+    uint8_t* ptr = static_cast<uint8_t*>(buffer);
+    size_t chunks = size / 64;
+    uint8x16_t zero = vdupq_n_u8(0);
+    for (size_t i = 0; i < chunks; ++i) {
+        vst1q_u8(ptr, zero);
+        vst1q_u8(ptr + 16, zero);
+        vst1q_u8(ptr + 32, zero);
+        vst1q_u8(ptr + 48, zero);
+        ptr += 64;
     }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_omnireader_core_engine_SecurityArena_releaseArenaNative(JNIEnv*, jobject) {
-    std::lock_guard<std::mutex> lock(g_arena_mutex);
-    if (g_arena_ptr) {
-        madvise(g_arena_ptr, g_arena_size, MADV_DONTNEED);
-        munmap(g_arena_ptr, g_arena_size);
-        g_arena_ptr = nullptr;
-        g_arena_size = 0;
+    size_t rem = size % 64;
+    if (rem > 0) {
+        std::memset(ptr, 0, rem);
     }
+#else
+    std::memset(buffer, 0, size);
+#endif
+    asm volatile("" : : "r"(buffer) : "memory");
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -172,32 +257,6 @@ Java_com_omnireader_core_engine_SecurityArena_fadviseDontNeedNative(JNIEnv* env,
     if (fd >= 0) {
         posix_fadvise(fd, offset, len, POSIX_FADV_DONTNEED);
     }
-}
-
-extern "C" JNIEXPORT void JNICALL
-Java_com_omnireader_core_engine_SecurityArena_zeroBufferNeonNative(JNIEnv*, jobject) {
-    std::lock_guard<std::mutex> lock(g_arena_mutex);
-    if (!g_arena_ptr || g_arena_size < 64) return;
-
-#if defined(__aarch64__)
-    uint8_t* ptr = static_cast<uint8_t*>(g_arena_ptr);
-    size_t chunks = g_arena_size / 64;
-    uint8x16_t zero = vdupq_n_u8(0);
-
-    for (size_t i = 0; i < chunks; ++i) {
-        vst1q_u8(ptr, zero);
-        vst1q_u8(ptr + 16, zero);
-        vst1q_u8(ptr + 32, zero);
-        vst1q_u8(ptr + 48, zero);
-        ptr += 64;
-    }
-    size_t rem = g_arena_size % 64;
-    if (rem > 0) {
-        std::memset(ptr, 0, rem);
-    }
-#else
-    std::memset(g_arena_ptr, 0, g_arena_size);
-#endif
 }
 
 extern "C" JNIEXPORT jlong JNICALL
@@ -210,7 +269,6 @@ Java_com_omnireader_core_engine_SecurityArena_findSequenceNeonNative(JNIEnv* env
     jsize seq_len = env->GetArrayLength(sequence);
     if (seq_len <= 0 || seq_len > 4096) return -1;
 
-    // Copy the search pattern into a local stack buffer so no JNI array remains pinned during pread or signal jumps.
     uint8_t seq_data[4096];
     env->GetByteArrayRegion(sequence, 0, seq_len, reinterpret_cast<jbyte*>(seq_data));
     if (env->ExceptionCheck()) {
@@ -231,6 +289,7 @@ Java_com_omnireader_core_engine_SecurityArena_findSequenceNeonNative(JNIEnv* env
     g_jump_active = 1;
     if (sigsetjmp(g_jump_env, 1) != 0) {
         g_jump_active = 0;
+        WipeBufferNeon(temp_mmap, CHUNK_SIZE);
         munmap(temp_mmap, CHUNK_SIZE);
         return -1;
     }
@@ -290,6 +349,7 @@ Java_com_omnireader_core_engine_SecurityArena_findSequenceNeonNative(JNIEnv* env
     }
 
     g_jump_active = 0;
+    WipeBufferNeon(temp_mmap, CHUNK_SIZE);
     munmap(temp_mmap, CHUNK_SIZE);
     return found_offset;
 }

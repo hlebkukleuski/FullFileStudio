@@ -35,8 +35,8 @@ android {
         applicationId = "me.hlebkukleuski.fullfilestudio"
         minSdk = 30
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.9.2"
+        versionCode = 3
+        versionName = "0.9.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -54,6 +54,12 @@ android {
 
     androidResources {
         noCompress += listOf("onnx", "ort")
+    }
+
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+        }
     }
 
     packaging {
@@ -79,12 +85,6 @@ android {
         }
     }
 
-    dynamicFeatures += setOf(
-        ":features:office",
-        ":features:cadvector",
-        ":features:archives"
-    )
-
     val keystorePropertiesFile = rootProject.file("keystore.properties")
     val releaseSigningConfig = if (keystorePropertiesFile.exists()) {
         val props = Properties()
@@ -94,9 +94,18 @@ android {
             storePassword = props.getProperty("storePassword")
             keyAlias = props.getProperty("keyAlias")
             keyPassword = props.getProperty("keyPassword")
+            enableV1Signing = false
+            enableV2Signing = true
+            enableV3Signing = true
         }
     } else {
         signingConfigs.getByName("debug")
+    }
+
+    signingConfigs.getByName("debug") {
+        enableV1Signing = false
+        enableV2Signing = true
+        enableV3Signing = true
     }
 
     buildTypes {
@@ -133,10 +142,7 @@ dependencies {
     implementation(libs.ui.graphics)
     implementation(libs.ui.tooling.preview)
 
-    implementation(libs.play.feature.delivery)
-    implementation(libs.play.feature.delivery.ktx)
     implementation(libs.androidx.appcompat)
-    implementation(libs.play.services.base)
 
     implementation(libs.androidx.collection)
     implementation(libs.androidx.profileinstaller)
@@ -144,10 +150,17 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     api(project(":core:engine-api"))
+    implementation(project(":features:office"))
+    implementation(project(":features:cadvector"))
+    implementation(project(":features:archives"))
+    implementation(project(":features:gpl-engines"))
 
     implementation(libs.onnxruntime.android)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.onnxruntime.jvm)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.core)
     androidTestImplementation(libs.androidx.test.runner)
@@ -240,7 +253,23 @@ afterEvaluate {
         </div>"""
                 }
 
-                val fullHtml = """<!DOCTYPE html>
+                val fullHtml = """<!--
+  Copyright (C) 2026 Hleb Kukleuski <hlebkukleuski@gmail.com>
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program. If not, see <https://gnu.org>.
+-->
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -303,7 +332,8 @@ $cardsHtml
             <p>
                 <a href="index.html">Home</a> |
                 <a href="privacy.html">Privacy Policy</a> |
-                <a href="terms.html">Terms of Service</a>
+                <a href="terms.html">Terms &amp; License Notice</a> |
+                <a href="licenses.html">Open Source Notices</a>
             </p>
         </div>
     </div>
@@ -321,18 +351,16 @@ $cardsHtml
         finalizedBy(generateVersionJsonTask)
     }
 
-    if (packageUniversalTask != null) {
+    if (assembleReleaseTask != null) {
         val targetReleaseDir = layout.buildDirectory.dir("outputs/apk/standalone/release").get().asFile
         val copyUniversalApk = tasks.register<Copy>("copyStandaloneUniversalReleaseApk") {
-            dependsOn(packageUniversalTask)
-            from(layout.buildDirectory.dir("outputs/apk_from_bundle/standaloneRelease")) {
-                include("*.apk")
+            from(targetReleaseDir) {
+                include("app-standalone-release.apk")
             }
             into(targetReleaseDir)
             rename { "fullfilestudio-v${vName}-hashtagfreeinternet-release.apk" }
         }
-        packageUniversalTask.finalizedBy(copyUniversalApk)
-        assembleReleaseTask?.finalizedBy(copyUniversalApk)
+        assembleReleaseTask.finalizedBy(copyUniversalApk)
         redirectTask?.mustRunAfter(copyUniversalApk)
     }
 

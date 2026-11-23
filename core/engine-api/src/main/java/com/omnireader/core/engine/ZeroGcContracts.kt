@@ -70,21 +70,19 @@ object LegalLicensePolicy {
             )
         }
 
-        // 2. RAR 5.0: UnRAR license explicitly permits free read-only decompression; only recreating RAR compression is restricted.
-        if (format == DetectedFormat.RAR_V5 || cleanExt == "rar") {
+        if (format == DetectedFormat.RAR_V5 || format == DetectedFormat.RAR_V4 || cleanExt == "rar") {
             return Verdict(
                 isLegallyPermitted = true,
-                licenseCategory = "CLEAN_ROOM_READ_ONLY_EXTRACTION",
-                explanation = "Read-only extraction of RAR 5.0 archives is legally permitted; the WinRAR/UnRAR restriction applies exclusively to recreating the proprietary RAR compression algorithm."
+                licenseCategory = "OPEN_SOURCE_READ_ONLY_EXTRACTION",
+                explanation = "Handled by a GPL-3.0-or-later read-only RAR4/RAR5 extractor derived from libarchive (BSD-2-Clause) and Public Domain PPMd7 without proprietary UnRAR code."
             )
         }
 
-        // 3. DjVu: AT&T/LizardTech patents have expired; clean-room parser does not use GPLv2+ DjVuLibre code.
         if (format == DetectedFormat.DJVU || cleanExt == "djvu" || cleanExt == "djv") {
             return Verdict(
                 isLegallyPermitted = true,
-                licenseCategory = "EXPIRED_PATENTS_CLEAN_ROOM_PARSER",
-                explanation = "All DjVu format patents have expired. Handled by an independent clean-room AT&TFORM:DJVU/DJVM parser without GPLv2+ DjVuLibre code."
+                licenseCategory = "GPL_COMPATIBLE_DECODER",
+                explanation = "All DjVu format patents have expired. Handled by a GPL-3.0-or-later DjVu decoder derived from DjVuLibre (GPL-2.0-or-later)."
             )
         }
 
@@ -158,13 +156,7 @@ object OmniServerEndpoints {
     @Volatile
     var baseUrl: String = "https://hlebkukleuski.github.io/FullFileStudio"
 
-    val healthCheckUrl: String get() = "$baseUrl/v1/health"
     val appVersionManifestUrl: String get() = "$baseUrl/version.json"
-    val appConfigAndLegalPolicyUrl: String get() = "$baseUrl/v1/config/legal-policy"
-    val moduleCatalogManifestUrl: String get() = "$baseUrl/v1/modules/manifest.json"
-    fun moduleDownloadUrl(moduleId: String, abi: String = "arm64-v8a"): String =
-        "$baseUrl/v1/modules/download/$moduleId?abi=$abi"
-    val crashAndDiagnosticsReportUrl: String get() = "$baseUrl/v1/telemetry/diagnostics"
     val privacyPolicyWebUrl: String get() = "$baseUrl/privacy.html"
     val termsOfServiceWebUrl: String get() = "$baseUrl/terms.html"
     val openSourceLicensesWebUrl: String get() = "$baseUrl/licenses.html"
@@ -196,6 +188,7 @@ interface DocumentSession : AutoCloseable {
     val pageCount: Int
     val is3dContent: Boolean get() = false
     val isPresentationContent: Boolean get() = false
+    val isCopyRestricted: Boolean get() = false
 
     fun getDocumentWidth(): Float = 0f
     fun getDocumentHeight(): Float = 0f
@@ -218,10 +211,19 @@ interface DocumentSession : AutoCloseable {
     fun getActiveSheetIndex(): Int = 0
     fun setActiveSheetIndex(index: Int) {}
     fun getColumnWidths(): FloatArray = FloatArray(0)
+    fun getRowHeights(): FloatArray = FloatArray(0)
     fun getCellText(row: Int, col: Int): String = ""
     fun getSelectedRangeText(startRow: Int, startCol: Int, endRow: Int, endCol: Int): String = ""
 
     fun getLastError(): String? = null
+
+    fun getMissingResources(): List<String> = emptyList()
+    fun provideResource(name: String, fd: java.io.FileDescriptor): Boolean = false
+    fun applyProvidedResources(): Boolean = false
+    fun getAnimationDuration(): Float = 0f
+    fun setAnimationTime(seconds: Float) {}
+    fun getAnimationClips(): List<String> = emptyList()
+    fun setAnimationClip(index: Int) {}
 
     // Every active session reports a positive state version (>= 1L) so IPC health checks distinguish live sessions from missing ones (-1L).
     fun getStateVersion(): Long = 1L

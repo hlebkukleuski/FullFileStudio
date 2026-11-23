@@ -1,0 +1,4 @@
+Test mesh fixtures in this directory (Avocado_*.drc) are derived from the
+Khronos Group glTF Sample Models Avocado asset (Copyright Microsoft Corporation,
+released under CC0 1.0 Public Domain Dedication) encoded with Google Draco
+(Copyright The Draco Authors, Apache License 2.0).

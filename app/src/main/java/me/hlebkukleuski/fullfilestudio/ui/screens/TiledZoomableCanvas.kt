@@ -69,6 +69,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -113,6 +114,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
@@ -246,7 +248,9 @@ private data class TileRenderRequest(
     val is3D: Boolean,
     val stateTrigger: Int,
     val bufferWidth: Int,
-    val bufferHeight: Int
+    val bufferHeight: Int,
+    val animTimeMs: Int = -1,
+    val animClip: Int = 0
 )
 
 internal data class SearchMatchItem(
@@ -379,15 +383,7 @@ internal fun projectNormRectToScreen(
     )
 }
 
-private fun getFallbackGraphemeRelativeWeight(g: String): Float {
-    if (g.isEmpty()) return 1.0f
-    return when (g[0]) {
-        'W', 'M', 'w', 'm', 'Ш', 'Щ', 'Ж', 'Ю', 'Ы', 'Ф', 'ш', 'щ', 'ж', 'ю', 'ы', 'ф', '@', '%', '#' -> 1.45f
-        'I', 'l', 'i', 't', 'f', 'j', 'r', '1', '|', '!', ' ', '.', ',', ':', ';', '\'', '`', 'І', 'і', 'Ї', 'ї' -> 0.50f
-        'J', '(', ')', '[', ']', '{', '}', '/', '\\', '-', '–', '—', '«', '»' -> 0.68f
-        else -> 1.0f
-    }
-}
+private fun getFallbackGraphemeRelativeWeight(g: String): Float = PaddleOcrManager.getRelativeGraphemeWeight(g)
 
 private fun buildFallbackCharsFromPageText(
     rawPageText: String,
@@ -426,10 +422,10 @@ private fun buildFallbackCharsFromPageText(
             val text = match.groupValues[5].trim()
             if (text.isEmpty()) continue
 
-            val leftPx = (dx + normL * scaledW).coerceIn(0f, bmpWidth - 2f)
-            val topPx = (dy + normT * scaledH).coerceIn(0f, bmpHeight - 2f)
-            val rightPx = (dx + normR * scaledW).coerceIn(leftPx + 2f, bmpWidth.toFloat())
-            val botPx = (dy + normB * scaledH).coerceIn(topPx + 2f, bmpHeight.toFloat())
+            val leftPx = dx + normL * scaledW
+            val topPx = dy + normT * scaledH
+            val rightPx = (dx + normR * scaledW).coerceAtLeast(leftPx + 2f)
+            val botPx = (dy + normB * scaledH).coerceAtLeast(topPx + 2f)
             if (rightPx <= 4f || botPx <= 4f || leftPx >= bmpWidth - 4f || topPx >= bmpHeight - 4f) continue
 
             val graphemes = PaddleOcrManager.splitIntoGraphemes(text)
@@ -1422,7 +1418,25 @@ fun TiledZoomableCanvas(
     var showSpeakerNotesDialog by remember(session) { mutableStateOf(false) }
 
     var yaw by remember(session) { mutableFloatStateOf(25f) }
-    var pitch by remember(session) { mutableFloatStateOf(20f) }
+    var pitch by remember(session) { mutableFloatStateOf(-20f) }
+    var animDuration by remember(session) { mutableFloatStateOf(0f) }
+    var animTime by remember(session) { mutableFloatStateOf(-1f) }
+    var animPlaying by remember(session) { mutableStateOf(false) }
+    var animClips by remember(session) { mutableStateOf<List<String>>(emptyList()) }
+    var animClip by remember(session) { mutableIntStateOf(0) }
+    LaunchedEffect(session, animPlaying, animDuration) {
+        if (!animPlaying || animDuration <= 0f) return@LaunchedEffect
+        var last = 0L
+        while (isActive) {
+            withFrameNanos { now ->
+                if (last != 0L) {
+                    val next = animTime.coerceAtLeast(0f) + (now - last) / 1_000_000_000f
+                    animTime = if (next > animDuration) next % animDuration else next
+                }
+                last = now
+            }
+        }
+    }
 
     var activeBitmap by remember(session) { mutableStateOf<Bitmap?>(null) }
     var previousPageBitmap by remember(session) { mutableStateOf<Bitmap?>(null) }
@@ -1437,6 +1451,7 @@ fun TiledZoomableCanvas(
     var cachedDocWidth by remember(session) { mutableFloatStateOf(0f) }
     var cachedDocHeight by remember(session) { mutableFloatStateOf(0f) }
     var cachedColWidthsPx by remember(session) { mutableStateOf<FloatArray?>(null) }
+    var cachedRowHeightsPx by remember(session) { mutableStateOf<FloatArray?>(null) }
 
     var sheetNames by remember(session) { mutableStateOf<List<String>>(emptyList()) }
     var activeSheetIndex by remember(session) { mutableIntStateOf(0) }
@@ -1571,7 +1586,12 @@ fun TiledZoomableCanvas(
 
     val isTableBoundedLayout = isSpreadsheet || isHexSession
 
-    val isTextReflowCandidate = remember(session, proxyExt, isPresentation, isSpreadsheet, isHexSession, isPdfOrFontSession) {
+    val isPagedWordDocument = remember(session, proxyExt) {
+        (proxyExt in setOf("doc", "dot", "docx", "docm", "dotx", "dotm") || sessionName.contains("CleanRoomDocSession")) &&
+                try { session.getDocumentWidth() > 0f && session.getDocumentHeight() > 0f } catch (_: Throwable) { false }
+    }
+
+    val isTextReflowCandidate = remember(session, proxyExt, isPresentation, isSpreadsheet, isHexSession, isPdfOrFontSession, isPagedWordDocument) {
         val isTextExt = proxyExt in setOf(
             "fb2", "fbz", "epub", "azw3", "azw", "mobi", "prc", "one",
             "txt", "docx", "docm", "dotx", "dotm", "doc", "dot", "odt", "ott", "rtf",
@@ -1579,7 +1599,7 @@ fun TiledZoomableCanvas(
             "yaml", "yml", "py", "js", "ts", "kt", "java", "c", "cpp",
             "h", "hpp", "sh", "sql", "css", "properties", "toml", "gradle"
         )
-        (isTextExt ||
+        !isPagedWordDocument && (isTextExt ||
                 sessionName.contains("Ebook", ignoreCase = true) ||
                 sessionName.contains("PlainText", ignoreCase = true) ||
                 sessionName.contains("DocSession", ignoreCase = true) ||
@@ -1671,6 +1691,9 @@ fun TiledZoomableCanvas(
             val loadedColWidths = if (isSpreadsheet) {
                 try { session.getColumnWidths().takeIf { it.isNotEmpty() } } catch (_: Exception) { null }
             } else null
+            val loadedRowHeights = if (isSpreadsheet) {
+                try { session.getRowHeights().takeIf { it.isNotEmpty() } } catch (_: Exception) { null }
+            } else null
             val loadedReflow = if (isTextReflowCandidate && rawFullReflowText.isEmpty()) {
                 try { session.getPageText(-1) } catch (_: Throwable) { "" }
             } else rawFullReflowText
@@ -1693,6 +1716,7 @@ fun TiledZoomableCanvas(
                     sheetNames = loadedSheets
                     activeSheetIndex = loadedSheetIdx
                     cachedColWidthsPx = loadedColWidths
+                    cachedRowHeightsPx = loadedRowHeights
                 }
                 isInitialMetaLoaded = true
             }
@@ -1810,8 +1834,10 @@ fun TiledZoomableCanvas(
             val range = viewportPageRanges.getOrElse(currentPage.coerceIn(0, (viewportPageRanges.size - 1).coerceAtLeast(0))) {
                 0 until minOf(3500, fullReflowText.length)
             }
+            val isLastPage = viewportPageRanges.isEmpty() || currentPage >= viewportPageRanges.size - 1
+            val upperBound = if (isLastPage) Int.MAX_VALUE else range.last
             val matched = structuredDoc.imageAnchors.filter { anchor ->
-                anchor.charOffsetInCleanText in range.first..range.last
+                anchor.charOffsetInCleanText in range.first..upperBound
             }.map { it.imageIndex }.distinct()
             if (matched.isNotEmpty()) {
                 matched
@@ -1867,7 +1893,9 @@ fun TiledZoomableCanvas(
                     is3D = true,
                     stateTrigger = stateChangeTrigger,
                     bufferWidth = bmpW,
-                    bufferHeight = bmpH
+                    bufferHeight = bmpH,
+                    animTimeMs = if (animTime < 0f) -1 else (animTime * 1000f).toInt(),
+                    animClip = animClip
                 )
             } else if (useReflowLayout && activeReflowIllustrationIndex >= 0) {
                 TileRenderRequest(
@@ -1929,6 +1957,10 @@ fun TiledZoomableCanvas(
                         } else {
                             backBmp.eraseColor(if (isDarkTheme) android.graphics.Color.rgb(0x10, 0x10, 0x14) else android.graphics.Color.rgb(0xE9, 0xEC, 0xF2))
                         }
+                        if (req.is3D) {
+                            session.setAnimationClip(req.animClip)
+                            session.setAnimationTime(if (req.animTimeMs < 0) -1f else req.animTimeMs / 1000f)
+                        }
                         session.renderTile(
                             pageIndex = req.page,
                             tileX = req.tileX,
@@ -1937,15 +1969,28 @@ fun TiledZoomableCanvas(
                             bitmap = backBmp
                         )
                         val latestErr = session.getLastError()
+                        val animDur = if (req.is3D) session.getAnimationDuration() else 0f
+                        val clipList = if (req.is3D) session.getAnimationClips() else emptyList()
                         val w = session.getDocumentWidth()
                         val h = session.getDocumentHeight()
                         val cw = if (isSpreadsheet) {
                             try { session.getColumnWidths().takeIf { it.isNotEmpty() } } catch (_: Exception) { null }
                         } else null
+                        val rh = if (isSpreadsheet) {
+                            try { session.getRowHeights() } catch (_: Exception) { null }
+                        } else null
                         val pCount = session.pageCount.coerceAtLeast(1)
 
                         withContext(Dispatchers.Main) {
                             activeBitmap = backBmp
+                            if (req.is3D && clipList != animClips) animClips = clipList
+                            if (req.is3D && animDur != animDuration) {
+                                animDuration = animDur
+                                if (animDur <= 0f) {
+                                    animPlaying = false
+                                    animTime = -1f
+                                }
+                            }
                             renderedPage = req.page and 0x000FFFFF
                             renderedTileX = req.tileX
                             renderedTileY = req.tileY
@@ -1954,6 +1999,7 @@ fun TiledZoomableCanvas(
                             if (w > 0f) cachedDocWidth = w
                             if (h > 0f) cachedDocHeight = h
                             if (isSpreadsheet && cw != null) cachedColWidthsPx = cw
+                            if (isSpreadsheet && rh != null) cachedRowHeightsPx = rh.takeIf { it.isNotEmpty() }
                             renderVersion++
                             if (!useReflowLayout) {
                                 totalPages = pCount
@@ -1991,7 +2037,7 @@ fun TiledZoomableCanvas(
     }
 
     LaunchedEffect(useReflowLayout, activeReflowIllustrationIndex, renderVersion) {
-        if (!useReflowLayout || activeReflowIllustrationIndex < 0) {
+        if (session.isCopyRestricted || !useReflowLayout || activeReflowIllustrationIndex < 0) {
             reflowIllustrationOcrText = ""
             return@LaunchedEffect
         }
@@ -2150,6 +2196,12 @@ fun TiledZoomableCanvas(
         val snapTileY = renderedTileY
 
         val key = buildOcrCacheKey(snapPage, snapSheet, snapDark, snapZoomPermille, snapTileX, snapTileY)
+        if (session.isCopyRestricted) {
+            ocrLines = emptyList()
+            ocrChars = emptyList()
+            ocrText = ""
+            return@LaunchedEffect
+        }
         val cached = ocrCache[key]
         if (cached != null) {
             ocrLines = cached.first
@@ -2418,7 +2470,7 @@ fun TiledZoomableCanvas(
     } else Modifier
 
     val isSearchSupported = (isHtmlSession && isHtmlBrowserMode) ||
-            (!is3D && (useReflowLayout || isSpreadsheet || isPresentation || isPdfOrFontSession || totalPages > 1 || isHexSession))
+            (!is3D && (useReflowLayout || isTextReflowCandidate || isPagedWordDocument || isSpreadsheet || isPresentation || isPdfOrFontSession || totalPages > 1 || isHexSession))
 
     fun triggerDocumentSearch() {
         val trimmed = searchQuery.trim()
@@ -2511,6 +2563,10 @@ fun TiledZoomableCanvas(
             (!useReflowLayout && !isSpreadsheet && selStartChar >= 0 && selEndChar >= 0)
 
     fun copyActiveSelectionToClipboard(fullPageTextForReflow: String) {
+        if (session.isCopyRestricted) {
+            clearAllSelections()
+            return
+        }
         if (useReflowLayout && fullPageTextForReflow.isNotEmpty() && textSelStart >= 0 && textSelEnd >= 0) {
             val minI = minOf(textSelStart, textSelEnd).coerceIn(0, fullPageTextForReflow.length - 1)
             val maxI = (maxOf(textSelStart, textSelEnd) + 1).coerceIn(minI, fullPageTextForReflow.length)
@@ -2588,16 +2644,18 @@ fun TiledZoomableCanvas(
                     Text(strings.closeBtn)
                 }
             },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        clipManager?.setPrimaryClip(ClipData.newPlainText("Slide Notes", currentSlideSpeakerNotes))
-                        showSpeakerNotesDialog = false
+            dismissButton = if (!session.isCopyRestricted) {
+                {
+                    TextButton(
+                        onClick = {
+                            clipManager?.setPrimaryClip(ClipData.newPlainText("Slide Notes", currentSlideSpeakerNotes))
+                            showSpeakerNotesDialog = false
+                        }
+                    ) {
+                        Text(strings.copyActionButton, color = palette.accent)
                     }
-                ) {
-                    Text(strings.copyActionButton, color = palette.accent)
                 }
-            },
+            } else null,
             title = {
                 Text(
                     text = "${strings.slideNotesButton} (${strings.pageLabel} ${currentPage + 1})",
@@ -2671,7 +2729,7 @@ fun TiledZoomableCanvas(
                         }
 
                         if (is3D) {
-                            Button(onClick = { yaw = 25f; pitch = 20f; scale = 1f; fontScaleMultiplier = 1f }) {
+                            Button(onClick = { yaw = 25f; pitch = -20f; scale = 1f; fontScaleMultiplier = 1f }) {
                                 Text(strings.reset3dButton)
                             }
                         } else {
@@ -2691,9 +2749,10 @@ fun TiledZoomableCanvas(
                                     Text(if (isSearchVisible) strings.closeSearchButton else strings.searchButton)
                                 }
                             }
-                            if (!useReflowLayout && !isSpreadsheet && !isHtmlSession && (ocrChars.isNotEmpty() || cleanCurrentPageNativeText.isNotBlank())) {
+                            if (!session.isCopyRestricted && !useReflowLayout && !isSpreadsheet && !isHtmlSession && (ocrChars.isNotEmpty() || cleanCurrentPageNativeText.isNotBlank())) {
                                 OutlinedButton(
                                     onClick = {
+                                        if (session.isCopyRestricted) return@OutlinedButton
                                         if (ocrChars.isNotEmpty()) {
                                             selStartChar = 0
                                             selEndChar = ocrChars.lastIndex
@@ -2778,6 +2837,27 @@ fun TiledZoomableCanvas(
                         ) {
                             Text(strings.findButton)
                         }
+                    }
+                }
+                MissingResourcesBanner(session, stateChangeTrigger) { stateChangeTrigger++ }
+                if (is3D) {
+                    if (animDuration > 0f) {
+                        AnimationPlaybackBar(
+                            duration = animDuration,
+                            time = animTime,
+                            playing = animPlaying,
+                            clips = animClips,
+                            clip = animClip,
+                            onClip = { c ->
+                                animClip = c
+                                animTime = if (animPlaying) 0f else -1f
+                            },
+                            onToggle = { animPlaying = !animPlaying },
+                            onSeek = { t ->
+                                animPlaying = false
+                                animTime = t
+                            }
+                        )
                     }
                 }
             }
@@ -2950,7 +3030,7 @@ fun TiledZoomableCanvas(
                 }
             }
 
-            if (isHtmlSession && isHtmlBrowserMode) {
+            if (isHtmlSession && isHtmlBrowserMode && !session.isCopyRestricted) {
                 val htmlSource = rawFullReflowText.ifBlank { cleanCurrentPageNativeText }
                 val bgHex = remember(palette.canvasBackground) {
                     String.format(
@@ -3072,6 +3152,8 @@ fun TiledZoomableCanvas(
                             )
                             settings.apply {
                                 javaScriptEnabled = false
+                                blockNetworkLoads = true
+                                blockNetworkImage = true
                                 allowFileAccess = false
                                 allowContentAccess = false
                                 @Suppress("DEPRECATION")
@@ -3406,7 +3488,7 @@ fun TiledZoomableCanvas(
                                             delay(longPressTimeout)
                                             val curLayout = textLayoutResult
                                             val txtNow = latestPageText
-                                            if (!panStarted && !pinchStarted && !isDraggingStart && !isDraggingEnd && curLayout != null && txtNow.isNotEmpty()) {
+                                            if (!session.isCopyRestricted && !panStarted && !pinchStarted && !isDraggingStart && !isDraggingEnd && curLayout != null && txtNow.isNotEmpty()) {
                                                 val offsetIdx = curLayout.getOffsetForPosition(downPos).coerceIn(0, txtNow.length - 1)
                                                 val wordBoundary = curLayout.getWordBoundary(offsetIdx)
                                                 val wStart = wordBoundary.start.coerceIn(0, txtNow.length - 1)
@@ -3513,7 +3595,7 @@ fun TiledZoomableCanvas(
 
                                         val curLayout = textLayoutResult
                                         val txtNow = latestPageText
-                                        if (isDraggingStart || isDraggingEnd || isLongPress) {
+                                        if (!session.isCopyRestricted && (isDraggingStart || isDraggingEnd || isLongPress)) {
                                             if (textSelStart >= 0 && textSelEnd >= 0 && curLayout != null && txtNow.isNotEmpty()) {
                                                 val minO = minOf(textSelStart, textSelEnd).coerceIn(0, txtNow.length - 1)
                                                 val maxO = maxOf(textSelStart, textSelEnd).coerceIn(minO, curText.length - 1)
@@ -3642,6 +3724,7 @@ fun TiledZoomableCanvas(
                 val latestDocWidth by rememberUpdatedState(cachedDocWidth)
                 val latestDocHeight by rememberUpdatedState(cachedDocHeight)
                 val latestColWidthsPx by rememberUpdatedState(cachedColWidthsPx)
+                val latestRowHeightsPx by rememberUpdatedState(cachedRowHeightsPx)
                 val latestBufferWidth by rememberUpdatedState(activeBufferWidth)
                 val latestBufferHeight by rememberUpdatedState(activeBufferHeight)
                 val latestRawNativePageText by rememberUpdatedState(rawCurrentPageNativeTextWithoutNotes)
@@ -3689,6 +3772,7 @@ fun TiledZoomableCanvas(
                                 val gestureDocW = latestDocWidth
                                 val gestureDocH = latestDocHeight
                                 val gestureColWidths = latestColWidthsPx
+                                val gestureRowHeights = latestRowHeightsPx
 
                                 fun computeBitmapPlacement(curBmp: Bitmap): FloatArray {
                                     val isLiveMatch = (latestRenderedPage == currentPage && !is3D && !isTableBoundedLayout)
@@ -3766,7 +3850,8 @@ fun TiledZoomableCanvas(
                                         startRow = r0, startCol = c0, endRow = r1, endCol = c1,
                                         colOffsets = colOffsets, zoom = zoom,
                                         effScrollX = (-offset.x).coerceAtLeast(0f),
-                                        effScrollY = (-offset.y).coerceAtLeast(0f)
+                                        effScrollY = (-offset.y).coerceAtLeast(0f),
+                                        customRowHeightsPx = gestureRowHeights
                                     )
                                     val leftHandlePos = Offset(originX + rectBmp.left * scaleX, originY + rectBmp.bottom * scaleY)
                                     val rightHandlePos = Offset(originX + rectBmp.right * scaleX, originY + rectBmp.bottom * scaleY)
@@ -3829,7 +3914,8 @@ fun TiledZoomableCanvas(
                                                 offsetX = offset.x, offsetY = offset.y,
                                                 viewportWidth = bufW, docWidth = gestureDocW,
                                                 viewportHeight = bufH, docHeight = gestureDocH,
-                                                customColWidthsPx = gestureColWidths
+                                                customColWidthsPx = gestureColWidths,
+                                                customRowHeightsPx = gestureRowHeights
                                             )
                                             textToolbar.hide()
                                             sheetSelStartRow = cellRange.startRow
@@ -3840,7 +3926,7 @@ fun TiledZoomableCanvas(
                                             activeDragPoint = downScreenPos
                                             isLongPressActive = true
                                             haptic.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        } else {
+                                        } else if (!session.isCopyRestricted) {
                                             var curChars = latestOcrChars
                                             if (curChars.isEmpty() && latestRawNativePageText.isNotBlank()) {
                                                 val (fbLines, fbChars) = buildFallbackCharsFromPageText(
@@ -3997,7 +4083,8 @@ fun TiledZoomableCanvas(
                                                     offsetX = offset.x, offsetY = offset.y,
                                                     viewportWidth = bufW, docWidth = gestureDocW,
                                                     viewportHeight = bufH, docHeight = gestureDocH,
-                                                    customColWidthsPx = gestureColWidths
+                                                    customColWidthsPx = gestureColWidths,
+                                                    customRowHeightsPx = gestureRowHeights
                                                 )
                                                 if (isDraggingLeftHandle) {
                                                     if (cellRange.startRow != sheetSelStartRow || cellRange.startCol != sheetSelStartCol) {
@@ -4067,7 +4154,8 @@ fun TiledZoomableCanvas(
                                                     offsetX = offset.x, offsetY = offset.y,
                                                     viewportWidth = bufW, docWidth = gestureDocW,
                                                     viewportHeight = bufH, docHeight = gestureDocH,
-                                                    customColWidthsPx = gestureColWidths
+                                                    customColWidthsPx = gestureColWidths,
+                                                    customRowHeightsPx = gestureRowHeights
                                                 )
                                                 if (cellRange.endRow != sheetSelEndRow || cellRange.endCol != sheetSelEndCol) {
                                                     sheetSelEndRow = cellRange.endRow
@@ -4105,7 +4193,7 @@ fun TiledZoomableCanvas(
                                         if (panStarted) {
                                             if (is3D) {
                                                 yaw = (yaw + panChange.x * 0.45f) % 360f
-                                                pitch = (pitch + panChange.y * 0.45f).coerceIn(-89f, 89f)
+                                                pitch = (pitch - panChange.y * 0.45f).coerceIn(-89f, 89f)
                                                 scale = (scale * zoomChange).coerceIn(0.2f, 8f)
                                             } else {
                                                 val oldScale = scale
@@ -4187,12 +4275,13 @@ fun TiledZoomableCanvas(
                                             startRow = r0, startCol = c0, endRow = r1, endCol = c1,
                                             colOffsets = colOffsets, zoom = zoom,
                                             effScrollX = (-offset.x).coerceAtLeast(0f),
-                                            effScrollY = (-offset.y).coerceAtLeast(0f)
+                                            effScrollY = (-offset.y).coerceAtLeast(0f),
+                                            customRowHeightsPx = gestureRowHeights
                                         )
                                         // Suppress native dark Android ActionMode popup on spreadsheets;
                                         // our docked non-overlapping copy bar handles copying cleanly.
                                         textToolbar.hide()
-                                    } else if (selStartChar >= 0 && selEndChar >= 0 && curChars.isNotEmpty() && curBmp != null && !curBmp.isRecycled) {
+                                    } else if (!session.isCopyRestricted && selStartChar >= 0 && selEndChar >= 0 && curChars.isNotEmpty() && curBmp != null && !curBmp.isRecycled) {
                                         val minC = minOf(selStartChar, selEndChar).coerceIn(0, curChars.size - 1)
                                         val maxC = maxOf(selStartChar, selEndChar).coerceIn(0, curChars.size - 1)
                                         selStartChar = minC
@@ -4448,7 +4537,8 @@ fun TiledZoomableCanvas(
                                         colOffsets = colOffsets,
                                         zoom = zoom,
                                         effScrollX = effX,
-                                        effScrollY = effY
+                                        effScrollY = effY,
+                                        customRowHeightsPx = cachedRowHeightsPx
                                     )
                                     val headerW = SpreadsheetCoordinateUtils.BASE_HEADER_WIDTH * zoom
                                     val headerH = SpreadsheetCoordinateUtils.BASE_HEADER_HEIGHT * zoom
@@ -4606,7 +4696,8 @@ fun TiledZoomableCanvas(
                                         startRow = r0, startCol = c0, endRow = r1, endCol = c1,
                                         colOffsets = colOffsets, zoom = zoom,
                                         effScrollX = (-offset.x).coerceAtLeast(0f),
-                                        effScrollY = (-offset.y).coerceAtLeast(0f)
+                                        effScrollY = (-offset.y).coerceAtLeast(0f),
+                                        customRowHeightsPx = cachedRowHeightsPx
                                     )
                                     val headerW = SpreadsheetCoordinateUtils.BASE_HEADER_WIDTH * zoom
                                     val headerH = SpreadsheetCoordinateUtils.BASE_HEADER_HEIGHT * zoom
@@ -4733,7 +4824,7 @@ fun TiledZoomableCanvas(
             }
 
             androidx.compose.animation.AnimatedVisibility(
-                visible = hasAnyActiveSelection && !isSpreadsheet,
+                visible = !session.isCopyRestricted && hasAnyActiveSelection && !isSpreadsheet,
                 modifier = Modifier
                     .align(Alignment.TopCenter)
                     .padding(top = 12.dp),
@@ -4959,6 +5050,11 @@ fun TiledZoomableCanvas(
                                                     } catch (_: Exception) {
                                                         cachedColWidthsPx
                                                     }
+                                                    val newRowHeights = try {
+                                                        session.getRowHeights().takeIf { it.isNotEmpty() }
+                                                    } catch (_: Exception) {
+                                                        cachedRowHeightsPx
+                                                    }
 
                                                     withContext(Dispatchers.Main) {
                                                         val zoom = scale.coerceIn(0.5f, 4.0f)
@@ -4978,10 +5074,17 @@ fun TiledZoomableCanvas(
                                                         val safeTargetCol = targetCol.coerceIn(0, colCount - 1)
                                                         val targetColLeft = colOffsets[safeTargetCol]
                                                         val targetColW = (colOffsets[safeTargetCol + 1] - targetColLeft).coerceAtLeast(40f)
-                                                        val cellH = SpreadsheetCoordinateUtils.BASE_CELL_HEIGHT * zoom
+                                                        val targetRect = SpreadsheetCoordinateUtils.computeCellRectOnBitmap(
+                                                            startRow = targetRow, startCol = safeTargetCol,
+                                                            colOffsets = colOffsets, zoom = zoom,
+                                                            effScrollX = 0f, effScrollY = 0f,
+                                                            customRowHeightsPx = newRowHeights
+                                                        )
+                                                        val cellH = targetRect.height().coerceAtLeast(1f)
+                                                        val targetTop = targetRect.top - SpreadsheetCoordinateUtils.BASE_HEADER_HEIGHT * zoom
 
                                                         val desiredEffX = (targetColLeft - (bufW - SpreadsheetCoordinateUtils.BASE_HEADER_WIDTH * zoom - targetColW) / 2f).coerceAtLeast(0f)
-                                                        val desiredEffY = (targetRow * cellH - (bufH - SpreadsheetCoordinateUtils.BASE_HEADER_HEIGHT * zoom - cellH) / 2f).coerceAtLeast(0f)
+                                                        val desiredEffY = (targetTop - (bufH - SpreadsheetCoordinateUtils.BASE_HEADER_HEIGHT * zoom - cellH) / 2f).coerceAtLeast(0f)
 
                                                         val newOffset = clampCanvasOffset(
                                                             rawOffset = Offset(-desiredEffX, -desiredEffY),
@@ -4998,6 +5101,7 @@ fun TiledZoomableCanvas(
                                                         cachedDocWidth = newDocW
                                                         cachedDocHeight = newDocH
                                                         cachedColWidthsPx = newColWidths
+                                                        cachedRowHeightsPx = newRowHeights
                                                         offset = newOffset
                                                         if (sheetChanged) {
                                                             activeSheetIndex = targetSheet
@@ -5130,12 +5234,18 @@ fun TiledZoomableCanvas(
                             textAlign = TextAlign.Center
                         )
                         Spacer(Modifier.height(14.dp))
+                        val allowInSessionHex = !session.isCopyRestricted &&
+                                !errText.startsWith("DRM_PROTECTED") &&
+                                !errText.startsWith("UNSUPPORTED_ENCRYPTION") &&
+                                !errText.startsWith("PASSWORD_REQUIRED")
                         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            Button(
-                                onClick = onOpenHexFallbackRequest,
-                                colors = ButtonDefaults.buttonColors(containerColor = palette.errorBadge)
-                            ) {
-                                Text(strings.openInHexBtn, color = Color.Black, fontWeight = FontWeight.Bold)
+                            if (allowInSessionHex) {
+                                Button(
+                                    onClick = onOpenHexFallbackRequest,
+                                    colors = ButtonDefaults.buttonColors(containerColor = palette.errorBadge)
+                                ) {
+                                    Text(strings.openInHexBtn, color = Color.Black, fontWeight = FontWeight.Bold)
+                                }
                             }
                             OutlinedButton(onClick = { sessionError = null }) {
                                 Text(strings.closeBtn, color = palette.primaryText)
@@ -5320,7 +5430,7 @@ fun TiledZoomableCanvas(
 
         // Non-overlapping docked copy bar for spreadsheets (slides in cleanly without covering cells)
         androidx.compose.animation.AnimatedVisibility(
-            visible = isSpreadsheet && hasAnyActiveSelection,
+            visible = !session.isCopyRestricted && isSpreadsheet && hasAnyActiveSelection,
             enter = expandVertically(expandFrom = Alignment.Bottom) + fadeIn(),
             exit = shrinkVertically(shrinkTowards = Alignment.Bottom) + fadeOut()
         ) {
@@ -5583,7 +5693,7 @@ fun TiledZoomableCanvas(
 
                     Button(
                         onClick = {
-                            if (isHtmlSession && isHtmlBrowserMode) {
+                            if (isHtmlSession && isHtmlBrowserMode && !session.isCopyRestricted) {
                                 htmlBrowserZoomPercent = (htmlBrowserZoomPercent + 15).coerceAtMost(300)
                             } else if (useReflowLayout) {
                                 fontScaleMultiplier = (fontScaleMultiplier + 0.15f).coerceAtMost(3.5f)
@@ -5602,7 +5712,7 @@ fun TiledZoomableCanvas(
 
                     TextButton(
                         onClick = {
-                            if (isHtmlSession && isHtmlBrowserMode) {
+                            if (isHtmlSession && isHtmlBrowserMode && !session.isCopyRestricted) {
                                 htmlBrowserZoomPercent = 100
                             } else {
                                 scale = 1f; fontScaleMultiplier = 1f; offset = Offset.Zero
@@ -5630,7 +5740,7 @@ fun TiledZoomableCanvas(
 
                     Button(
                         onClick = {
-                            if (isHtmlSession && isHtmlBrowserMode) {
+                            if (isHtmlSession && isHtmlBrowserMode && !session.isCopyRestricted) {
                                 htmlBrowserZoomPercent = (htmlBrowserZoomPercent - 15).coerceAtLeast(50)
                             } else if (useReflowLayout) {
                                 fontScaleMultiplier = (fontScaleMultiplier - 0.15f).coerceAtLeast(0.5f)
@@ -5651,6 +5761,143 @@ fun TiledZoomableCanvas(
 }
 
 @Composable
+private fun AnimationPlaybackBar(
+    duration: Float,
+    time: Float,
+    playing: Boolean,
+    clips: List<String>,
+    clip: Int,
+    onClip: (Int) -> Unit,
+    onToggle: () -> Unit,
+    onSeek: (Float) -> Unit
+) {
+    val palette = LocalAppPalette.current
+    val strings = LocalAppStrings.current
+    fun clock(t: Float): String {
+        val tenths = (t.coerceAtLeast(0f) * 10f).roundToInt()
+        val minutes = tenths / 600
+        val rest = tenths % 600
+        return String.format(Locale.ROOT, "%d:%02d.%d", minutes, rest / 10, rest % 10)
+    }
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Button(onClick = onToggle) {
+            Text(if (playing) strings.pauseMedia else strings.playMedia, fontSize = 14.sp)
+        }
+        Spacer(Modifier.width(8.dp))
+        Slider(
+            value = time.coerceIn(0f, duration),
+            onValueChange = onSeek,
+            valueRange = 0f..duration,
+            modifier = Modifier.weight(1f)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text("${clock(time)} / ${clock(duration)}", color = palette.secondaryText, fontSize = 13.sp)
+        if (clips.size > 1) {
+            Spacer(Modifier.width(6.dp))
+            PlayerMenuButton(clips.getOrNull(clip)?.ifBlank { "#${clip + 1}" } ?: "#${clip + 1}", palette) { close ->
+                for ((i, name) in clips.withIndex()) {
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text((if (i == clip) "✓ " else "") + name.ifBlank { "#${i + 1}" }) },
+                        onClick = { onClip(i); close() }
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MissingResourcesBanner(session: DocumentSession, trigger: Int, onApplied: () -> Unit) {
+    val palette = LocalAppPalette.current
+    val strings = LocalAppStrings.current
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var missing by remember(session) { mutableStateOf<List<String>>(emptyList()) }
+    var busy by remember(session) { mutableStateOf(false) }
+    LaunchedEffect(session, trigger) {
+        missing = withContext(Dispatchers.IO) { try { session.getMissingResources() } catch (_: Throwable) { emptyList() } }
+    }
+    val picker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
+        busy = true
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                var any = false
+                for (u in uris) {
+                    val name = try {
+                        context.contentResolver.query(u, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                            if (c.moveToFirst()) c.getString(0) else null
+                        }
+                    } catch (_: Throwable) { null } ?: u.lastPathSegment?.substringAfterLast('/') ?: continue
+                    try {
+                        context.contentResolver.openFileDescriptor(u, "r")?.use { pfd ->
+                            if (session.provideResource(name, pfd.fileDescriptor)) any = true
+                        }
+                    } catch (_: Throwable) {}
+                }
+                if (any) try { session.applyProvidedResources() } catch (_: Throwable) {}
+                missing = try { session.getMissingResources() } catch (_: Throwable) { emptyList() }
+                any
+            }.let { if (it) onApplied() }
+            busy = false
+        }
+    }
+    if (missing.isEmpty()) return
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 8.dp)
+            .background(palette.background, RoundedCornerShape(10.dp))
+            .border(1.dp, palette.border, RoundedCornerShape(10.dp))
+            .padding(horizontal = 12.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(strings.missingResourcesTitle, color = palette.primaryText, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text(
+                missing.take(6).joinToString(", ") { it.substringAfterLast('/') } + if (missing.size > 6) " …" else "",
+                color = palette.secondaryText,
+                fontSize = 12.sp,
+                maxLines = 2
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        OutlinedButton(enabled = !busy, onClick = { picker.launch(arrayOf("*/*")) }) {
+            Text(strings.attachResourcesButton, color = palette.primaryText, fontSize = 13.sp)
+        }
+    }
+}
+
+@Composable
+private fun SubtitleOverlay(text: String, modifier: Modifier = Modifier, fontSize: androidx.compose.ui.unit.TextUnit = 17.sp) {
+    Text(
+        text = text,
+        color = Color.White,
+        fontSize = fontSize,
+        textAlign = TextAlign.Center,
+        modifier = modifier
+            .background(Color(0xB3000000), RoundedCornerShape(6.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    )
+}
+
+@Composable
+private fun PlayerMenuButton(label: String, palette: me.hlebkukleuski.fullfilestudio.ui.theme.AppPalette, content: @Composable (close: () -> Unit) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { open = true }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+            Text(label, color = palette.primaryText, fontSize = 13.sp, maxLines = 1)
+        }
+        androidx.compose.material3.DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            content { open = false }
+        }
+    }
+}
+
+@Composable
 fun MediaRenderScreen(
     session: MediaPlaybackSession,
     onOpenFileRequest: () -> Unit,
@@ -5659,17 +5906,72 @@ fun MediaRenderScreen(
 ) {
     val palette = LocalAppPalette.current
     val strings = LocalAppStrings.current
+    val context = LocalContext.current
+    val controller = me.hlebkukleuski.fullfilestudio.service.MediaPlaybackController
     val currentLang = remember(strings) {
         AppLanguage.entries.firstOrNull { strings == me.hlebkukleuski.fullfilestudio.ui.theme.stringsForLanguage(it) }
             ?: AppLanguage.EN
     }
+    fun titleOf(x: MediaPlaybackSession): String = if (x.trackTitle == "Аудио / Видео файл" || x.trackTitle == "Audio / Video Stream") {
+        controller.queue.value.getOrNull(controller.index.value)?.title?.takeIf { x === controller.session.value } ?: strings.defaultMediaTitle
+    } else x.trackTitle
+    fun artistOf(x: MediaPlaybackSession): String = if (x.trackArtist == "Неизвестный исполнитель" || x.trackArtist == "Unknown Artist") strings.defaultMediaArtist else x.trackArtist
 
-    androidx.compose.runtime.key(session) {
-        var isPlaying by remember { mutableStateOf(false) }
+    LaunchedEffect(session) {
+        controller.init(context)
+        if (!controller.isKnown(session) && !session.isClosed) controller.attach(session, titleOf(session))
+    }
+    val active by controller.session.collectAsState()
+    val s = active ?: session
+    val isPlaying by controller.isPlaying.collectAsState()
+    val speed by controller.speed.collectAsState()
+    val queue by controller.queue.collectAsState()
+    val queueIndex by controller.index.collectAsState()
+    val subtitle by controller.subtitleText.collectAsState()
+    val audioTracks by controller.audioTracks.collectAsState()
+    val textTracks by controller.textTracks.collectAsState()
+    val selectedAudio by controller.selectedAudio.collectAsState()
+    val selectedText by controller.selectedText.collectAsState()
+
+    val queuePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris -> if (uris.isNotEmpty()) controller.addToQueue(uris) }
+    val subtitlePicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null && !controller.loadSubtitles(uri)) {
+            android.widget.Toast.makeText(context, strings.mediaSubtitlesFailed, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+    var showQueue by remember { mutableStateOf(false) }
+
+    val activeAudioDevice = rememberActiveAudioDeviceCapabilities()
+    val settingsManager = LocalAppSettingsManager.current
+    val currentAudioQualityModeState = settingsManager?.audioQualityMode?.collectAsState()
+    val currentAudioQualityMode = currentAudioQualityModeState?.value ?: AppAudioQualityMode.AUTO
+    val effectiveAudioQualityText = remember(currentAudioQualityMode, activeAudioDevice, strings) {
+        when (currentAudioQualityMode) {
+            AppAudioQualityMode.AUTO -> strings.localizedAudioQualityAuto(activeAudioDevice)
+            AppAudioQualityMode.STUDIO_96 -> strings.audioQuality96
+            AppAudioQualityMode.HIGH_48 -> strings.audioQuality48
+            AppAudioQualityMode.STANDARD_44 -> strings.audioQuality44
+        }
+    }
+
+    LaunchedEffect(strings, activeAudioDevice, effectiveAudioQualityText) {
+        val devName = activeAudioDevice.getLocalizedDeviceName(strings)
+        val info = "${activeAudioDevice.deviceTypeIcon} $devName • $effectiveAudioQualityText"
+        controller.metadataProvider = { x -> Triple(titleOf(x), artistOf(x), info) }
+        controller.notifyState()
+    }
+
+    androidx.compose.runtime.key(s) {
         var currentPosition by remember { mutableFloatStateOf(0f) }
         var duration by remember { mutableFloatStateOf(1f) }
-        val isPrepared by session.isPrepared.collectAsState()
-        val playbackError by session.playbackError.collectAsState()
+        val isPrepared by s.isPrepared.collectAsState()
+        val playbackError by s.playbackError.collectAsState()
+        val resolvedTitle = titleOf(s)
+        val resolvedArtist = artistOf(s)
 
         var isDragging by remember { mutableStateOf(false) }
         var sliderPosition by remember { mutableFloatStateOf(0f) }
@@ -5680,116 +5982,31 @@ fun MediaRenderScreen(
         var lastVideoTapMs by remember { mutableLongStateOf(0L) }
         var lastVideoTapPos by remember { mutableStateOf(Offset.Zero) }
 
-
-
         LaunchedEffect(isPrepared) {
             if (isPrepared) {
                 try {
-                    duration = session.mediaPlayer.duration.toFloat().coerceAtLeast(1f)
-                    val vw = session.mediaPlayer.videoWidth
-                    val vh = session.mediaPlayer.videoHeight
-                    if (vw > 0 && vh > 0) {
-                        videoAspectRatio = (vw.toFloat() / vh.toFloat()).coerceIn(0.2f, 5.0f)
+                    duration = s.mediaPlayer.duration.toFloat().coerceAtLeast(1f)
+                    val vw = s.mediaPlayer.videoWidth
+                    val vh = s.mediaPlayer.videoHeight
+                    if (vw > 0 && vh > 0) videoAspectRatio = (vw.toFloat() / vh.toFloat()).coerceIn(0.2f, 5.0f)
+                    s.mediaPlayer.setOnVideoSizeChangedListener { _, w, h ->
+                        if (w > 0 && h > 0) videoAspectRatio = (w.toFloat() / h.toFloat()).coerceIn(0.2f, 5.0f)
                     }
-                    session.mediaPlayer.setOnVideoSizeChangedListener { _, w, h ->
-                        if (w > 0 && h > 0) {
-                            videoAspectRatio = (w.toFloat() / h.toFloat()).coerceIn(0.2f, 5.0f)
-                        }
-                    }
-                    if (session.hasVideo && !session.mediaPlayer.isPlaying) {
-                        try { session.mediaPlayer.seekTo(1) } catch (_: Exception) {}
-                    }
-                    session.mediaPlayer.setOnCompletionListener { isPlaying = false }
                 } catch (_: Exception) {}
             }
         }
 
-        LaunchedEffect(isPlaying, isDragging) {
-            while (isPlaying && !isDragging) {
+        LaunchedEffect(isPrepared, isPlaying, isDragging) {
+            while (isPrepared && !isDragging) {
                 try {
-                    if (session.mediaPlayer.isPlaying) {
-                        currentPosition = session.mediaPlayer.currentPosition.toFloat()
-                        sliderPosition = currentPosition
-                    }
+                    currentPosition = s.mediaPlayer.currentPosition.toFloat()
+                    sliderPosition = currentPosition
                 } catch (_: Exception) {}
+                if (!isPlaying) break
                 delay(250)
             }
         }
 
-        val resolvedTitle = if (session.trackTitle == "Аудио / Видео файл" || session.trackTitle == "Audio / Video Stream") {
-            strings.defaultMediaTitle
-        } else session.trackTitle
-
-        val resolvedArtist = if (session.trackArtist == "Неизвестный исполнитель" || session.trackArtist == "Unknown Artist") {
-            strings.defaultMediaArtist
-        } else session.trackArtist
-
-        val activeAudioDevice = rememberActiveAudioDeviceCapabilities()
-        val context = LocalContext.current
-        val settingsManager = LocalAppSettingsManager.current
-        val currentAudioQualityModeState = settingsManager?.audioQualityMode?.collectAsState()
-        val currentAudioQualityMode = currentAudioQualityModeState?.value ?: AppAudioQualityMode.AUTO
-
-        val effectiveAudioQualityText = remember(currentAudioQualityMode, activeAudioDevice, strings) {
-            when (currentAudioQualityMode) {
-                AppAudioQualityMode.AUTO -> strings.localizedAudioQualityAuto(activeAudioDevice)
-                AppAudioQualityMode.STUDIO_96 -> strings.audioQuality96
-                AppAudioQualityMode.HIGH_48 -> strings.audioQuality48
-                AppAudioQualityMode.STANDARD_44 -> strings.audioQuality44
-            }
-        }
-
-        LaunchedEffect(currentAudioQualityMode, activeAudioDevice) {
-            val (rateHz, bitDepth) = when (currentAudioQualityMode) {
-                AppAudioQualityMode.AUTO -> activeAudioDevice.maxSampleRateHz to activeAudioDevice.maxBitDepth
-                AppAudioQualityMode.STUDIO_96 -> minOf(96000, activeAudioDevice.maxSampleRateHz) to 24
-                AppAudioQualityMode.HIGH_48 -> minOf(48000, activeAudioDevice.maxSampleRateHz) to 16
-                AppAudioQualityMode.STANDARD_44 -> minOf(44100, activeAudioDevice.maxSampleRateHz) to 16
-            }
-            session.updateAudioQualityConfig(rateHz, bitDepth)
-        }
-
-        DisposableEffect(session, context) {
-            me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onTogglePlayPauseListener = {
-                try {
-                    if (session.mediaPlayer.isPlaying) {
-                        session.mediaPlayer.pause()
-                        isPlaying = false
-                    } else {
-                        session.mediaPlayer.start()
-                        isPlaying = true
-                    }
-                } catch (_: Exception) {}
-            }
-            me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onSeekToListener = { posMs ->
-                try {
-                    session.mediaPlayer.seekTo(posMs.toInt())
-                    currentPosition = posMs.toFloat()
-                    sliderPosition = posMs.toFloat()
-                } catch (_: Exception) {}
-            }
-            onDispose {
-                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onTogglePlayPauseListener = null
-                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.onSeekToListener = null
-                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.stopService(context)
-            }
-        }
-
-        LaunchedEffect(isPlaying, isPrepared, currentPosition, duration, resolvedTitle, resolvedArtist, effectiveAudioQualityText, activeAudioDevice, strings) {
-            if (isPrepared) {
-                val devName = activeAudioDevice.getLocalizedDeviceName(strings)
-                me.hlebkukleuski.fullfilestudio.service.MediaPlaybackNotificationService.updateNotification(
-                    context = context,
-                    title = resolvedTitle,
-                    artist = resolvedArtist,
-                    audioInfo = "${activeAudioDevice.deviceTypeIcon} $devName • $effectiveAudioQualityText",
-                    isPlaying = isPlaying,
-                    positionMs = currentPosition.toLong(),
-                    durationMs = duration.toLong(),
-                    art = session.albumArt
-                )
-            }
-        }
 
         Column(
             modifier = modifier
@@ -5850,7 +6067,7 @@ fun MediaRenderScreen(
                     }
                 } else {
                     Column(modifier = Modifier.fillMaxSize()) {
-                        if (session.hasVideo) {
+                        if (s.hasVideo) {
                             val density = LocalDensity.current
                             BoxWithConstraints(
                                 modifier = Modifier
@@ -5858,7 +6075,7 @@ fun MediaRenderScreen(
                                     .fillMaxWidth()
                                     .clip(RoundedCornerShape(0.dp))
                                     .background(Color.Black)
-                                    .pointerInput(session) {
+                                    .pointerInput(s) {
                                         awaitEachGesture {
                                             val down = awaitFirstDown(requireUnconsumed = false)
                                             val downPos = down.position
@@ -5928,15 +6145,15 @@ fun MediaRenderScreen(
                                             holder.addCallback(object : SurfaceHolder.Callback {
                                                 override fun surfaceCreated(h: SurfaceHolder) {
                                                     try {
-                                                        session.mediaPlayer.setSurface(h.surface)
-                                                        if (isPrepared && !session.mediaPlayer.isPlaying) {
-                                                            session.mediaPlayer.seekTo(session.mediaPlayer.currentPosition.coerceAtLeast(1))
+                                                        s.mediaPlayer.setSurface(h.surface)
+                                                        if (isPrepared && !s.mediaPlayer.isPlaying) {
+                                                            s.mediaPlayer.seekTo(s.mediaPlayer.currentPosition.coerceAtLeast(1))
                                                         }
                                                     } catch (_: Exception) {}
                                                 }
                                                 override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, h2: Int) {}
                                                 override fun surfaceDestroyed(h: SurfaceHolder) {
-                                                    try { session.mediaPlayer.setSurface(null) } catch (_: Exception) {}
+                                                    try { s.detachSurface(h.surface) } catch (_: Exception) {}
                                                 }
                                             })
                                         }
@@ -5951,14 +6168,40 @@ fun MediaRenderScreen(
                                             translationY = videoOffset.y
                                         }
                                 )
+                                subtitle?.let { text ->
+                                    val zw = fittedW * videoScale
+                                    val zh = fittedH * videoScale
+                                    val left = ((boxW - zw) / 2f + videoOffset.x).coerceIn(0f, boxW)
+                                    val top = ((boxH - zh) / 2f + videoOffset.y).coerceIn(0f, boxH)
+                                    val right = ((boxW + zw) / 2f + videoOffset.x).coerceIn(left, boxW)
+                                    val bottom = ((boxH + zh) / 2f + videoOffset.y).coerceIn(top, boxH)
+                                    val frameH = bottom - top
+                                    Box(
+                                        modifier = Modifier
+                                            .align(Alignment.TopStart)
+                                            .offset { IntOffset(left.roundToInt(), top.roundToInt()) }
+                                            .size(with(density) { (right - left).toDp() }, with(density) { frameH.toDp() }),
+                                        contentAlignment = Alignment.BottomCenter
+                                    ) {
+                                        SubtitleOverlay(
+                                            text,
+                                            Modifier.padding(
+                                                bottom = with(density) { (frameH * 0.05f).toDp() }.coerceAtLeast(6.dp),
+                                                start = 12.dp,
+                                                end = 12.dp
+                                            ),
+                                            fontSize = with(density) { (frameH * 0.055f).toSp() }.value.coerceIn(12f, 22f).sp
+                                        )
+                                    }
+                                }
                             }
                         } else {
                             Column(
-                                modifier = Modifier.weight(1f).fillMaxWidth(),
+                                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
                                 horizontalAlignment = Alignment.CenterHorizontally,
                                 verticalArrangement = Arrangement.Center
                             ) {
-                                val art = session.albumArt
+                                val art = s.albumArt
                                 if (art != null && !art.isRecycled) {
                                     Image(
                                         bitmap = art.asImageBitmap(),
@@ -5977,11 +6220,9 @@ fun MediaRenderScreen(
                                     }
                                 }
                                 Spacer(Modifier.height(24.dp))
-                                Text(resolvedTitle, color = palette.primaryText, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                Text(resolvedTitle, color = palette.primaryText, fontSize = 22.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
                                 Spacer(Modifier.height(4.dp))
                                 Text(resolvedArtist, color = palette.secondaryText, fontSize = 16.sp)
-
-                                val activeAudioDevice = rememberActiveAudioDeviceCapabilities()
                                 Spacer(Modifier.height(10.dp))
                                 Surface(
                                     shape = RoundedCornerShape(12.dp),
@@ -6002,6 +6243,10 @@ fun MediaRenderScreen(
                                         )
                                     }
                                 }
+                                subtitle?.let {
+                                    Spacer(Modifier.height(16.dp))
+                                    Text(it, color = palette.primaryText, fontSize = 18.sp, textAlign = TextAlign.Center)
+                                }
                             }
                         }
 
@@ -6013,7 +6258,7 @@ fun MediaRenderScreen(
                                     onValueChangeFinished = {
                                         isDragging = false
                                         currentPosition = sliderPosition
-                                        try { session.mediaPlayer.seekTo(sliderPosition.toInt()) } catch (_: Exception) {}
+                                        controller.seekTo(sliderPosition.toLong())
                                     },
                                     valueRange = 0f..duration,
                                     modifier = Modifier.fillMaxWidth()
@@ -6029,35 +6274,115 @@ fun MediaRenderScreen(
                         }
 
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
-                            horizontalArrangement = Arrangement.Center
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                            horizontalArrangement = Arrangement.Center,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Button(
-                                enabled = isPrepared,
-                                onClick = {
-                                    try {
-                                        if (session.mediaPlayer.isPlaying) {
-                                            session.mediaPlayer.pause()
-                                            isPlaying = false
-                                        } else {
-                                            session.mediaPlayer.start()
-                                            isPlaying = true
-                                        }
-                                    } catch (_: Exception) {}
-                                }
-                            ) {
+                            OutlinedButton(enabled = isPrepared, onClick = { controller.previous() }) {
+                                Text("⏮", color = palette.primaryText, fontSize = 18.sp)
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Button(enabled = isPrepared, onClick = { controller.toggle() }) {
                                 Text(
                                     text = if (!isPrepared) strings.preparingMedia else if (isPlaying) strings.pauseMedia else strings.playMedia,
                                     fontSize = 16.sp
                                 )
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            OutlinedButton(enabled = isPrepared && queueIndex < queue.size - 1, onClick = { controller.next() }) {
+                                Text("⏭", color = palette.primaryText, fontSize = 18.sp)
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 16.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            PlayerMenuButton("${strings.mediaSpeed} ${formatSpeed(speed)}", palette) { close ->
+                                for (v in listOf(0.5f, 0.75f, 1f, 1.25f, 1.5f, 1.75f, 2f)) {
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text((if (v == speed) "✓ " else "") + formatSpeed(v)) },
+                                        onClick = { controller.setSpeed(v); close() }
+                                    )
+                                }
+                            }
+                            if (audioTracks.size > 1) {
+                                PlayerMenuButton(strings.mediaAudioTrack, palette) { close ->
+                                    for (t in audioTracks) {
+                                        androidx.compose.material3.DropdownMenuItem(
+                                            text = { Text((if (t.id == selectedAudio) "✓ " else "") + t.label) },
+                                            onClick = { controller.selectAudioTrack(t.id); close() }
+                                        )
+                                    }
+                                }
+                            }
+                            PlayerMenuButton(strings.mediaSubtitles, palette) { close ->
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text((if (selectedText == -1) "✓ " else "") + strings.mediaSubtitlesOff) },
+                                    onClick = { controller.selectTextTrack(-1); close() }
+                                )
+                                for (t in textTracks) {
+                                    androidx.compose.material3.DropdownMenuItem(
+                                        text = { Text((if (t.id == selectedText) "✓ " else "") + t.label) },
+                                        onClick = { controller.selectTextTrack(t.id); close() }
+                                    )
+                                }
+                                androidx.compose.material3.DropdownMenuItem(
+                                    text = { Text(strings.mediaLoadSubtitles) },
+                                    onClick = { close(); subtitlePicker.launch(arrayOf("*/*")) }
+                                )
+                            }
+                            OutlinedButton(onClick = { showQueue = true }, contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)) {
+                                Text("${strings.mediaQueue} ${queueIndex + 1}/${queue.size.coerceAtLeast(1)}", color = palette.primaryText, fontSize = 13.sp, maxLines = 1)
                             }
                         }
                     }
                 }
             }
         }
+
+        if (showQueue) {
+            AlertDialog(
+                onDismissRequest = { showQueue = false },
+                title = { Text(strings.mediaQueue) },
+                text = {
+                    LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
+                        itemsIndexed(queue) { i, item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(enabled = i != queueIndex && item.uri != null) { controller.playAt(i) }
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = (if (i == queueIndex) "▶ " else "${i + 1}. ") + item.title,
+                                    color = if (i == queueIndex) palette.accent else palette.primaryText,
+                                    fontWeight = if (i == queueIndex) FontWeight.Bold else FontWeight.Normal,
+                                    maxLines = 2,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (i > 0) TextButton(onClick = { controller.moveInQueue(i, i - 1) }) { Text("↑") }
+                                if (i < queue.size - 1) TextButton(onClick = { controller.moveInQueue(i, i + 1) }) { Text("↓") }
+                                if (i != queueIndex) TextButton(onClick = { controller.removeFromQueue(i) }) { Text("✕") }
+                            }
+                        }
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = { queuePicker.launch(arrayOf("audio/*", "video/*")) }) { Text(strings.mediaAddFiles) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showQueue = false }) { Text(strings.mediaClose) }
+                }
+            )
+        }
     }
 }
+
+private fun formatSpeed(v: Float): String =
+    if (v == kotlin.math.floor(v)) "${v.toInt()}×" else "${String.format(Locale.US, "%.2f", v).trimEnd('0').trimEnd('.')}×"
 
 private fun formatTime(ms: Int): String {
     val sec = (ms / 1000).coerceAtLeast(0)

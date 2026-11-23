@@ -31,7 +31,11 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -202,19 +206,6 @@ data class AppStrings(
     val themeDark: String,
     val themeLight: String,
     val themeAsInPhone: String,
-    val engineCenterSubtitle: String,
-    val builtinFormatsDescription: String,
-    val selectOptionalModulesPrompt: String,
-    val downloadAllOneClick: String,
-    val installSelectedPrefix: String,
-    val workLightweightCoreOnly: String,
-    val moduleReady: String,
-    val mbSuffix: String,
-    val playModuleBadge: String,
-    val playModuleRequiredTitle: String,
-    val playModuleRequiredDesc: String,
-    val playModuleOpensFormatsPrefix: String,
-    val downloadModuleBtn: String,
     val cancelBtn: String,
     val closeBtn: String,
     val openInHexBtn: String,
@@ -226,6 +217,8 @@ data class AppStrings(
     val formatReadErrorTitle: String,
     val closedLicenseTitle: String,
     val passwordRequiredTitle: String,
+    val passwordPlaceholder: String,
+    val unlockBtn: String,
     val hexFallbackHint: String,
     val archiveContentsTitle: String,
     val backButton: String,
@@ -243,6 +236,17 @@ data class AppStrings(
     val playMedia: String,
     val pauseMedia: String,
     val audioLabel: String,
+    val mediaQueue: String,
+    val mediaAddFiles: String,
+    val mediaSubtitles: String,
+    val mediaSubtitlesOff: String,
+    val mediaLoadSubtitles: String,
+    val mediaAudioTrack: String,
+    val mediaSpeed: String,
+    val mediaSubtitlesFailed: String,
+    val mediaClose: String,
+    val missingResourcesTitle: String,
+    val attachResourcesButton: String,
     val legalComplianceTitle: String,
     val serverEndpointStatus: String,
     val closeDrawerButton: String,
@@ -269,12 +273,6 @@ data class AppStrings(
     val errorArchiveReadPrefix: String,
     val errorHexOpenFailed: String,
     val errorRenderFailed: String,
-    val bundleOfficeName: String,
-    val bundleOfficeDesc: String,
-    val bundleCadName: String,
-    val bundleCadDesc: String,
-    val bundleArchivesName: String,
-    val bundleArchivesDesc: String,
     val frameRateLabel: String = "Display Refresh Rate Limit",
     val frameRateAutoPattern: String = "The absolute max your phone can pull off (%d Hz)",
     val frameRate90: String = "90 Hz",
@@ -301,24 +299,6 @@ data class AppStrings(
     val laterButton: String = "Later",
     val downloadingUpdateStatus: String = "Downloading update..."
 ) {
-    fun localizedBundleName(bundleId: String, defaultName: String): String = when (bundleId) {
-        "office" -> bundleOfficeName
-        "cadvector" -> bundleCadName
-        "archives" -> bundleArchivesName
-        else -> defaultName
-    }
-
-    fun localizedBundleDesc(bundleId: String, defaultDesc: String): String = when (bundleId) {
-        "office" -> bundleOfficeDesc
-        "cadvector" -> bundleCadDesc
-        "archives" -> bundleArchivesDesc
-        else -> defaultDesc
-    }
-
-    fun formatPlayModulePrompt(bundleId: String, defaultDesc: String): String {
-        val formatsLine = localizedBundleDesc(bundleId, defaultDesc)
-        return "$playModuleRequiredDesc\n    $playModuleOpensFormatsPrefix $formatsLine"
-    }
 
     fun localizedFrameRateAuto(maxHz: Int): String = when (frameRateAutoPattern) {
         "Максимум что может твой телефон (%d Гц)" -> "Максимум что может твой телефон ($maxHz Гц)"
@@ -357,19 +337,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "Dark",
         themeLight = "Light",
         themeAsInPhone = "As in phone",
-        engineCenterSubtitle = "Supported Formats & Optional Modules",
-        builtinFormatsDescription = "Built-in formats: PDF, DjVu, Fonts (TTF, OTF, TTC, WOFF, WOFF2), Images (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), Text & Code (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), Databases (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), Previews (MAX, RVT, INDD), Audio & Video (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) & HEX.",
-        selectOptionalModulesPrompt = "Select optional Google Play modules:",
-        downloadAllOneClick = "⚡ Download everything in one click",
-        installSelectedPrefix = "Install Selected",
-        workLightweightCoreOnly = "Keep it light & fast (Core only)",
-        moduleReady = "✓ Ready",
-        mbSuffix = "MB",
-        playModuleBadge = "📦 GOOGLE PLAY MODULE",
-        playModuleRequiredTitle = "Module Required",
-        playModuleRequiredDesc = "To read this file, we need to download a module for these file types from Google Play servers. Here is what it will give you:",
-        playModuleOpensFormatsPrefix = "Opening these formats:",
-        downloadModuleBtn = "Download Module",
         cancelBtn = "Cancel",
         closeBtn = "Close",
         openInHexBtn = "Open in HEX",
@@ -381,6 +348,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "Unable to Parse File Structure",
         closedLicenseTitle = "Format Covered by Closed License",
         passwordRequiredTitle = "Document Is Encrypted",
+        passwordPlaceholder = "Enter password",
+        unlockBtn = "Unlock",
         hexFallbackHint = "You can safely inspect the raw bytes of this file in the built-in engineering HEX inspector.",
         archiveContentsTitle = "Archive / Disk Image Contents",
         backButton = "← Back",
@@ -398,6 +367,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ Play",
         pauseMedia = "❚❚ Pause",
         audioLabel = "🎵 Audio Stream",
+        mediaQueue = "Queue",
+        mediaAddFiles = "Add files",
+        mediaSubtitles = "Subtitles",
+        mediaSubtitlesOff = "Off",
+        mediaLoadSubtitles = "Load subtitle file…",
+        mediaAudioTrack = "Audio track",
+        mediaSpeed = "Speed",
+        mediaSubtitlesFailed = "Could not read this subtitle file",
+        mediaClose = "Close",
+        missingResourcesTitle = "This file refers to other files that are not available",
+        attachResourcesButton = "Attach files…",
         legalComplianceTitle = "About / Legal Information",
         serverEndpointStatus = "Policy & Sync Server Endpoint Configured",
         closeDrawerButton = "Close Drawer",
@@ -424,12 +404,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "Archive read error",
         errorHexOpenFailed = "Unable to open file in HEX inspector mode.",
         errorRenderFailed = "Document rendering failed.",
-        bundleOfficeName = "Office Documents, Spreadsheets, Presentations & E-Books",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Vector Graphics & 3D CAD Models",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Archives, Packages & Disk Images",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Retry Download",
         openAsInBrowserButton = "🌐 Open as in Browser",
         viewHtmlSourceButton = "📄 View Source",
@@ -454,19 +428,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "Тёмная",
         themeLight = "Светлая",
         themeAsInPhone = "Как в телефоне",
-        engineCenterSubtitle = "Поддерживаемые форматы и дополнительные модули",
-        builtinFormatsDescription = "Уже встроены: PDF, DjVu, шрифты (TTF, OTF, TTC, WOFF, WOFF2), изображения (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), текст и код (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), базы данных (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), превью (MAX, RVT, INDD), аудио и видео (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) и HEX.",
-        selectOptionalModulesPrompt = "Выберите дополнительные модули Google Play:",
-        downloadAllOneClick = "⚡ Скачать всё сразу одним кликом",
-        installSelectedPrefix = "Установить выбранные",
-        workLightweightCoreOnly = "Работать налегке (Только базовые)",
-        moduleReady = "✓ Готов",
-        mbSuffix = "МБ",
-        playModuleBadge = "📦 МОДУЛЬ GOOGLE PLAY",
-        playModuleRequiredTitle = "Требуется модуль",
-        playModuleRequiredDesc = "Чтобы прочитать этот файл, нам нужно скачать модуль для таких типов файлов с серверов Google Play. Вот какие возможности это даст:",
-        playModuleOpensFormatsPrefix = "Открытие этих форматов:",
-        downloadModuleBtn = "Загрузить модуль",
         cancelBtn = "Отмена",
         closeBtn = "Закрыть",
         openInHexBtn = "Открыть в HEX",
@@ -478,6 +439,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "Не удалось разобрать структуру файла",
         closedLicenseTitle = "Формат защищён закрытой лицензией",
         passwordRequiredTitle = "Документ защищён шифрованием",
+        passwordPlaceholder = "Введите пароль",
+        unlockBtn = "Открыть",
         hexFallbackHint = "Вы можете безопасно исследовать сырые байты этого файла во встроенном инженерном HEX-инспекторе.",
         archiveContentsTitle = "Содержимое архива / образа",
         backButton = "← Назад",
@@ -495,6 +458,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ Воспроизвести",
         pauseMedia = "❚❚ Пауза",
         audioLabel = "🎵 Аудиопоток",
+        mediaQueue = "Очередь",
+        mediaAddFiles = "Добавить файлы",
+        mediaSubtitles = "Субтитры",
+        mediaSubtitlesOff = "Выкл.",
+        mediaLoadSubtitles = "Загрузить файл субтитров…",
+        mediaAudioTrack = "Аудиодорожка",
+        mediaSpeed = "Скорость",
+        mediaSubtitlesFailed = "Не удалось прочитать файл субтитров",
+        mediaClose = "Закрыть",
+        missingResourcesTitle = "Файл ссылается на недоступные файлы",
+        attachResourcesButton = "Указать файлы…",
         legalComplianceTitle = "О приложении / Правовая информация",
         serverEndpointStatus = "Сервер синхронизации и политик подключён",
         closeDrawerButton = "Закрыть панель",
@@ -535,12 +509,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "Ошибка чтения архива",
         errorHexOpenFailed = "Не удалось открыть файл в режиме HEX-инспектора.",
         errorRenderFailed = "Сбой рендеринга документа.",
-        bundleOfficeName = "Офисные документы, таблицы, презентации и книги",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Векторная графика и 3D CAD-модели",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Архивы, пакеты и образы дисков",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Повторить загрузку",
         openAsInBrowserButton = "🌐 Открыть как в браузере",
         viewHtmlSourceButton = "📄 Исходный код",
@@ -565,19 +533,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "Dunkel",
         themeLight = "Hell",
         themeAsInPhone = "Wie im Telefon",
-        engineCenterSubtitle = "Unterstützte Formate & Zusatzmodule",
-        builtinFormatsDescription = "Bereits integriert: PDF, DjVu, Schriften (TTF, OTF, TTC, WOFF, WOFF2), Bilder (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), Text & Code (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), Datenbanken (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), Vorschau (MAX, RVT, INDD), Audio & Video (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) & HEX.",
-        selectOptionalModulesPrompt = "Optionale Google Play-Module auswählen:",
-        downloadAllOneClick = "⚡ Alle mit einem Klick laden",
-        installSelectedPrefix = "Ausgewählte installieren",
-        workLightweightCoreOnly = "Leicht & schnell starten (Nur Basis)",
-        moduleReady = "✓ Bereit",
-        mbSuffix = "MB",
-        playModuleBadge = "📦 GOOGLE PLAY-MODUL",
-        playModuleRequiredTitle = "Modul erforderlich",
-        playModuleRequiredDesc = "Um diese Datei zu lesen, müssen wir ein Modul für solche Dateitypen von den Google Play-Servern herunterladen. Das bietet Ihnen folgende Möglichkeiten:",
-        playModuleOpensFormatsPrefix = "Öffnen dieser Formate:",
-        downloadModuleBtn = "Modul laden",
         cancelBtn = "Abbrechen",
         closeBtn = "Schließen",
         openInHexBtn = "In HEX öffnen",
@@ -589,6 +544,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "Dateistruktur konnte nicht gelesen werden",
         closedLicenseTitle = "Format durch geschlossene Lizenz geschützt",
         passwordRequiredTitle = "Dokument ist verschlüsselt",
+        passwordPlaceholder = "Passwort eingeben",
+        unlockBtn = "Entsperren",
         hexFallbackHint = "Sie können die Rohbytes dieser Datei sicher im HEX-Inspektor analysieren.",
         archiveContentsTitle = "Archiv- / Abbildinhalt",
         backButton = "← Zurück",
@@ -606,6 +563,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ Abspielen",
         pauseMedia = "❚❚ Pause",
         audioLabel = "🎵 Audiostream",
+        mediaQueue = "Warteschlange",
+        mediaAddFiles = "Dateien hinzufügen",
+        mediaSubtitles = "Untertitel",
+        mediaSubtitlesOff = "Aus",
+        mediaLoadSubtitles = "Untertiteldatei laden…",
+        mediaAudioTrack = "Tonspur",
+        mediaSpeed = "Tempo",
+        mediaSubtitlesFailed = "Untertiteldatei konnte nicht gelesen werden",
+        mediaClose = "Schließen",
+        missingResourcesTitle = "Die Datei verweist auf nicht verfügbare Dateien",
+        attachResourcesButton = "Dateien angeben…",
         legalComplianceTitle = "Über die App / Rechtliche Hinweise",
         serverEndpointStatus = "Server-Endpunkte bereit",
         closeDrawerButton = "Menü schließen",
@@ -646,12 +614,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "Archivlesefehler",
         errorHexOpenFailed = "Datei konnte nicht im HEX-Inspektor geöffnet werden.",
         errorRenderFailed = "Fehler beim Rendern des Dokuments.",
-        bundleOfficeName = "Office-Dokumente, Tabellen, Präsentationen & E-Books",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Vektorgrafik & 3D-CAD-Modelle",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Archive, Pakete & Datenträgerabbilder",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Erneut versuchen",
         openAsInBrowserButton = "🌐 Wie im Browser öffnen",
         viewHtmlSourceButton = "📄 Quellcode anzeigen",
@@ -676,19 +638,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "Oscuro",
         themeLight = "Claro",
         themeAsInPhone = "Como en el teléfono",
-        engineCenterSubtitle = "Formatos compatibles y módulos adicionales",
-        builtinFormatsDescription = "Ya incluidos: PDF, DjVu, fuentes (TTF, OTF, TTC, WOFF, WOFF2), imágenes (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), texto y código (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), bases de datos (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), vistas previas (MAX, RVT, INDD), audio y vídeo (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) y HEX.",
-        selectOptionalModulesPrompt = "Seleccione módulos opcionales de Google Play:",
-        downloadAllOneClick = "⚡ Descargar todo en un clic",
-        installSelectedPrefix = "Instalar seleccionados",
-        workLightweightCoreOnly = "Modo ligero y rápido (Solo básicos)",
-        moduleReady = "✓ Listo",
-        mbSuffix = "MB",
-        playModuleBadge = "📦 MÓDULO DE GOOGLE PLAY",
-        playModuleRequiredTitle = "Se requiere módulo",
-        playModuleRequiredDesc = "Para leer este archivo, necesitamos descargar un módulo para este tipo de archivos desde los servidores de Google Play. Esto es lo que te permitirá hacer:",
-        playModuleOpensFormatsPrefix = "Abrir estos formatos:",
-        downloadModuleBtn = "Descargar módulo",
         cancelBtn = "Cancelar",
         closeBtn = "Cerrar",
         openInHexBtn = "Abrir en HEX",
@@ -700,6 +649,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "Error al leer la estructura del archivo",
         closedLicenseTitle = "Formato restringido por licencia cerrada",
         passwordRequiredTitle = "Documento cifrado con contraseña",
+        passwordPlaceholder = "Introducir contraseña",
+        unlockBtn = "Desbloquear",
         hexFallbackHint = "Puede inspeccionar los bytes sin procesar de forma segura en el inspector HEX.",
         archiveContentsTitle = "Contenido del archivo / ISO",
         backButton = "← Atrás",
@@ -717,6 +668,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ Reproducir",
         pauseMedia = "❚❚ Pausa",
         audioLabel = "🎵 Audio",
+        mediaQueue = "Cola",
+        mediaAddFiles = "Añadir archivos",
+        mediaSubtitles = "Subtítulos",
+        mediaSubtitlesOff = "Desactivados",
+        mediaLoadSubtitles = "Cargar archivo de subtítulos…",
+        mediaAudioTrack = "Pista de audio",
+        mediaSpeed = "Velocidad",
+        mediaSubtitlesFailed = "No se pudo leer el archivo de subtítulos",
+        mediaClose = "Cerrar",
+        missingResourcesTitle = "El archivo hace referencia a archivos no disponibles",
+        attachResourcesButton = "Indicar archivos…",
         legalComplianceTitle = "Acerca de la aplicación / Información legal",
         serverEndpointStatus = "Endpoints del servidor configurados",
         closeDrawerButton = "Cerrar panel",
@@ -757,12 +719,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "Error al leer el archivo comprimido",
         errorHexOpenFailed = "No se pudo abrir el archivo en el modo de inspector HEX.",
         errorRenderFailed = "Error al renderizar el documento.",
-        bundleOfficeName = "Documentos de oficina, hojas de cálculo, presentaciones y libros",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Gráficos vectoriales y modelos CAD 3D",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Archivos comprimidos, paquetes e imágenes de disco",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Reintentar descarga",
         openAsInBrowserButton = "🌐 Abrir como en navegador",
         viewHtmlSourceButton = "📄 Ver código fuente",
@@ -787,19 +743,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "Sombre",
         themeLight = "Clair",
         themeAsInPhone = "Comme sur le téléphone",
-        engineCenterSubtitle = "Formats pris en charge et modules supplémentaires",
-        builtinFormatsDescription = "Formats intégrés : PDF, DjVu, polices (TTF, OTF, TTC, WOFF, WOFF2), images (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), texte et code (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), bases de données (SQLite : DB, SQLITE, SQLITE3 ; Access : ACCDB, MDB ; dBase : DBF ; Parquet, DuckDB, Realm, BSON, JSONL), aperçus (MAX, RVT, INDD), audio et vidéo (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) et HEX.",
-        selectOptionalModulesPrompt = "Sélectionnez les modules Google Play optionnels :",
-        downloadAllOneClick = "⚡ Tout télécharger en un clic",
-        installSelectedPrefix = "Installer la sélection",
-        workLightweightCoreOnly = "Rester léger & rapide (Base uniquement)",
-        moduleReady = "✓ Prêt",
-        mbSuffix = "Mo",
-        playModuleBadge = "📦 MODULE GOOGLE PLAY",
-        playModuleRequiredTitle = "Module requis",
-        playModuleRequiredDesc = "Pour lire ce fichier, nous devons télécharger un module pour ce type de fichiers depuis les serveurs de Google Play. Voici ce que cela permettra :",
-        playModuleOpensFormatsPrefix = "Ouverture de ces formats :",
-        downloadModuleBtn = "Télécharger",
         cancelBtn = "Annuler",
         closeBtn = "Fermer",
         openInHexBtn = "Ouvrir en HEX",
@@ -811,6 +754,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "Impossible de lire la structure du fichier",
         closedLicenseTitle = "Format protégé par une licence fermée",
         passwordRequiredTitle = "Document chiffré",
+        passwordPlaceholder = "Saisir le mot de passe",
+        unlockBtn = "Déverrouiller",
         hexFallbackHint = "Vous pouvez inspecter les octets bruts en toute sécurité dans l'inspecteur HEX.",
         archiveContentsTitle = "Contenu de l'archive / ISO",
         backButton = "← Retour",
@@ -828,6 +773,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ Lecture",
         pauseMedia = "❚❚ Pause",
         audioLabel = "🎵 Flux Audio",
+        mediaQueue = "File d’attente",
+        mediaAddFiles = "Ajouter des fichiers",
+        mediaSubtitles = "Sous-titres",
+        mediaSubtitlesOff = "Désactivés",
+        mediaLoadSubtitles = "Charger un fichier de sous-titres…",
+        mediaAudioTrack = "Piste audio",
+        mediaSpeed = "Vitesse",
+        mediaSubtitlesFailed = "Impossible de lire ce fichier de sous-titres",
+        mediaClose = "Fermer",
+        missingResourcesTitle = "Le fichier fait référence à des fichiers indisponibles",
+        attachResourcesButton = "Indiquer les fichiers…",
         legalComplianceTitle = "À propos / Informations légales",
         serverEndpointStatus = "Serveur synchronisé",
         closeDrawerButton = "Fermer le panneau",
@@ -868,12 +824,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "Erreur de lecture de l'archive",
         errorHexOpenFailed = "Impossible d'ouvrir le fichier dans l'inspecteur HEX.",
         errorRenderFailed = "Échec du rendu du document.",
-        bundleOfficeName = "Documents bureautiques, tableurs, présentations et livres",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Graphiques vectoriels et modèles CAO 3D",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Archives, paquets et images disque",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Réessayer le téléchargement",
         openAsInBrowserButton = "🌐 Ouvrir comme dans un navigateur",
         viewHtmlSourceButton = "📄 Voir le code source",
@@ -898,19 +848,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "Ciemny",
         themeLight = "Jasny",
         themeAsInPhone = "Jak w telefonie",
-        engineCenterSubtitle = "Obsługiwane formaty i moduły dodatkowe",
-        builtinFormatsDescription = "Wbudowane formaty: PDF, DjVu, czcionki (TTF, OTF, TTC, WOFF, WOFF2), obrazy (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), tekst i kod (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), bazy danych (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), podgląd (MAX, RVT, INDD), audio i wideo (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) oraz HEX.",
-        selectOptionalModulesPrompt = "Wybierz dodatkowe moduły Google Play:",
-        downloadAllOneClick = "⚡ Pobierz wszystko jednym kliknięciem",
-        installSelectedPrefix = "Zainstaluj wybrane",
-        workLightweightCoreOnly = "Pracuj lekko i szybko (Tylko podstawy)",
-        moduleReady = "✓ Gotowy",
-        mbSuffix = "MB",
-        playModuleBadge = "📦 MODUŁ GOOGLE PLAY",
-        playModuleRequiredTitle = "Wymagany moduł",
-        playModuleRequiredDesc = "Aby odczytać ten plik, musimy pobrać moduł dla takich typów plików z serwerów Google Play. Oto co to umożliwi:",
-        playModuleOpensFormatsPrefix = "Otwieranie tych formatów:",
-        downloadModuleBtn = "Pobierz moduł",
         cancelBtn = "Anuluj",
         closeBtn = "Zamknij",
         openInHexBtn = "Otwórz w HEX",
@@ -922,6 +859,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "Błąd odczytu struktury pliku",
         closedLicenseTitle = "Format objęty zamkniętą licencją",
         passwordRequiredTitle = "Dokument jest zaszyfrowany",
+        passwordPlaceholder = "Wpisz hasło",
+        unlockBtn = "Odblokuj",
         hexFallbackHint = "Możesz bezpiecznie zbadać surowe bajty pliku we wbudowanym inspektorze HEX.",
         archiveContentsTitle = "Zawartość archiwum / obrazu ISO",
         backButton = "← Wstecz",
@@ -939,6 +878,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ Odtwórz",
         pauseMedia = "❚❚ Pauza",
         audioLabel = "🎵 Audio",
+        mediaQueue = "Kolejka",
+        mediaAddFiles = "Dodaj pliki",
+        mediaSubtitles = "Napisy",
+        mediaSubtitlesOff = "Wył.",
+        mediaLoadSubtitles = "Wczytaj plik napisów…",
+        mediaAudioTrack = "Ścieżka audio",
+        mediaSpeed = "Prędkość",
+        mediaSubtitlesFailed = "Nie udało się odczytać pliku napisów",
+        mediaClose = "Zamknij",
+        missingResourcesTitle = "Plik odwołuje się do niedostępnych plików",
+        attachResourcesButton = "Wskaż pliki…",
         legalComplianceTitle = "O aplikacji / Informacje prawne",
         serverEndpointStatus = "Punkty końcowe serwera skonfigurowane",
         closeDrawerButton = "Zamknij panel",
@@ -979,12 +929,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "Błąd odczytu archiwum",
         errorHexOpenFailed = "Nie udało się otworzyć pliku w trybie inspektora HEX.",
         errorRenderFailed = "Błąd renderowania dokumentu.",
-        bundleOfficeName = "Dokumenty biurowe, arkusze, prezentacje i e-booki",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Grafika wektorowa i modele CAD 3D",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Archiwa, pakiety i obrazy dysków",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Ponów pobieranie",
         openAsInBrowserButton = "🌐 Otwórz jak w przeglądarce",
         viewHtmlSourceButton = "📄 Kod źródłowy",
@@ -1009,19 +953,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "Тьомна",
         themeLight = "Свєтла",
         themeAsInPhone = "Як у тєлєфоні",
-        engineCenterSubtitle = "Поддержувальні формати і доп-модулі",
-        builtinFormatsDescription = "Уже встроєні: PDF, DjVu, шрифти (TTF, OTF, TTC, WOFF, WOFF2), картиночки (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO), текст і код (TXT, LOG, JSON, XML, MD, INI, CFG, YAML), бази данних (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL), прев'юшки (MAX, RVT, INDD), музочка і відоси (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) та HEX.",
-        selectOptionalModulesPrompt = "Вибирай доп-модулі з Google Play:",
-        downloadAllOneClick = "⚡ Скачати все в один клік",
-        installSelectedPrefix = "Установити вибранне",
-        workLightweightCoreOnly = "Робити налєгкє (Тільки базова основа)",
-        moduleReady = "✓ Готово",
-        mbSuffix = "МБ",
-        playModuleBadge = "📦 МОДУЛЬ GOOGLE PLAY",
-        playModuleRequiredTitle = "Надо модуль",
-        playModuleRequiredDesc = "Шоб одкрити цей файл, надо скачати модуль для таких типів файлів з сервєрів Google Play. Ось шо воно дасть:",
-        playModuleOpensFormatsPrefix = "Одкриває оци формати:",
-        downloadModuleBtn = "Скачати модуль",
         cancelBtn = "Отмєна",
         closeBtn = "Закрити",
         openInHexBtn = "Одкрити в HEX",
@@ -1033,6 +964,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "Ошибочка читання структури файла",
         closedLicenseTitle = "Формат защищон закритою ліцензією",
         passwordRequiredTitle = "Документ зашифрований",
+        passwordPlaceholder = "Ввєдітє пароль",
+        unlockBtn = "Одкрити",
         hexFallbackHint = "Мошно бєзопасно посмотрєти сирі байти цього файла в інженерному HEX-інспекторі.",
         archiveContentsTitle = "Содержиме архіва / образа",
         backButton = "← Назад",
@@ -1050,6 +983,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ Грати",
         pauseMedia = "❚❚ Пауза",
         audioLabel = "🎵 Аудіопотік",
+        mediaQueue = "Черга",
+        mediaAddFiles = "Додати файли",
+        mediaSubtitles = "Субтитри",
+        mediaSubtitlesOff = "Вимк.",
+        mediaLoadSubtitles = "Завантажити файл субтитрів…",
+        mediaAudioTrack = "Аудіодоріжка",
+        mediaSpeed = "Швидкість",
+        mediaSubtitlesFailed = "Не вдалося прочитати файл субтитрів",
+        mediaClose = "Закрити",
+        missingResourcesTitle = "Файл посилається на недоступні файли",
+        attachResourcesButton = "Вказати файли…",
         legalComplianceTitle = "Про приложєніє / Інформація",
         serverEndpointStatus = "Сервєр синхронізації подключон",
         closeDrawerButton = "Закрити шторку",
@@ -1090,12 +1034,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "Ошибочка чтєнія архіва",
         errorHexOpenFailed = "Не получилось одкрити файл у режимі HEX-інспектора.",
         errorRenderFailed = "Сбой рендерінга документа.",
-        bundleOfficeName = "Офісні документи, таблички, презентації і книжки",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "Векторна графіка і 3D CAD-модєлі",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "Архіви, пакєти і образи дисків",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ Повторити завантаження",
         openAsInBrowserButton = "🌐 Одкрити як у браузері",
         viewHtmlSourceButton = "📄 Ісходний код",
@@ -1120,19 +1058,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         themeDark = "深色",
         themeLight = "浅色",
         themeAsInPhone = "与手机相同",
-        engineCenterSubtitle = "支持的格式与附加模块",
-        builtinFormatsDescription = "已内置格式：PDF、DjVu、字体 (TTF, OTF, TTC, WOFF, WOFF2)、图片 (PNG, JPG, WEBP, GIF, BMP, TIFF, HEIC, AVIF, ICO)、文本与代码 (TXT, LOG, JSON, XML, MD, INI, CFG, YAML)、数据库 (SQLite: DB, SQLITE, SQLITE3; Access: ACCDB, MDB; dBase: DBF; Parquet, DuckDB, Realm, BSON, JSONL)、工程预览 (MAX, RVT, INDD)、音视频 (MP4, MKV, WEBM, MOV, AVI, MP3, WAV, OGG, FLAC, M4A, AAC) 及 HEX。",
-        selectOptionalModulesPrompt = "选择 Google Play 附加模块：",
-        downloadAllOneClick = "⚡ 一键下载全部模块",
-        installSelectedPrefix = "安装所选模块",
-        workLightweightCoreOnly = "轻量运行（仅基础格式）",
-        moduleReady = "✓ 已就绪",
-        mbSuffix = "MB",
-        playModuleBadge = "📦 GOOGLE PLAY 模块",
-        playModuleRequiredTitle = "需要扩展模块",
-        playModuleRequiredDesc = "要读取此文件，我们需要从 Google Play 服务器下载适用于此类文件的模块。它将为您提供以下功能：",
-        playModuleOpensFormatsPrefix = "打开这些格式：",
-        downloadModuleBtn = "下载模块",
         cancelBtn = "取消",
         closeBtn = "关闭",
         openInHexBtn = "在 HEX 中打开",
@@ -1144,6 +1069,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         formatReadErrorTitle = "无法解析文件结构",
         closedLicenseTitle = "受闭源许可证保护的格式",
         passwordRequiredTitle = "文档已加密",
+        passwordPlaceholder = "输入密码",
+        unlockBtn = "解锁",
         hexFallbackHint = "您可以在内置的工程 HEX 检查器中安全地分析此文件的原始字节。",
         archiveContentsTitle = "压缩包 / 镜像内容",
         backButton = "← 返回",
@@ -1161,6 +1088,17 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         playMedia = "▶ 播放",
         pauseMedia = "❚❚ 暂停",
         audioLabel = "🎵 音频流",
+        mediaQueue = "播放队列",
+        mediaAddFiles = "添加文件",
+        mediaSubtitles = "字幕",
+        mediaSubtitlesOff = "关闭",
+        mediaLoadSubtitles = "加载字幕文件…",
+        mediaAudioTrack = "音轨",
+        mediaSpeed = "速度",
+        mediaSubtitlesFailed = "无法读取此字幕文件",
+        mediaClose = "关闭",
+        missingResourcesTitle = "该文件引用了不可用的文件",
+        attachResourcesButton = "选择文件…",
         legalComplianceTitle = "关于应用 / 法律信息",
         serverEndpointStatus = "服务器端点已配置",
         closeDrawerButton = "关闭侧边栏",
@@ -1201,12 +1139,6 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
         errorArchiveReadPrefix = "压缩包读取错误",
         errorHexOpenFailed = "无法在 HEX 检查器模式下打开文件。",
         errorRenderFailed = "文档渲染失败。",
-        bundleOfficeName = "办公文档、电子表格、演示文稿与电子书",
-        bundleOfficeDesc = "DOCX, DOCM, DOTX, DOC, ODT, RTF, ONE, XLSX, XLSM, XLSB, XLS, ODS, CSV, TSV, PPTX, PPTM, PPSX, POTX, PPT, ODP, EPUB, FB2, AZW3, MOBI",
-        bundleCadName = "矢量图形与 3D CAD 模型",
-        bundleCadDesc = "SVG, SVGZ, STL, OBJ, DXF, DWG, PLY, OFF, 3DS, GLTF, GLB, BLEND, USDZ, FBX",
-        bundleArchivesName = "压缩包、软件包与光盘镜像",
-        bundleArchivesDesc = "ZIP, 7Z, RAR4, RAR5, TAR, GZ, BZ2, XZ, TGZ, APK, JAR, ISO",
         retryDownloadButton = "↻ 重试下载",
         openAsInBrowserButton = "🌐 像浏览器一样打开",
         viewHtmlSourceButton = "📄 查看源代码",
@@ -1226,6 +1158,8 @@ fun stringsForLanguage(lang: AppLanguage): AppStrings = when (lang) {
  */
 fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
     val clean = rawMessage
+        .removePrefix("DRM_PROTECTED:")
+        .removePrefix("UNSUPPORTED_ENCRYPTION:")
         .removePrefix("PASSWORD_REQUIRED:")
         .removePrefix("CORRUPTED_PDF:")
         .trim()
@@ -1233,6 +1167,115 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
     val lower = clean.lowercase(Locale.ROOT)
 
     return when {
+        rawMessage.startsWith("UNSUPPORTED_ENCRYPTION") || lower.contains("not supported in this version") -> {
+            val isPdfApiBelow35 = lower.contains("android 15") || lower.contains("api 35")
+            val isOfficeOrOdf = lower.contains("odf") || lower.contains("office") || lower.contains("openpgp") || lower.contains("argon2") || lower.contains("aes-gcm") || lower.contains("certificate") || lower.contains("extensible")
+            val isAccessPageEncrypted = lower.contains("page-encrypted") || lower.contains("access") || lower.contains(".mdb") || lower.contains(".accdb")
+            val isFbxEncrypted = lower.contains("fbx")
+            val isDatabaseOrOneNote = lower.contains("parquet") || lower.contains("realm") || lower.contains("duckdb") || lower.contains("onenote")
+            when {
+                isPdfApiBelow35 -> when (lang) {
+                    AppLanguage.EN -> "Password-protected PDF decryption requires Android 15 (API 35) or newer."
+                    AppLanguage.RU -> "Расшифровка защищённых паролем PDF-документов требует Android 15 (API 35) или новее."
+                    AppLanguage.DE -> "Die Entschlüsselung passwortgeschützter PDF-Dokumente erfordert Android 15 (API 35) oder neuer."
+                    AppLanguage.ES -> "El descifrado de documentos PDF protegidos con contraseña requiere Android 15 (API 35) o superior."
+                    AppLanguage.FR -> "Le déchiffrement des documents PDF protégés par mot de passe nécessite Android 15 (API 35) ou une version ultérieure."
+                    AppLanguage.PL -> "Deszyfrowanie dokumentów PDF chronionych hasłem wymaga systemu Android 15 (API 35) lub nowszego."
+                    AppLanguage.UK -> "Розшифрування захищених паролем PDF-документів потребує Android 15 (API 35) або новішої версії."
+                    AppLanguage.ZH -> "解密受密码保护的 PDF 文档需要 Android 15 (API 35) 或更高版本。"
+                }
+                isOfficeOrOdf -> when (lang) {
+                    AppLanguage.EN -> "This Office/ODF document uses an unsupported encryption scheme (such as OpenPGP, Argon2id/AES-GCM, X.509 certificate, or Extensible Encryption)."
+                    AppLanguage.RU -> "Данный документ Office/ODF использует неподдерживаемую схему шифрования (OpenPGP, Argon2id/AES-GCM, X.509-сертификат или Extensible Encryption)."
+                    AppLanguage.DE -> "Dieses Office-/ODF-Dokument verwendet ein nicht unterstütztes Verschlüsselungsverfahren (z. B. OpenPGP, Argon2id/AES-GCM, X.509-Zertifikat oder Extensible Encryption)."
+                    AppLanguage.ES -> "Este documento Office/ODF utiliza un esquema de cifrado no compatible (OpenPGP, Argon2id/AES-GCM, certificado X.509 o Extensible Encryption)."
+                    AppLanguage.FR -> "Ce document Office/ODF utilise un schéma de chiffrement non pris en charge (OpenPGP, Argon2id/AES-GCM, certificat X.509 ou Extensible Encryption)."
+                    AppLanguage.PL -> "Ten dokument Office/ODF używa nieobsługiwanego schematu szyfrowania (OpenPGP, Argon2id/AES-GCM, certyfikat X.509 lub Extensible Encryption)."
+                    AppLanguage.UK -> "Цей документ Office/ODF використовує непідтримувану схему шифрування (OpenPGP, Argon2id/AES-GCM, X.509-сертифікат або Extensible Encryption)."
+                    AppLanguage.ZH -> "此 Office/ODF 文档使用了不受支持的加密方案（如 OpenPGP、Argon2id/AES-GCM、X.509 证书或可扩展加密）。"
+                }
+                isAccessPageEncrypted -> when (lang) {
+                    AppLanguage.EN -> "Page-encrypted Microsoft Access databases (.mdb / .accdb) are not supported. Standard header-password Access databases remain supported."
+                    AppLanguage.RU -> "Постранично зашифрованные базы данных Microsoft Access (.mdb / .accdb) не поддерживаются. Базы Access со стандартным паролем заголовка поддерживаются."
+                    AppLanguage.DE -> "Seitenverschlüsselte Microsoft-Access-Datenbanken (.mdb / .accdb) werden nicht unterstützt. Datenbanken mit Standard-Header-Passwort werden unterstützt."
+                    AppLanguage.ES -> "Las bases de datos de Microsoft Access (.mdb / .accdb) cifradas por páginas no son compatibles."
+                    AppLanguage.FR -> "Les bases de données Microsoft Access (.mdb / .accdb) chiffrées par page ne sont pas prises en charge."
+                    AppLanguage.PL -> "Stronicowo zaszyfrowane bazy danych Microsoft Access (.mdb / .accdb) nie są obsługiwane."
+                    AppLanguage.UK -> "Посторінково зашифровані бази даних Microsoft Access (.mdb / .accdb) не підтримуються."
+                    AppLanguage.ZH -> "不支持页面加密的 Microsoft Access 数据库（.mdb / .accdb）。"
+                }
+                isFbxEncrypted -> when (lang) {
+                    AppLanguage.EN -> "Encrypted FBX 3D files are not supported."
+                    AppLanguage.RU -> "Зашифрованные 3D-файлы FBX не поддерживаются."
+                    AppLanguage.DE -> "Verschlüsselte FBX-3D-Dateien werden nicht unterstützt."
+                    AppLanguage.ES -> "Los archivos 3D FBX cifrados no son compatibles."
+                    AppLanguage.FR -> "Les fichiers 3D FBX chiffrés ne sont pas pris en charge."
+                    AppLanguage.PL -> "Zaszyfrowane pliki 3D FBX nie są obsługiwane."
+                    AppLanguage.UK -> "Зашифровані 3D-файли FBX не підтримуються."
+                    AppLanguage.ZH -> "不支持加密的 FBX 3D 文件。"
+                }
+                isDatabaseOrOneNote -> when (lang) {
+                    AppLanguage.EN -> "Password decryption for this encrypted format (Parquet / Realm / DuckDB / OneNote) is not supported in this version. Encrypted 7Z, PDF, Office, DWG, and MS Access files can be unlocked with your password."
+                    AppLanguage.RU -> "Расшифровка данного зашифрованного формата (Parquet / Realm / DuckDB / OneNote) не поддерживается в данной версии. Зашифрованные файлы 7Z, PDF, Office, DWG и MS Access можно открыть с вашим паролем."
+                    AppLanguage.DE -> "Die Entschlüsselung dieses verschlüsselten Formats (Parquet / Realm / DuckDB / OneNote) wird in dieser Version nicht unterstützt. Verschlüsselte 7Z-, PDF-, Office-, DWG- und MS-Access-Dateien lassen sich mit Ihrem Passwort öffnen."
+                    AppLanguage.ES -> "El descifrado de este formato cifrado (Parquet / Realm / DuckDB / OneNote) no es compatible en esta versión. Los archivos cifrados 7Z, PDF, Office, DWG y MS Access pueden abrirse con su contraseña."
+                    AppLanguage.FR -> "Le déchiffrement de ce format chiffré (Parquet / Realm / DuckDB / OneNote) n'est pas pris en charge dans cette version. Les fichiers chiffrés 7Z, PDF, Office, DWG et MS Access peuvent être ouverts avec votre mot de passe."
+                    AppLanguage.PL -> "Deszyfrowanie tego zaszyfrowanego formatu (Parquet / Realm / DuckDB / OneNote) nie jest obsługiwane w tej wersji. Zaszyfrowane pliki 7Z, PDF, Office, DWG i MS Access można otworzyć za pomocą hasła."
+                    AppLanguage.UK -> "Розшифрування цього зашифрованого формату (Parquet / Realm / DuckDB / OneNote) не підтримується в цій версії. Зашифровані файли 7Z, PDF, Office, DWG та MS Access можна відкрити вашим паролем."
+                    AppLanguage.ZH -> "当前版本不支持解密此加密格式（Parquet / Realm / DuckDB / OneNote）。加密的 7Z、PDF、Office、DWG 和 MS Access 文件可使用您的密码解锁。"
+                }
+                else -> when (lang) {
+                    AppLanguage.EN -> "Password decryption for encrypted ZIP/RAR archives is not supported in this version. Encrypted 7Z, PDF, Office, DWG, and MS Access files can be unlocked with your password."
+                    AppLanguage.RU -> "Расшифровка запароленных архивов ZIP и RAR не поддерживается в данной версии. Зашифрованные файлы 7Z, PDF, Office, DWG и MS Access можно открыть с вашим паролем."
+                    AppLanguage.DE -> "Die Entschlüsselung passwortgeschützter ZIP-/RAR-Archive wird in dieser Version nicht unterstützt. Verschlüsselte 7Z-, PDF-, Office-, DWG- und MS-Access-Dateien lassen sich mit Ihrem Passwort öffnen."
+                    AppLanguage.ES -> "El descifrado de archivos ZIP/RAR protegidos con contraseña no es compatible en esta versión. Los archivos cifrados 7Z, PDF, Office, DWG y MS Access pueden abrirse con su contraseña."
+                    AppLanguage.FR -> "Le déchiffrement des archives ZIP/RAR protégées par mot de passe n'est pas pris en charge dans cette version. Les fichiers chiffrés 7Z, PDF, Office, DWG et MS Access peuvent être ouverts avec votre mot de passe."
+                    AppLanguage.PL -> "Deszyfrowanie archiwów ZIP/RAR chronionych hasłem nie jest obsługiwane w tej wersji. Zaszyfrowane pliki 7Z, PDF, Office, DWG i MS Access można otworzyć za pomocą hasła."
+                    AppLanguage.UK -> "Розшифрування запаролених архівів ZIP і RAR не підтримується в цій версії. Зашифровані файли 7Z, PDF, Office, DWG та MS Access можна відкрити вашим паролем."
+                    AppLanguage.ZH -> "当前版本不支持解密受密码保护的 ZIP/RAR 压缩包。加密的 7Z、PDF、Office、DWG 和 MS Access 文件可使用您的密码解锁。"
+                }
+            }
+        }
+        lower.contains("media") && (lower.contains("drm") || lower.contains("dmca")) -> when (lang) {
+            AppLanguage.EN -> "This media file is protected by cryptographic DRM (such as Widevine, FairPlay, or PlayReady). Circumventing technological protection measures (TPM/DRM) is prohibited under DMCA § 1201 and the EU InfoSoc Directive."
+            AppLanguage.RU -> "Данный медиафайл защищён криптографической DRM-защитой (Widevine, FairPlay или PlayReady). Обход технических средств защиты авторских прав запрещён законом (DMCA § 1201 / Директива ЕС InfoSoc)."
+            AppLanguage.DE -> "Diese Mediendatei ist durch kryptografisches DRM (z. B. Widevine, FairPlay oder PlayReady) geschützt. Das Umgehen technischer Schutzmaßnahmen (TPM/DRM) ist gesetzlich untersagt (DMCA § 1201 / EU-InfoSoc-Richtlinie)."
+            AppLanguage.ES -> "Este archivo multimedia está protegido por DRM criptográfico (Widevine, FairPlay o PlayReady). La elusión de medidas tecnológicas de protección está prohibida por la ley (DMCA § 1201 / Directiva InfoSoc de la UE)."
+            AppLanguage.FR -> "Ce fichier multimédia est protégé par un verrou numérique DRM (Widevine, FairPlay ou PlayReady). Le contournement des mesures techniques de protection est interdit par la loi (DMCA § 1201 / Directive européenne InfoSoc)."
+            AppLanguage.PL -> "Ten plik multimedialny jest chroniony kryptograficznym systemem DRM (Widevine, FairPlay lub PlayReady). Obchodzenie technicznych zabezpieczeń (TPM/DRM) jest zabronione przez prawo (DMCA § 1201 / Dyrektywa UE InfoSoc)."
+            AppLanguage.UK -> "Цей медіафайл захищений криптографічним DRM-захистом (Widevine, FairPlay або PlayReady). Обхід технічних засобів захисту заборонений законом (DMCA § 1201 / Директива ЄС InfoSoc)."
+            AppLanguage.ZH -> "此媒体文件受加密数字版权管理 (DRM)（如 Widevine、FairPlay 或 PlayReady）保护。根据 DMCA § 1201 和欧盟 InfoSoc 指令，禁止绕过技术保护措施。"
+        }
+        lower.contains("pdf") && (lower.contains("drm") || lower.contains("dmca")) -> when (lang) {
+            AppLanguage.EN -> "This PDF document is protected by cryptographic DRM (such as Adobe ADEPT, LiveCycle, FileOpen, or Microsoft RMS). Circumventing technological protection measures (TPM/DRM) is prohibited under DMCA § 1201 and the EU InfoSoc Directive."
+            AppLanguage.RU -> "Данный PDF-документ защищён криптографической DRM-защитой (Adobe ADEPT, LiveCycle, FileOpen или Microsoft RMS). Обход технических средств защиты авторских прав запрещён законом (DMCA § 1201 / Директива ЕС InfoSoc)."
+            AppLanguage.DE -> "Dieses PDF-Dokument ist durch kryptografisches DRM (z. B. Adobe ADEPT, LiveCycle, FileOpen oder Microsoft RMS) geschützt. Das Umgehen technischer Schutzmaßnahmen (TPM/DRM) ist gesetzlich untersagt (DMCA § 1201 / EU-InfoSoc-Richtlinie)."
+            AppLanguage.ES -> "Este documento PDF está protegido por DRM criptográfico (Adobe ADEPT, LiveCycle, FileOpen o Microsoft RMS). La elusión de medidas tecnológicas de protección está prohibida por la ley (DMCA § 1201 / Directiva InfoSoc de la UE)."
+            AppLanguage.FR -> "Ce document PDF est protégé par un verrou numérique DRM (Adobe ADEPT, LiveCycle, FileOpen ou Microsoft RMS). Le contournement des mesures techniques de protection est interdit par la loi (DMCA § 1201 / Directive européenne InfoSoc)."
+            AppLanguage.PL -> "Ten dokument PDF jest chroniony kryptograficznym systemem DRM (Adobe ADEPT, LiveCycle, FileOpen lub Microsoft RMS). Obchodzenie technicznych zabezpieczeń (TPM/DRM) jest zabronione przez prawo (DMCA § 1201 / Dyrektywa UE InfoSoc)."
+            AppLanguage.UK -> "Цей PDF-документ захищений криптографічним DRM-захистом (Adobe ADEPT, LiveCycle, FileOpen або Microsoft RMS). Обхід технічних засобів захисту заборонений законом (DMCA § 1201 / Директива ЄС InfoSoc)."
+            AppLanguage.ZH -> "此 PDF 文档受加密数字版权管理 (DRM)（如 Adobe ADEPT、LiveCycle、FileOpen 或 Microsoft RMS）保护。根据 DMCA § 1201 和欧盟 InfoSoc 指令，禁止绕过技术保护措施。"
+        }
+        lower.contains("epub") && (lower.contains("drm") || lower.contains("dmca")) -> when (lang) {
+            AppLanguage.EN -> "This EPUB e-book is protected by cryptographic DRM (such as Adobe ADEPT, Readium LCP, or FairPlay). Circumventing technological protection measures (TPM/DRM) is prohibited under DMCA § 1201 and the EU InfoSoc Directive."
+            AppLanguage.RU -> "Данная книга EPUB защищена криптографической DRM-защитой (Adobe ADEPT, Readium LCP или FairPlay). Обход технических средств защиты авторских прав запрещён законом (DMCA § 1201 / Директива ЕС InfoSoc)."
+            AppLanguage.DE -> "Dieses EPUB-E-Book ist durch kryptografisches DRM (z. B. Adobe ADEPT, Readium LCP oder FairPlay) geschützt. Das Umgehen technischer Schutzmaßnahmen (TPM/DRM) ist gesetzlich untersagt (DMCA § 1201 / EU-InfoSoc-Richtlinie)."
+            AppLanguage.ES -> "Este libro EPUB está protegido por DRM criptográfico (Adobe ADEPT, Readium LCP o FairPlay). La elusión de medidas tecnológicas de protección está prohibida por la ley (DMCA § 1201 / Directiva InfoSoc de la UE)."
+            AppLanguage.FR -> "Ce livre EPUB est protégé par un verrou numérique DRM (Adobe ADEPT, Readium LCP ou FairPlay). Le contournement des mesures techniques de protection est interdit par la loi (DMCA § 1201 / Directive européenne InfoSoc)."
+            AppLanguage.PL -> "Ten e-book EPUB jest chroniony kryptograficznym systemem DRM (np. Adobe ADEPT, Readium LCP lub FairPlay). Obchodzenie technicznych zabezpieczeń (TPM/DRM) jest zabronione przez prawo (DMCA § 1201 / Dyrektywa UE InfoSoc)."
+            AppLanguage.UK -> "Ця електронна книга EPUB захищена криптографічною DRM-захистом (Adobe ADEPT, Readium LCP або FairPlay). Обхід технічних засобів захисту заборонений законом (DMCA § 1201 / Директива ЄС InfoSoc)."
+            AppLanguage.ZH -> "此 EPUB 电子书受加密数字版权管理 (DRM)（如 Adobe ADEPT、Readium LCP 或 FairPlay）保护。根据 DMCA § 1201 和欧盟 InfoSoc 指令，禁止绕过技术保护措施。"
+        }
+        (lower.contains("irm") || lower.contains("rights management")) && (lower.contains("drm") || lower.contains("dmca")) -> when (lang) {
+            AppLanguage.EN -> "This Microsoft Office document is protected by Information Rights Management (IRM/RMS) DRM. Circumventing technological protection measures (TPM/DRM) is prohibited under DMCA § 1201 and the EU InfoSoc Directive."
+            AppLanguage.RU -> "Данный документ Microsoft Office защищён системой управления правами (IRM/RMS DRM). Обход технических средств защиты авторских прав запрещён законом (DMCA § 1201 / Директива ЕС InfoSoc)."
+            AppLanguage.DE -> "Dieses Microsoft-Office-Dokument ist durch Information Rights Management (IRM/RMS-DRM) geschützt. Das Umgehen technischer Schutzmaßnahmen (TPM/DRM) ist gesetzlich untersagt (DMCA § 1201 / EU-InfoSoc-Richtlinie)."
+            AppLanguage.ES -> "Este documento de Microsoft Office está protegido por DRM de Information Rights Management (IRM/RMS). La elusión de medidas tecnológicas de protección está prohibida por la ley (DMCA § 1201 / Directiva InfoSoc de la UE)."
+            AppLanguage.FR -> "Ce document Microsoft Office est protégé par le système DRM Information Rights Management (IRM/RMS). Le contournement des mesures techniques de protection est interdit par la loi (DMCA § 1201 / Directive européenne InfoSoc)."
+            AppLanguage.PL -> "Ten dokument Microsoft Office jest chroniony systemem DRM Information Rights Management (IRM/RMS). Obchodzenie technicznych zabezpieczeń (TPM/DRM) jest zabronione przez prawo (DMCA § 1201 / Dyrektywa UE InfoSoc)."
+            AppLanguage.UK -> "Цей документ Microsoft Office захищений системою керування правами (IRM/RMS DRM). Обхід технічних засобів захисту заборонений законом (DMCA § 1201 / Директива ЄС InfoSoc)."
+            AppLanguage.ZH -> "此 Microsoft Office 文档受信息权限管理 (IRM/RMS) DRM 保护。根据 DMCA § 1201 和欧盟 InfoSoc 指令，禁止绕过技术保护措施。"
+        }
         lower.contains("dmca") || lower.contains("kfx") || lower.contains("encryption type") || lower.contains("tpm/drm") || lower.contains("drm") -> when (lang) {
             AppLanguage.EN -> "This Kindle e-book (KFX or DRM-encrypted AZW3/MOBI) is protected by cryptographic DRM. Circumventing technological protection measures (TPM/DRM) is prohibited under DMCA § 1201 and the EU InfoSoc Directive."
             AppLanguage.RU -> "Данная книга (KFX или защищённый DRM экземпляр AZW3/MOBI) зашифрована криптографической DRM-защитой. Обход технических средств защиты авторских прав запрещён законом (DMCA § 1201 / Директива ЕС InfoSoc)."
@@ -1342,6 +1385,16 @@ fun localizeEngineMessage(rawMessage: String, lang: AppLanguage): String {
             AppLanguage.PL -> "Przerwano wypakowywanie: przekroczono bezpieczny limit dekompresji (ochrona przed Zip Bomb)."
             AppLanguage.UK -> "Распаковка прервана: превишено бєзопасний ліміт распаковки (защита від Zip-бомб)."
             AppLanguage.ZH -> "提取已中止：超出安全解压限制（Zip 炸弹防护）。"
+        }
+        lower.contains("incorrect password") -> when (lang) {
+            AppLanguage.EN -> "Incorrect password. Please try again."
+            AppLanguage.RU -> "Неверный пароль. Попробуйте ещё раз."
+            AppLanguage.DE -> "Falsches Passwort. Bitte versuchen Sie es erneut."
+            AppLanguage.ES -> "Contraseña incorrecta. Inténtelo de nuevo."
+            AppLanguage.FR -> "Mot de passe incorrect. Veuillez réessayer."
+            AppLanguage.PL -> "Nieprawidłowe hasło. Spróbuj ponownie."
+            AppLanguage.UK -> "Неправильний пароль. Попробуйте іще раз."
+            AppLanguage.ZH -> "密码不正确，请重试。"
         }
         rawMessage.startsWith("PASSWORD_REQUIRED") || lower.contains("password protected") || lower.contains("защищён паролем") || lower.contains("защищена паролем") || lower.contains("защищён шифрованием") || lower.contains("is encrypted") -> when (lang) {
             AppLanguage.EN -> "This document or archive is password-protected or encrypted."
@@ -1651,19 +1704,71 @@ fun ThirdPartyLicensesDialog(
     val palette = LocalAppPalette.current
     val strings = LocalAppStrings.current
     val context = LocalContext.current
-    val noticesText = remember {
-        try {
-            context.assets.open("licenses/THIRD_PARTY_NOTICES.txt").bufferedReader().use { it.readText() }
-        } catch (_: Throwable) {
-            "Unable to load third-party notices asset."
+
+    val tabs = remember {
+        listOf(
+            "Notices" to listOf(
+                "licenses/THIRD_PARTY_NOTICES.txt",
+                "licenses/NOTICE-PaddleOCR.txt"
+            ),
+            "GPL-3.0" to listOf("licenses/GPL-3.0.txt"),
+            "Fonts" to listOf(
+                "fonts/office/LICENSE-Liberation.txt",
+                "fonts/office/LICENSE-Carlito.txt",
+                "fonts/office/LICENSE-Caladea.txt",
+                "fonts/office/OFL-Gelasio.txt",
+                "fonts/office/OFL-EBGaramond.txt",
+                "fonts/office/OFL-ComicNeue.txt",
+                "fonts/office/OFL-Selawik.txt",
+                "fonts/office/LICENSE-TeXGyre-GFL.txt",
+                "licenses/LPPL-1.3c.txt",
+                "fonts/office/LICENSE-DejaVu.txt"
+            ),
+            "ONNX / MPL" to listOf(
+                "licenses/MPL-2.0.txt",
+                "licenses/ONNXRuntime-ThirdPartyNotices.txt"
+            ),
+            "Other" to listOf(
+                "licenses/Apache-2.0.txt",
+                "licenses/MIT.txt",
+                "licenses/BSD-3-Clause.txt",
+                "licenses/BSD-2-Clause.txt",
+                "licenses/0BSD.txt",
+                "licenses/TOST-1.0.txt"
+            )
+        )
+    }
+
+    var selectedTab by remember { mutableStateOf(0) }
+    val chunks = remember(selectedTab) {
+        val out = ArrayList<String>()
+        for (assetPath in tabs[selectedTab].second) {
+            val content = try {
+                context.assets.open(assetPath).bufferedReader().use { it.readText() }
+            } catch (_: Throwable) {
+                "Unable to load $assetPath"
+            }
+            val lines = content.lines()
+            var i = 0
+            while (i < lines.size) {
+                val end = minOf(i + 40, lines.size)
+                out.add(lines.subList(i, end).joinToString("\n"))
+                i = end
+            }
+            out.add("")
         }
+        out
+    }
+    val listState = rememberLazyListState()
+    androidx.compose.runtime.LaunchedEffect(selectedTab) {
+        listState.scrollToItem(0)
     }
 
     Dialog(onDismissRequest = onDismiss) {
         Surface(
             modifier = Modifier
                 .fillMaxWidth()
-                .fillMaxHeight(0.85f)
+                .fillMaxHeight(0.88f)
                 .clip(RoundedCornerShape(16.dp)),
             color = palette.surface,
             border = BorderStroke(1.dp, palette.border)
@@ -1679,9 +1784,35 @@ fun ThirdPartyLicensesDialog(
                     fontSize = 18.sp,
                     fontWeight = FontWeight.Bold
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    tabs.forEachIndexed { idx, (label, _) ->
+                        val active = idx == selectedTab
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(if (active) palette.accent else palette.surfaceElevated)
+                                .border(1.dp, if (active) palette.accent else palette.border, RoundedCornerShape(8.dp))
+                                .clickable { selectedTab = idx }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = label,
+                                color = if (active) (if (palette.isDark) Color.Black else Color.White) else palette.primaryText,
+                                fontSize = 12.sp,
+                                fontWeight = if (active) FontWeight.Bold else FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
                 HorizontalDivider(color = palette.border)
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
 
                 Box(
                     modifier = Modifier
@@ -1691,14 +1822,19 @@ fun ThirdPartyLicensesDialog(
                         .background(palette.surfaceElevated)
                         .padding(12.dp)
                 ) {
-                    val scrollState = rememberScrollState()
-                    Text(
-                        text = noticesText,
-                        color = palette.primaryText,
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        modifier = Modifier.verticalScroll(scrollState)
-                    )
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize()
+                    ) {
+                        items(chunks) { block ->
+                            Text(
+                                text = block,
+                                color = palette.primaryText,
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
                 }
 
                 Spacer(Modifier.height(12.dp))
@@ -2212,6 +2348,13 @@ fun AppSettingsDrawerSheet(
                 color = palette.secondaryText,
                 fontSize = 11.sp,
                 fontWeight = FontWeight.SemiBold
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "FullFileStudio • Copyright (C) 2026 Hleb Kukleuski • GNU GPL v3.0+ • Provided WITHOUT ANY WARRANTY.",
+                color = palette.secondaryText,
+                fontSize = 10.sp,
+                lineHeight = 14.sp
             )
             Spacer(Modifier.height(6.dp))
 

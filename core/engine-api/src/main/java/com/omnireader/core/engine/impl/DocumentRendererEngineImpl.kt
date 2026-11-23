@@ -69,6 +69,7 @@ import java.util.zip.Inflater
 import java.util.zip.ZipInputStream
 import kotlin.math.abs
 import kotlin.math.ceil
+import kotlin.math.floor
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -77,7 +78,7 @@ private const val LIGHT_THEME_PAGE_FLAG = 1 shl 30
 internal const val ILLUSTRATION_ONLY_PAGE_FLAG = 1 shl 29
 private const val PAGE_INDEX_MASK = 0x000FFFFF
 
-internal fun resolveStreamDescriptorSize(fd: FileDescriptor): Long {
+fun resolveStreamDescriptorSize(fd: FileDescriptor): Long {
     val statSize = try {
         Os.fstat(fd).st_size
     } catch (_: Throwable) {
@@ -157,7 +158,9 @@ object TiffCleanRoomDecoder {
         val jpegInterchangeLength: Long,
         val predictor: Int,
         val colorMap: IntArray?,
-        val orientation: Int
+        val orientation: Int,
+        val fillOrder: Int = 1,
+        val t4Options: Int = 0
     ) {
         val isTiled: Boolean
             get() = tileWidth > 0 && tileLength > 0 && tileOffsets.isNotEmpty()
@@ -245,6 +248,8 @@ object TiffCleanRoomDecoder {
             var predictor = 1
             var colorMap: IntArray? = null
             var orientation = ExifInterface.ORIENTATION_NORMAL
+            var fillOrder = 1
+            var t4Options = 0
 
             for (i in 0 until entryCount) {
                 val entryBase = pos + 2 + i * 12
@@ -261,6 +266,8 @@ object TiffCleanRoomDecoder {
                     262 -> photometric = readTagInts(bb, bytes.size, type, count, valOffsetField).firstOrNull() ?: 2
                     273 -> stripOffsets = readTagLongs(bb, bytes.size, type, count, valOffsetField)
                     274 -> orientation = readTagInts(bb, bytes.size, type, count, valOffsetField).firstOrNull() ?: 1
+                    266 -> fillOrder = readTagInts(bb, bytes.size, type, count, valOffsetField).firstOrNull() ?: 1
+                    292 -> t4Options = readTagInts(bb, bytes.size, type, count, valOffsetField).firstOrNull() ?: 0
                     277 -> samplesPerPixel = (readTagInts(bb, bytes.size, type, count, valOffsetField).firstOrNull() ?: 1).coerceIn(1, 8)
                     278 -> rowsPerStrip = (readTagInts(bb, bytes.size, type, count, valOffsetField).firstOrNull() ?: height).coerceAtLeast(1)
                     279 -> stripByteCounts = readTagLongs(bb, bytes.size, type, count, valOffsetField)
@@ -302,7 +309,9 @@ object TiffCleanRoomDecoder {
                         jpegInterchangeLength = jpegIfLength,
                         predictor = predictor,
                         colorMap = colorMap,
-                        orientation = orientation
+                        orientation = orientation,
+                        fillOrder = fillOrder,
+                        t4Options = t4Options
                     )
                 )
             }
@@ -489,6 +498,7 @@ object TiffCleanRoomDecoder {
                 }
 
                 val tileData = when (ifd.compression) {
+                    2, 3, 4 -> decodeCcitt(fileBytes, offset, safeCompLen, tw, tl, ifd)
                     1 -> fileBytes.copyOfRange(offset, offset + safeCompLen)
                     32773 -> decodePackBits(fileBytes, offset, safeCompLen, expectedTileBytes)
                     8, 32946 -> decodeDeflate(fileBytes, offset, safeCompLen, expectedTileBytes)
@@ -569,6 +579,7 @@ object TiffCleanRoomDecoder {
             }
 
             val stripData = when (ifd.compression) {
+                2, 3, 4 -> decodeCcitt(fileBytes, offset, safeCompLen, srcW, rowsInThisStrip, ifd)
                 1 -> fileBytes.copyOfRange(offset, offset + safeCompLen)
                 32773 -> decodePackBits(fileBytes, offset, safeCompLen, expectedUncompressed)
                 8, 32946 -> decodeDeflate(fileBytes, offset, safeCompLen, expectedUncompressed)
@@ -597,6 +608,14 @@ object TiffCleanRoomDecoder {
         }
 
         return Bitmap.createBitmap(pixels, dstW, dstH, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun decodeCcitt(fileBytes: ByteArray, offset: Int, length: Int, width: Int, rows: Int, ifd: IfdDirectory): ByteArray? {
+        return try {
+            CcittFaxDecoder.decode(fileBytes, offset, length, width, rows, ifd.compression, ifd.t4Options, ifd.fillOrder == 2)
+        } catch (_: RuntimeException) {
+            null
+        }
     }
 
     private fun applyHorizontalPredictor8Bit(
@@ -837,662 +856,17 @@ object TiffCleanRoomDecoder {
     }
 }
 
-/**
- * Clean-Room parser and renderer for DjVu documents (`AT&TFORM:DJVU` single-page and `AT&TFORM:DJVM` multi-page).
- * All AT&T / LizardTech DjVu patents have expired; this implementation is built from scratch on the open
- * IFF85 / DjVu v3 specification without any GPLv2+ DjVuLibre code.
- */
-class CleanRoomDjvuSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
-    @Volatile private var isClosed = false
-    @Volatile private var lastErrorMsg: String? = null
-    @Volatile private var activeRenderedPageIdx = 0
-    private val source = ZeroCacheReadableSource(pfd.fileDescriptor)
-
-    data class DjvuPageModel(
-        val index: Int,
-        val width: Int,
-        val height: Int,
-        val dpi: Int,
-        val rotationDeg: Int,
-        val textLayer: String,
-        val bgJpegBytes: ByteArray?,
-        val bg44Chunks: List<ByteArray>,
-        val sjbzBytes: ByteArray?
-    )
-
-    private val pages = mutableListOf<DjvuPageModel>()
-
-    init {
-        parseDjvuContainer()
-    }
-
-    private fun parseDjvuContainer() {
-        try {
-            val fileSize = minOf(source.size, 64L * 1024L * 1024L).toInt()
-            if (fileSize < 16) {
-                lastErrorMsg = "DjVu file is empty or truncated."
-                return
-            }
-            val buf = ByteBuffer.allocateDirect(fileSize)
-            val read = source.readAt(0L, buf)
-            if (read < 16) {
-                lastErrorMsg = "Unable to read DjVu container header."
-                return
-            }
-            val bytes = ByteArray(read)
-            buf.flip()
-            buf.get(bytes)
-
-            val bb = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-            var pos = 0
-            if (read >= 12 &&
-                bytes[0] == 'A'.code.toByte() &&
-                bytes[1] == 'T'.code.toByte() &&
-                bytes[2] == '&'.code.toByte() &&
-                bytes[3] == 'T'.code.toByte()
-            ) {
-                pos = 4
-            }
-            if (pos + 12 > bytes.size) {
-                lastErrorMsg = "Invalid DjVu IFF85 header."
-                return
-            }
-            val formTag = String(bytes, pos, 4, StandardCharsets.US_ASCII)
-            val formSize = bb.getInt(pos + 4).toLong() and 0xFFFFFFFFL
-            val formType = String(bytes, pos + 8, 4, StandardCharsets.US_ASCII)
-            if (formTag != "FORM" || formType !in setOf("DJVU", "DJVM", "PM44", "BM44")) {
-                lastErrorMsg = "Unsupported DjVu container form ($formTag:$formType)."
-                return
-            }
-
-            val formEnd = minOf(bytes.size.toLong(), pos + 8L + formSize).toInt()
-            if (formType == "DJVM") {
-                var childPos = pos + 12
-                var dirmOffsets = LongArray(0)
-                while (childPos + 8 <= formEnd && pages.size < 2000) {
-                    val chunkId = String(bytes, childPos, 4, StandardCharsets.US_ASCII)
-                    val chunkLen = (bb.getInt(childPos + 4).toLong() and 0xFFFFFFFFL).toInt()
-                    val dataStart = childPos + 8
-                    val dataEnd = (dataStart.toLong() + chunkLen).coerceAtMost(formEnd.toLong()).toInt()
-                    if (dataEnd < dataStart) break
-
-                    if (chunkId == "DIRM" && dataEnd - dataStart >= 3) {
-                        dirmOffsets = parseDirmChunkOffsets(bytes, dataStart, dataEnd)
-                    } else if (chunkId == "FORM" && dataEnd - dataStart >= 4) {
-                        val subType = String(bytes, dataStart, 4, StandardCharsets.US_ASCII)
-                        if (subType in setOf("DJVU", "PM44", "BM44")) {
-                            parseSingleDjvuForm(pages.size + 1, bytes, bb, dataStart + 4, dataEnd)?.let {
-                                pages.add(it)
-                            }
-                        }
-                    }
-                    val paddedLen = (chunkLen + 1) and -2
-                    val nextPos = dataStart + paddedLen
-                    if (nextPos <= childPos) break
-                    childPos = nextPos
-                }
-
-                if (pages.isEmpty() && dirmOffsets.isNotEmpty()) {
-                    for (off in dirmOffsets) {
-                        val pOff = off.toInt()
-                        if (pOff in 12..(bytes.size - 12)) {
-                            val cId = String(bytes, pOff, 4, StandardCharsets.US_ASCII)
-                            val cLen = (bb.getInt(pOff + 4).toLong() and 0xFFFFFFFFL).toInt()
-                            if (cId == "FORM" && pOff + 12 <= bytes.size) {
-                                val subT = String(bytes, pOff + 8, 4, StandardCharsets.US_ASCII)
-                                val subEnd = minOf(bytes.size, pOff + 8 + cLen)
-                                if (subT in setOf("DJVU", "PM44", "BM44")) {
-                                    parseSingleDjvuForm(pages.size + 1, bytes, bb, pOff + 12, subEnd)?.let {
-                                        pages.add(it)
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                parseSingleDjvuForm(1, bytes, bb, pos + 12, formEnd)?.let {
-                    pages.add(it)
-                }
-            }
-
-            if (pages.isEmpty()) {
-                lastErrorMsg = "DjVu container contains no readable pages."
-            }
-        } catch (e: Exception) {
-            lastErrorMsg = "DjVu parse error: ${e.localizedMessage}"
-        }
-    }
-
-    private fun parseDirmChunkOffsets(bytes: ByteArray, start: Int, end: Int): LongArray {
-        val flags = bytes[start].toInt() and 0xFF
-        val isBundled = (flags and 0x80) != 0
-        val numFiles = ((bytes[start + 1].toInt() and 0xFF) shl 8) or (bytes[start + 2].toInt() and 0xFF)
-        if (!isBundled || numFiles <= 0 || numFiles > 5000) return LongArray(0)
-        val offsetsStart = start + 3
-        if (offsetsStart + numFiles * 4 > end) return LongArray(0)
-        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-        return LongArray(numFiles) { i ->
-            bb.getInt(offsetsStart + i * 4).toLong() and 0xFFFFFFFFL
-        }
-    }
-
-    private fun parseSingleDjvuForm(
-        pageNumber: Int,
-        bytes: ByteArray,
-        bb: ByteBuffer,
-        start: Int,
-        end: Int
-    ): DjvuPageModel? {
-        var width = 2480
-        var height = 3508
-        var dpi = 300
-        var rotationDeg = 0
-        val textSb = StringBuilder()
-        var bgJpeg: ByteArray? = null
-        val bg44List = ArrayList<ByteArray>()
-        var sjbzData: ByteArray? = null
-
-        var pos = start
-        while (pos + 8 <= end) {
-            val chunkId = String(bytes, pos, 4, StandardCharsets.US_ASCII)
-            val chunkLen = (bb.getInt(pos + 4).toLong() and 0xFFFFFFFFL).toInt()
-            val dataStart = pos + 8
-            val dataEnd = (dataStart.toLong() + chunkLen).coerceAtMost(end.toLong()).toInt()
-            if (dataEnd < dataStart) break
-
-            when (chunkId) {
-                "INFO" -> {
-                    if (dataEnd - dataStart >= 5) {
-                        width = ((bytes[dataStart].toInt() and 0xFF) shl 8) or (bytes[dataStart + 1].toInt() and 0xFF)
-                        height = ((bytes[dataStart + 2].toInt() and 0xFF) shl 8) or (bytes[dataStart + 3].toInt() and 0xFF)
-                        if (dataEnd - dataStart >= 8) {
-                            dpi = ((bytes[dataStart + 6].toInt() and 0xFF)) or ((bytes[dataStart + 7].toInt() and 0xFF) shl 8)
-                        }
-                        if (dataEnd - dataStart >= 10) {
-                            rotationDeg = when (bytes[dataStart + 9].toInt() and 0x07) {
-                                6 -> 270
-                                2 -> 180
-                                5 -> 90
-                                else -> 0
-                            }
-                        }
-                    }
-                }
-                "TXTa" -> {
-                    if (dataEnd - dataStart > 3) {
-                        val txtLen = ((bytes[dataStart].toInt() and 0xFF) shl 16) or
-                                ((bytes[dataStart + 1].toInt() and 0xFF) shl 8) or
-                                (bytes[dataStart + 2].toInt() and 0xFF)
-                        val safeTxtLen = minOf(txtLen, dataEnd - (dataStart + 3)).coerceAtLeast(0)
-                        if (safeTxtLen > 0) {
-                            val str = String(bytes, dataStart + 3, safeTxtLen, StandardCharsets.UTF_8).trim()
-                            if (str.isNotEmpty()) {
-                                if (textSb.isNotEmpty()) textSb.append('\n')
-                                textSb.append(str)
-                            }
-                        }
-                    }
-                }
-                "TXTz", "ANTz" -> {
-                    if (dataEnd > dataStart) {
-                        val compSlice = bytes.copyOfRange(dataStart, dataEnd)
-                        val decodedBzz = decodeBzzOrExtractText(compSlice)
-                        if (decodedBzz.isNotBlank()) {
-                            if (textSb.isNotEmpty()) textSb.append('\n')
-                            textSb.append(decodedBzz)
-                        }
-                    }
-                }
-                "ANTa" -> {
-                    if (dataEnd > dataStart) {
-                        val antStr = String(bytes, dataStart, dataEnd - dataStart, StandardCharsets.UTF_8).trim()
-                        if (antStr.isNotEmpty() && textSb.isEmpty()) {
-                            textSb.append(antStr)
-                        }
-                    }
-                }
-                "BGjp", "FGjp" -> {
-                    if (bgJpeg == null && dataEnd > dataStart) {
-                        bgJpeg = bytes.copyOfRange(dataStart, dataEnd)
-                    }
-                }
-                "BG44", "PM44", "BM44" -> {
-                    if (dataEnd > dataStart && bg44List.size < 16) {
-                        bg44List.add(bytes.copyOfRange(dataStart, dataEnd))
-                    }
-                }
-                "Sjbz" -> {
-                    if (sjbzData == null && dataEnd > dataStart) {
-                        sjbzData = bytes.copyOfRange(dataStart, dataEnd)
-                    }
-                }
-            }
-
-            val paddedLen = (chunkLen + 1) and -2
-            val nextPos = dataStart + paddedLen
-            if (nextPos <= pos) break
-            pos = nextPos
-        }
-
-        return DjvuPageModel(
-            index = pageNumber,
-            width = width.coerceIn(100, 12000),
-            height = height.coerceIn(100, 16000),
-            dpi = dpi.coerceIn(72, 1200),
-            rotationDeg = rotationDeg,
-            textLayer = textSb.toString().trim(),
-            bgJpegBytes = bgJpeg,
-            bg44Chunks = bg44List,
-            sjbzBytes = sjbzData
-        )
-    }
-
-    private fun decodeBzzOrExtractText(data: ByteArray): String {
-        if (data.size > 3) {
-            val maybeLen = ((data[0].toInt() and 0xFF) shl 16) or
-                    ((data[1].toInt() and 0xFF) shl 8) or
-                    (data[2].toInt() and 0xFF)
-            if (maybeLen in 1..(data.size - 3)) {
-                val candidate = String(data, 3, maybeLen, StandardCharsets.UTF_8)
-                if (candidate.count { it.isLetterOrDigit() || it.isWhitespace() } > candidate.length * 0.7) {
-                    return candidate.trim()
-                }
-            }
-        }
-        val sb = StringBuilder()
-        val utf8Run = ByteArrayOutputStream(256)
-        fun flushRun() {
-            if (utf8Run.size() >= 4) {
-                val decoded = try {
-                    String(utf8Run.toByteArray(), StandardCharsets.UTF_8).trim()
-                } catch (_: Throwable) {
-                    ""
-                }
-                if (decoded.count { it.isLetterOrDigit() } >= 2) {
-                    if (sb.isNotEmpty()) sb.append(' ')
-                    sb.append(decoded)
-                }
-            }
-            utf8Run.reset()
-        }
-        for (b in data) {
-            val v = b.toInt() and 0xFF
-            if (v == 10 || v == 13 || v in 32..126 || v >= 0x80) {
-                utf8Run.write(v)
-            } else {
-                flushRun()
-            }
-        }
-        flushRun()
-        return sb.toString().trim()
-    }
-
-    override val pageCount: Int get() = pages.size.coerceAtLeast(1)
-    override fun getLastError(): String? = lastErrorMsg
-
-    override fun getDocumentWidth(): Float {
-        val p = pages.getOrNull(activeRenderedPageIdx) ?: pages.firstOrNull() ?: return 1240f
-        return p.width.toFloat()
-    }
-
-    override fun getDocumentHeight(): Float {
-        val p = pages.getOrNull(activeRenderedPageIdx) ?: pages.firstOrNull() ?: return 1754f
-        return p.height.toFloat()
-    }
-
-    override fun getPageText(pageIndex: Int): String {
-        if (pageIndex == -1) return pages.joinToString("\n\n") { it.textLayer }
-        val cleanIdx = (pageIndex and PAGE_INDEX_MASK).coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-        return pages.getOrNull(cleanIdx)?.textLayer ?: ""
-    }
-
-    override fun getPageAspectRatio(pageIndex: Int): Float {
-        val cleanIdx = (pageIndex and PAGE_INDEX_MASK).coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-        val p = pages.getOrNull(cleanIdx) ?: return 0.707f
-        return p.width.toFloat() / p.height.toFloat().coerceAtLeast(1f)
-    }
-
-    @Synchronized
+private class UnavailableGplDocumentSession(
+    private val pfd: ParcelFileDescriptor,
+    private val formatName: String
+) : DocumentSession {
+    override val pageCount: Int = 1
+    override fun getLastError(): String = "$formatName engine is not included in this build."
     override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
-        if (isClosed) return
-        val isLight = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0
-        val cleanIdx = (pageIndex and PAGE_INDEX_MASK).coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-        activeRenderedPageIdx = cleanIdx
-
-        val canvas = Canvas(bitmap)
-        canvas.drawColor(if (isLight) Color.rgb(252, 250, 244) else Color.rgb(0x16, 0x17, 0x1E))
-
-        val page = pages.getOrNull(cleanIdx) ?: return
-
-        val zoom = (zoomPermille / 1000f).coerceIn(0.5f, 6f)
-        canvas.save()
-        canvas.translate(-tileX.toFloat(), -tileY.toFloat())
-
-        var drewBackgroundBitmap = false
-        if (page.bgJpegBytes != null) {
-            val bmp = BitmapFactory.decodeByteArray(page.bgJpegBytes, 0, page.bgJpegBytes.size)
-            if (bmp != null) {
-                val dstW = bitmap.width * zoom
-                val dstH = bitmap.height * zoom
-                val left = (bitmap.width - dstW) / 2f
-                val top = (bitmap.height - dstH) / 2f
-                canvas.drawBitmap(bmp, null, RectF(left, top, left + dstW, top + dstH), Paint(Paint.FILTER_BITMAP_FLAG))
-                bmp.recycle()
-                drewBackgroundBitmap = true
-            }
-        }
-
-        if (!drewBackgroundBitmap && page.bg44Chunks.isNotEmpty()) {
-            val firstChunk = page.bg44Chunks[0]
-            if (firstChunk.size >= 9 && firstChunk[0].toInt() == 0) {
-                val iwW = ((firstChunk[4].toInt() and 0xFF) shl 8) or (firstChunk[5].toInt() and 0xFF)
-                val iwH = ((firstChunk[6].toInt() and 0xFF) shl 8) or (firstChunk[7].toInt() and 0xFF)
-                val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                    color = if (isLight) Color.rgb(248, 246, 238) else Color.rgb(0x1E, 0x20, 0x2B)
-                    style = Paint.Style.FILL
-                }
-                val pageAspect = (if (iwW > 0 && iwH > 0) iwW.toFloat() / iwH else page.width.toFloat() / page.height).coerceIn(0.4f, 2.5f)
-                val cardH = (bitmap.height - 40f) * zoom
-                val cardW = cardH * pageAspect
-                val left = (bitmap.width - cardW) / 2f
-                val top = 20f
-                canvas.drawRect(left, top, left + cardW, top + cardH, bgPaint)
-            }
-        }
-
-        val pad = 44f
-        val availW = ((bitmap.width - pad * 2f) * zoom).toInt().coerceAtLeast(120)
-        val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (isLight || drewBackgroundBitmap) Color.rgb(28, 30, 36) else Color.rgb(232, 235, 244)
-            textSize = 30f * zoom
-            typeface = Typeface.SERIF
-        }
-        val contentText = page.textLayer.ifBlank {
-            "DjVu Page ${page.index} (${page.width}×${page.height} px @ ${page.dpi} DPI)"
-        }
-        val rich = SpannableStringBuilder(contentText)
-        val layout = StaticLayout.Builder.obtain(rich, 0, rich.length, textPaint, availW)
-            .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-            .setLineSpacing(0f, 1.22f)
-            .build()
-        canvas.translate(pad, pad)
-        layout.draw(canvas)
-        canvas.restore()
+        bitmap.eraseColor(Color.rgb(0x14, 0x15, 0x1C))
     }
-
-    override fun renderTile(key: PackedTileKey, bitmap: Bitmap) {
-        renderTile(key.zoom, key.x, key.y, 1000, bitmap)
-    }
-
-    override fun search(query: String, startPage: Int): Long {
-        if (query.isBlank() || isClosed) return -1L
-        val start = startPage.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-        for (i in start until pages.size) {
-            if (pages[i].textLayer.contains(query, ignoreCase = true)) return i.toLong()
-        }
-        for (i in 0 until start) {
-            if (pages[i].textLayer.contains(query, ignoreCase = true)) return i.toLong()
-        }
-        return -1L
-    }
-
     override fun close() {
-        if (isClosed) return
-        isClosed = true
-        source.close()
         try { pfd.close() } catch (_: Exception) {}
-    }
-}
-
-/**
- * Clean-room decompiler for Android Binary XML (`AXML`, `0x00080003`) and `resources.arsc` (`0x000C0002`)
- * based on the open AOSP `ResourceTypes.h` specification.
- */
-internal object AndroidBinaryXmlDecompiler {
-
-    private const val RES_STRING_POOL_TYPE = 0x0001
-    private const val RES_TABLE_TYPE = 0x0002
-    private const val RES_XML_TYPE = 0x0003
-    private const val RES_XML_START_NAMESPACE_TYPE = 0x0100
-    private const val RES_XML_START_ELEMENT_TYPE = 0x0102
-    private const val RES_XML_END_ELEMENT_TYPE = 0x0103
-    private const val RES_XML_CDATA_TYPE = 0x0104
-    private const val RES_TABLE_PACKAGE_TYPE = 0x0200
-
-    fun isBinaryXmlOrArsc(sample: ByteArray, len: Int): Boolean {
-        if (len < 8) return false
-        val bb = ByteBuffer.wrap(sample, 0, len).order(ByteOrder.LITTLE_ENDIAN)
-        val type = bb.getShort(0).toInt() and 0xFFFF
-        val headerSize = bb.getShort(2).toInt() and 0xFFFF
-        val totalSize = bb.getInt(4)
-        if (totalSize < 8) return false
-        return (type == RES_XML_TYPE && headerSize == 8) || (type == RES_TABLE_TYPE && headerSize == 12)
-    }
-
-    fun decompile(bytes: ByteArray): String? {
-        if (!isBinaryXmlOrArsc(bytes, bytes.size)) return null
-        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val rootType = bb.getShort(0).toInt() and 0xFFFF
-        return if (rootType == RES_XML_TYPE) {
-            decompileBinaryXml(bb, bytes)
-        } else {
-            decompileArscSummary(bb, bytes)
-        }
-    }
-
-    private fun parseStringPool(bb: ByteBuffer, rawBytes: ByteArray, chunkPos: Int, chunkSize: Int): List<String> {
-        if (chunkSize < 28 || chunkPos + chunkSize > rawBytes.size) return emptyList()
-        val stringCount = bb.getInt(chunkPos + 8).coerceIn(0, 200_000)
-        val flags = bb.getInt(chunkPos + 16)
-        val stringsStart = chunkPos + bb.getInt(chunkPos + 20)
-        val isUtf8 = (flags and (1 shl 8)) != 0
-        val offsetsBase = chunkPos + 28
-        if (offsetsBase + stringCount * 4 > chunkPos + chunkSize) return emptyList()
-
-        val list = ArrayList<String>(stringCount)
-        for (i in 0 until stringCount) {
-            val strOffset = stringsStart + bb.getInt(offsetsBase + i * 4)
-            if (strOffset < stringsStart || strOffset >= chunkPos + chunkSize) {
-                list.add("")
-                continue
-            }
-            try {
-                if (isUtf8) {
-                    var p = strOffset
-                    val u16Len = rawBytes[p++].toInt() and 0xFF
-                    if ((u16Len and 0x80) != 0) p++
-                    var u8Len = rawBytes[p++].toInt() and 0xFF
-                    if ((u8Len and 0x80) != 0) {
-                        u8Len = ((u8Len and 0x7F) shl 8) or (rawBytes[p++].toInt() and 0xFF)
-                    }
-                    val safeLen = minOf(u8Len, (chunkPos + chunkSize) - p).coerceAtLeast(0)
-                    list.add(String(rawBytes, p, safeLen, StandardCharsets.UTF_8))
-                } else {
-                    var p = strOffset
-                    var u16Len = bb.getShort(p).toInt() and 0xFFFF
-                    p += 2
-                    if ((u16Len and 0x8000) != 0) {
-                        u16Len = ((u16Len and 0x7FFF) shl 16) or (bb.getShort(p).toInt() and 0xFFFF)
-                        p += 2
-                    }
-                    val byteLen = minOf(u16Len * 2, (chunkPos + chunkSize) - p).coerceAtLeast(0)
-                    list.add(String(rawBytes, p, byteLen, StandardCharsets.UTF_16LE))
-                }
-            } catch (_: Throwable) {
-                list.add("")
-            }
-        }
-        return list
-    }
-
-    private fun decompileBinaryXml(bb: ByteBuffer, bytes: ByteArray): String {
-        val headerSize = (bb.getShort(2).toInt() and 0xFFFF).coerceAtLeast(8)
-        var pos = headerSize
-        var stringPool: List<String> = emptyList()
-        val nsUriToPrefix = LinkedHashMap<String, String>()
-        val pendingNsDeclarations = ArrayList<Pair<String, String>>()
-        val sb = StringBuilder()
-        sb.append("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n")
-        var indent = 0
-
-        fun getStr(idx: Int): String = if (idx in stringPool.indices) stringPool[idx] else ""
-
-        while (pos + 8 <= bytes.size) {
-            val chunkType = bb.getShort(pos).toInt() and 0xFFFF
-            val chunkHeaderSize = bb.getShort(pos + 2).toInt() and 0xFFFF
-            val chunkSize = bb.getInt(pos + 4)
-            if (chunkSize < 8 || pos + chunkSize > bytes.size) break
-
-            when (chunkType) {
-                RES_STRING_POOL_TYPE -> {
-                    stringPool = parseStringPool(bb, bytes, pos, chunkSize)
-                }
-                RES_XML_START_NAMESPACE_TYPE -> {
-                    if (chunkSize >= 24) {
-                        val prefix = getStr(bb.getInt(pos + 16))
-                        val uri = getStr(bb.getInt(pos + 20))
-                        if (uri.isNotEmpty()) {
-                            nsUriToPrefix[uri] = prefix
-                            pendingNsDeclarations.add(prefix to uri)
-                        }
-                    }
-                }
-                RES_XML_START_ELEMENT_TYPE -> {
-                    if (pos + chunkHeaderSize + 20 <= pos + chunkSize) {
-                        val extBase = pos + chunkHeaderSize
-                        val nsUri = getStr(bb.getInt(extBase))
-                        val elemName = getStr(bb.getInt(extBase + 4))
-                        val attrStart = bb.getShort(extBase + 8).toInt() and 0xFFFF
-                        val attrSize = (bb.getShort(extBase + 10).toInt() and 0xFFFF).coerceAtLeast(20)
-                        val attrCount = bb.getShort(extBase + 12).toInt() and 0xFFFF
-
-                        val nsPrefix = nsUriToPrefix[nsUri]
-                        val qName = if (!nsPrefix.isNullOrEmpty()) "$nsPrefix:$elemName" else elemName
-
-                        repeat(indent) { sb.append("    ") }
-                        sb.append('<').append(qName)
-
-                        for ((pfx, uri) in pendingNsDeclarations) {
-                            if (pfx.isEmpty()) {
-                                sb.append(" xmlns=\"").append(uri).append('"')
-                            } else {
-                                sb.append(" xmlns:").append(pfx).append("=\"").append(uri).append('"')
-                            }
-                        }
-                        pendingNsDeclarations.clear()
-
-                        val attrListStart = extBase + attrStart
-                        for (a in 0 until attrCount) {
-                            val aPos = attrListStart + a * attrSize
-                            if (aPos + 20 > pos + chunkSize) break
-                            val aNs = getStr(bb.getInt(aPos))
-                            val aName = getStr(bb.getInt(aPos + 4))
-                            val aRawValIdx = bb.getInt(aPos + 8)
-                            val aType = bb.get(aPos + 15).toInt() and 0xFF
-                            val aData = bb.getInt(aPos + 16)
-
-                            val aPrefix = nsUriToPrefix[aNs]
-                            val aQName = if (!aPrefix.isNullOrEmpty()) "$aPrefix:$aName" else aName
-                            val formattedVal = formatAttributeValue(aType, aData, aRawValIdx, ::getStr)
-                            sb.append(' ').append(aQName).append("=\"").append(escapeXmlAttr(formattedVal)).append('"')
-                        }
-                        sb.append(">\n")
-                        indent++
-                    }
-                }
-                RES_XML_END_ELEMENT_TYPE -> {
-                    if (chunkSize >= 24) {
-                        indent = (indent - 1).coerceAtLeast(0)
-                        val extBase = pos + chunkHeaderSize
-                        val nsUri = getStr(bb.getInt(extBase))
-                        val elemName = getStr(bb.getInt(extBase + 4))
-                        val nsPrefix = nsUriToPrefix[nsUri]
-                        val qName = if (!nsPrefix.isNullOrEmpty()) "$nsPrefix:$elemName" else elemName
-                        repeat(indent) { sb.append("    ") }
-                        sb.append("</").append(qName).append(">\n")
-                    }
-                }
-                RES_XML_CDATA_TYPE -> {
-                    if (chunkSize >= 20) {
-                        val txt = getStr(bb.getInt(pos + 16)).trim()
-                        if (txt.isNotEmpty()) {
-                            repeat(indent) { sb.append("    ") }
-                            sb.append(txt).append('\n')
-                        }
-                    }
-                }
-            }
-            pos += chunkSize
-        }
-        return sb.toString().trim()
-    }
-
-    private fun decompileArscSummary(bb: ByteBuffer, bytes: ByteArray): String {
-        val sb = StringBuilder()
-        sb.append("=== Android Resource Table (resources.arsc) ===\n\n")
-        val headerSize = (bb.getShort(2).toInt() and 0xFFFF).coerceAtLeast(12)
-        var pos = headerSize
-        while (pos + 8 <= bytes.size) {
-            val chunkType = bb.getShort(pos).toInt() and 0xFFFF
-            val chunkSize = bb.getInt(pos + 4)
-            if (chunkSize < 8 || pos + chunkSize > bytes.size) break
-            when (chunkType) {
-                RES_STRING_POOL_TYPE -> {
-                    val pool = parseStringPool(bb, bytes, pos, chunkSize)
-                    sb.append("Global Strings (${pool.size}):\n")
-                    pool.asSequence().filter { it.isNotBlank() }.take(1500).forEachIndexed { idx, s ->
-                        sb.append("  [").append(idx).append("] ").append(s).append('\n')
-                    }
-                    sb.append('\n')
-                }
-                RES_TABLE_PACKAGE_TYPE -> {
-                    if (pos + 268 <= bytes.size) {
-                        val pkgId = bb.getInt(pos + 8)
-                        val nameBytes = ByteArray(256)
-                        System.arraycopy(bytes, pos + 12, nameBytes, 0, 256)
-                        val pkgName = String(nameBytes, StandardCharsets.UTF_16LE).substringBefore('\u0000')
-                        sb.append("Package ID: 0x").append(Integer.toHexString(pkgId))
-                            .append(" | Name: ").append(pkgName).append('\n')
-                    }
-                }
-            }
-            pos += chunkSize
-        }
-        return sb.toString().trim()
-    }
-
-    private fun formatAttributeValue(type: Int, data: Int, rawValIdx: Int, getStr: (Int) -> String): String {
-        if (rawValIdx >= 0) {
-            val raw = getStr(rawValIdx)
-            if (raw.isNotEmpty()) return raw
-        }
-        return when (type) {
-            0x00 -> "null"
-            0x01 -> "@0x${Integer.toHexString(data).uppercase(Locale.ROOT)}"
-            0x02 -> "?0x${Integer.toHexString(data).uppercase(Locale.ROOT)}"
-            0x03 -> getStr(data)
-            0x04 -> Float.fromBits(data).toString()
-            0x05 -> {
-                val unit = when (data and 0x0F) {
-                    0 -> "px"; 1 -> "dp"; 2 -> "sp"; 3 -> "pt"; 4 -> "in"; 5 -> "mm"; else -> "px"
-                }
-                val mantissa = (data shr 8).toFloat()
-                "${mantissa.toInt()}$unit"
-            }
-            0x10 -> data.toString()
-            0x11 -> "0x${Integer.toHexString(data)}"
-            0x12 -> if (data != 0) "true" else "false"
-            in 0x1C..0x1F -> String.format(Locale.US, "#%08X", data)
-            else -> "0x${Integer.toHexString(data)}"
-        }
-    }
-
-    private fun escapeXmlAttr(s: String): String {
-        return s.replace("&", "&amp;")
-            .replace("\"", "&quot;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
     }
 }
 
@@ -1601,13 +975,18 @@ class CleanRoomFontSession(
 
             if (customTypeface == null) {
                 try {
-                    val cacheDir = System.getProperty("omnireader.cache.dir")?.let { File(it) }
-                        ?: System.getProperty("java.io.tmpdir")?.let { File(it) }
-                    val tmp = File.createTempFile("omni_font_", ".ttf", cacheDir)
-                    FileOutputStream(tmp).use { it.write(bytes) }
-                    tempFontFile = tmp
-                    customTypeface = Typeface.createFromFile(tmp)
-                    try { tmp.delete() } catch (_: Throwable) {}
+                    val tmp = com.omnireader.core.engine.ScratchFiles.createTempFile("omni_font_", ".ttf")
+                    try {
+                        com.omnireader.core.engine.ScratchFiles.openOutput(tmp).use { it.write(bytes) }
+                        val memoryFd = com.omnireader.core.engine.ScratchFiles.openReadOnlyDescriptor(tmp)
+                        customTypeface = if (memoryFd != null) {
+                            Typeface.Builder(memoryFd).build()
+                        } else {
+                            Typeface.createFromFile(tmp)
+                        }
+                    } finally {
+                        com.omnireader.core.engine.ScratchFiles.delete(tmp)
+                    }
                 } catch (_: Throwable) {}
             }
 
@@ -2378,7 +1757,12 @@ class DocumentRendererEngineImpl : FileEngineProvider {
         return createSessionForFormat(fd, detected, "")
     }
 
-    fun createSessionForFormat(fd: FileDescriptor, format: DetectedFormat, extension: String = ""): DocumentSession {
+    fun createSessionForFormat(
+        fd: FileDescriptor,
+        format: DetectedFormat,
+        extension: String = "",
+        password: String? = null
+    ): DocumentSession {
         val ext = extension.lowercase(Locale.ROOT).trim()
         val isGraphicExtension = ext in setOf(
             "png", "jpg", "jpeg", "jpe", "jfif", "webp", "gif", "bmp", "wbmp",
@@ -2391,7 +1775,9 @@ class DocumentRendererEngineImpl : FileEngineProvider {
         }
 
         if (format == DetectedFormat.DJVU || ext in setOf("djvu", "djv")) {
-            return CleanRoomDjvuSession(ParcelFileDescriptor.dup(fd))
+            val dup = ParcelFileDescriptor.dup(fd)
+            return GplCoreEngineBridgeLoader.get()?.createDjvuSession(dup)
+                ?: UnavailableGplDocumentSession(dup, "DjVu")
         }
 
         if (format == DetectedFormat.KINDLE_DRM || format == DetectedFormat.KFX || ext == "kfx") {
@@ -2399,7 +1785,9 @@ class DocumentRendererEngineImpl : FileEngineProvider {
         }
 
         if (format in setOf(DetectedFormat.AZW3, DetectedFormat.MOBI) || ext in setOf("azw3", "azw", "mobi", "prc")) {
-            return PalmDocMobiCleanRoomSession(ParcelFileDescriptor.dup(fd), ext.ifEmpty { "mobi" })
+            val dup = ParcelFileDescriptor.dup(fd)
+            return GplCoreEngineBridgeLoader.get()?.createMobiSession(dup, ext.ifEmpty { "mobi" })
+                ?: UnavailableGplDocumentSession(dup, "MOBI/AZW3")
         }
 
         if (format in setOf(
@@ -2418,25 +1806,26 @@ class DocumentRendererEngineImpl : FileEngineProvider {
                 "pptx", "pptm", "ppsx", "ppsm", "potx", "potm", "odp", "otp",
                 "svg", "svgz", "stl", "obj", "dxf", "dwg", "ply", "off", "3ds",
                 "gltf", "glb", "blend", "usdz", "usd", "usda", "usdc", "fbx",
-                "3mf", "dae", "step", "stp", "iges", "igs"
+                "3mf", "dae", "zae", "step", "stp", "iges", "igs"
             ) && format !in setOf(DetectedFormat.DOCX, DetectedFormat.ODT, DetectedFormat.EPUB, DetectedFormat.FB2))
         ) {
-            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, ext)
+            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, ext, password)
         }
 
         val dupFd = ParcelFileDescriptor.dup(fd)
         return when {
-            format == DetectedFormat.PDF || ext == "pdf" -> PdfDocumentSession(dupFd)
+            format == DetectedFormat.PDF || ext == "pdf" -> PdfDocumentSession(dupFd, password)
             format in setOf(
                 DetectedFormat.PNG, DetectedFormat.JPEG, DetectedFormat.GIF,
                 DetectedFormat.TIFF, DetectedFormat.WEBP, DetectedFormat.BMP,
                 DetectedFormat.HEIC, DetectedFormat.AVIF
             ) || isGraphicExtension -> ImageRegionSession(dupFd, format, ext)
+            format == DetectedFormat.DOCX || ext in setOf("docx", "docm", "dotx", "dotm") ->
+                CleanRoomDocSession(dupFd, password)
             format in setOf(
-                DetectedFormat.FB2, DetectedFormat.EPUB, DetectedFormat.DOCX,
-                DetectedFormat.ODT
-            ) || ext in setOf("fb2", "fbz", "epub", "docx", "docm", "dotx", "dotm", "odt", "ott") ->
-                EbookTextSession(dupFd, format, ext)
+                DetectedFormat.FB2, DetectedFormat.EPUB, DetectedFormat.ODT, DetectedFormat.MHTML
+            ) || ext in setOf("fb2", "fbz", "epub", "odt", "ott", "mhtml", "mht") ->
+                EbookTextSession(dupFd, format, ext, password)
             else -> PlainTextSession(dupFd)
         }
     }
@@ -2449,7 +1838,298 @@ class DocumentRendererEngineImpl : FileEngineProvider {
  * On Android 15+ (API 35+, including HyperOS), extracts exact text and line-level bounding boxes
  * directly from the system `PdfRenderer.Page.getTextContents()` API.
  */
-class PdfDocumentSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
+object PdfPermissionParser {
+    const val PDF_DRM_ERROR =
+        "DRM_PROTECTED: This PDF document is protected by cryptographic DRM. Circumventing DRM protection is prohibited under DMCA § 1201 and international copyright law."
+
+    private val ENCRYPT_REF_REGEX = Regex("""/Encrypt\s+(\d+)\s+(\d+)\s+R""")
+    private val PERM_P_REGEX = Regex("""/P\s+(-?\d+)""")
+    private val FILTER_REGEX = Regex("""/Filter\s*/([A-Za-z0-9._+#-]+)""")
+    private val HEX_NAME_ESCAPE_REGEX = Regex("""#([0-9A-Fa-f]{2})""")
+    private val DRM_SECURITY_FILTERS = setOf(
+        "ebx_handler",
+        "adobe.aps",
+        "adobe.pubsec",
+        "pubsec",
+        "fopn_foweb",
+        "fileopen",
+        "seclore",
+        "microsoft.rms",
+        "vitrium",
+        "locklizard",
+        "drmx"
+    )
+
+    private fun normalizePdfName(raw: String): String {
+        return HEX_NAME_ESCAPE_REGEX.replace(raw) { m ->
+            m.groupValues[1].toInt(16).toChar().toString()
+        }.lowercase(Locale.ROOT)
+    }
+
+    private fun isDrmSecurityFilterName(rawFilter: String): Boolean {
+        val norm = normalizePdfName(rawFilter)
+        return norm in DRM_SECURITY_FILTERS || norm != "standard"
+    }
+
+    fun isDrmProtected(bytes: ByteArray): Boolean {
+        val text = String(bytes, StandardCharsets.ISO_8859_1)
+        if (!text.contains("/Encrypt")) return false
+        val refMatch = ENCRYPT_REF_REGEX.findAll(text).lastOrNull()
+        if (refMatch != null) {
+            val objNum = refMatch.groupValues[1]
+            val genNum = refMatch.groupValues[2]
+            val objRegex = Regex("""(?<![0-9])$objNum\s+$genNum\s+obj\b(.*?)endobj""", RegexOption.DOT_MATCHES_ALL)
+            return parseDrmFilterFromObjectMatches(objRegex, text) == true
+        }
+        return checkInlineDrmFilter(text) == true
+    }
+
+    fun isDrmProtected(source: ZeroCacheReadableSource): Boolean =
+        isDrmProtected(source.size) { offset, buf -> source.readAt(offset, buf) }
+
+    internal fun isDrmProtected(size: Long, readAt: (Long, ByteBuffer) -> Int): Boolean {
+        return try {
+            if (size <= 0L) return false
+            val tailLen = minOf(size, 64 * 1024L).toInt()
+            val tailText = readAsciiChunk(maxOf(0L, size - tailLen), tailLen, readAt)
+            val headText = if (size > tailLen) readAsciiChunk(0L, minOf(size, 64 * 1024L).toInt(), readAt) else tailText
+            val probeCombined = if (headText === tailText) tailText else headText + "\n" + tailText
+            if (!probeCombined.contains("/Encrypt")) return false
+
+            val refMatch = ENCRYPT_REF_REGEX.findAll(tailText).lastOrNull()
+                ?: ENCRYPT_REF_REGEX.findAll(probeCombined).lastOrNull()
+            if (refMatch == null) {
+                return checkInlineDrmFilter(tailText) ?: checkInlineDrmFilter(probeCombined) ?: false
+            }
+
+            val objNum = refMatch.groupValues[1]
+            val genNum = refMatch.groupValues[2]
+            val objRegex = Regex("""(?<![0-9])$objNum\s+$genNum\s+obj\b(.*?)endobj""", RegexOption.DOT_MATCHES_ALL)
+            if (size <= tailLen.toLong()) {
+                return parseDrmFilterFromObjectMatches(objRegex, tailText) ?: false
+            }
+
+            val windowSize = 256 * 1024
+            val overlap = 4096
+            val step = (windowSize - overlap).toLong()
+            val directBuf = ByteBuffer.allocateDirect(windowSize)
+            val chunkArr = ByteArray(windowSize)
+            var lastResult: Boolean? = null
+            var pos = 0L
+            while (pos < size) {
+                val toRead = minOf(windowSize.toLong(), size - pos).toInt()
+                directBuf.clear()
+                directBuf.limit(toRead)
+                val r = readAt(pos, directBuf)
+                if (r <= 0) break
+                directBuf.flip()
+                directBuf.get(chunkArr, 0, r)
+                val chunkText = String(chunkArr, 0, r, StandardCharsets.ISO_8859_1)
+                parseDrmFilterFromObjectMatches(objRegex, chunkText)?.let { lastResult = it }
+                if (pos + r >= size) break
+                pos += step
+            }
+            lastResult ?: parseDrmFilterFromObjectMatches(objRegex, probeCombined) ?: false
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun readAsciiChunk(offset: Long, len: Int, readAt: (Long, ByteBuffer) -> Int): String {
+        val buf = ByteBuffer.allocateDirect(len)
+        val r = readAt(offset, buf)
+        if (r <= 0) return ""
+        val arr = ByteArray(r)
+        buf.flip()
+        buf.get(arr)
+        return String(arr, StandardCharsets.ISO_8859_1)
+    }
+
+    private fun parseDrmFilterFromObjectMatches(objRegex: Regex, text: String): Boolean? {
+        var result: Boolean? = null
+        for (m in objRegex.findAll(text)) {
+            val filter = FILTER_REGEX.find(m.groupValues[1])?.groupValues?.get(1)
+            if (filter != null) {
+                result = isDrmSecurityFilterName(filter)
+            }
+        }
+        return result
+    }
+
+    private fun checkInlineDrmFilter(text: String): Boolean? {
+        val encIdx = text.lastIndexOf("/Encrypt")
+        if (encIdx >= 0) {
+            val slice = text.substring(encIdx, minOf(text.length, encIdx + 1024))
+            val filter = FILTER_REGEX.find(slice)?.groupValues?.get(1)
+            if (filter != null) return isDrmSecurityFilterName(filter)
+        }
+        return null
+    }
+
+    fun isCopyRestricted(bytes: ByteArray): Boolean {
+        val text = String(bytes, StandardCharsets.ISO_8859_1)
+        return isCopyRestrictedInText(text, text)
+    }
+
+    fun isCopyRestricted(source: ZeroCacheReadableSource): Boolean =
+        isCopyRestricted(source.size) { offset, buf -> source.readAt(offset, buf) }
+
+    internal fun isCopyRestricted(size: Long, readAt: (Long, ByteBuffer) -> Int): Boolean {
+        return try {
+            if (size <= 0L) return false
+            val tailLen = minOf(size, 64 * 1024L).toInt()
+            val tailBuf = ByteBuffer.allocateDirect(tailLen)
+            val tr = readAt(maxOf(0L, size - tailLen), tailBuf)
+            val tailText = if (tr > 0) {
+                val arr = ByteArray(tr)
+                tailBuf.flip()
+                tailBuf.get(arr)
+                String(arr, StandardCharsets.ISO_8859_1)
+            } else ""
+
+            val headLen = minOf(size, 64 * 1024L).toInt()
+            val headText = if (size > tailLen) {
+                val headBuf = ByteBuffer.allocateDirect(headLen)
+                val hr = readAt(0L, headBuf)
+                if (hr > 0) {
+                    val arr = ByteArray(hr)
+                    headBuf.flip()
+                    headBuf.get(arr)
+                    String(arr, StandardCharsets.ISO_8859_1)
+                } else ""
+            } else tailText
+
+            val probeCombined = if (headText === tailText) tailText else headText + "\n" + tailText
+            if (!probeCombined.contains("/Encrypt")) return false
+
+            val refMatch = ENCRYPT_REF_REGEX.findAll(tailText).lastOrNull()
+                ?: ENCRYPT_REF_REGEX.findAll(probeCombined).lastOrNull()
+            if (refMatch == null) {
+                return checkInlineEncryptPermissions(tailText) ?: checkInlineEncryptPermissions(probeCombined) ?: false
+            }
+
+            val objNum = refMatch.groupValues[1]
+            val genNum = refMatch.groupValues[2]
+            val objRegex = Regex("""(?<![0-9])$objNum\s+$genNum\s+obj\b(.*?)endobj""", RegexOption.DOT_MATCHES_ALL)
+
+            if (size <= tailLen.toLong()) {
+                return parsePermissionFromObjectMatches(objRegex, tailText) ?: false
+            }
+
+            val windowSize = 256 * 1024
+            val overlap = 4096
+            val step = (windowSize - overlap).toLong()
+            val directBuf = ByteBuffer.allocateDirect(windowSize)
+            val chunkArr = ByteArray(windowSize)
+            var lastResult: Boolean? = null
+            var pos = 0L
+            while (pos < size) {
+                val toRead = minOf(windowSize.toLong(), size - pos).toInt()
+                directBuf.clear()
+                directBuf.limit(toRead)
+                val r = readAt(pos, directBuf)
+                if (r <= 0) break
+                directBuf.flip()
+                directBuf.get(chunkArr, 0, r)
+                val chunkText = String(chunkArr, 0, r, StandardCharsets.ISO_8859_1)
+                parsePermissionFromObjectMatches(objRegex, chunkText)?.let { lastResult = it }
+                if (pos + r >= size) break
+                pos += step
+            }
+            lastResult ?: parsePermissionFromObjectMatches(objRegex, probeCombined) ?: false
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    private fun isCopyRestrictedInText(trailerText: String, fullText: String): Boolean {
+        if (!trailerText.contains("/Encrypt") && !fullText.contains("/Encrypt")) return false
+        return checkEncryptPermissions(trailerText, fullText) == true
+    }
+
+    private fun parsePermissionFromObjectMatches(objRegex: Regex, text: String): Boolean? {
+        var result: Boolean? = null
+        for (m in objRegex.findAll(text)) {
+            val pVal = PERM_P_REGEX.findAll(m.groupValues[1]).lastOrNull()?.groupValues?.get(1)?.toLongOrNull()?.toInt()
+            if (pVal != null) {
+                result = (pVal and 16) == 0
+            }
+        }
+        return result
+    }
+
+    private fun checkInlineEncryptPermissions(text: String): Boolean? {
+        val encIdx = text.lastIndexOf("/Encrypt")
+        if (encIdx >= 0) {
+            val slice = text.substring(encIdx, minOf(text.length, encIdx + 1024))
+            val pVal = PERM_P_REGEX.findAll(slice).lastOrNull()?.groupValues?.get(1)?.toLongOrNull()?.toInt()
+            if (pVal != null) return (pVal and 16) == 0
+        }
+        return null
+    }
+
+    private fun checkEncryptPermissions(trailerText: String, searchCorpus: String): Boolean? {
+        val refMatch = ENCRYPT_REF_REGEX.findAll(trailerText).lastOrNull()
+            ?: ENCRYPT_REF_REGEX.findAll(searchCorpus).lastOrNull()
+        if (refMatch != null) {
+            val objNum = refMatch.groupValues[1]
+            val genNum = refMatch.groupValues[2]
+            val objRegex = Regex("""(?<![0-9])$objNum\s+$genNum\s+obj\b(.*?)endobj""", RegexOption.DOT_MATCHES_ALL)
+            return parsePermissionFromObjectMatches(objRegex, searchCorpus)
+        }
+        return checkInlineEncryptPermissions(trailerText)
+    }
+}
+
+object EpubDrmDetector {
+    const val EPUB_DRM_ERROR =
+        "DRM_PROTECTED: This EPUB e-book is protected by cryptographic DRM. Circumventing DRM protection is prohibited under DMCA § 1201 and international copyright law."
+
+    private val ALLOWED_FONT_OBFUSCATION = setOf(
+        "http://www.idpf.org/2008/embedding",
+        "http://ns.adobe.com/pdf/enc#rc"
+    )
+    private val ENCRYPTED_DATA_REGEX = Regex("""<(?:\w+:)?EncryptedData\b(.*?)</(?:\w+:)?EncryptedData>""", setOf(RegexOption.DOT_MATCHES_ALL, RegexOption.IGNORE_CASE))
+    private val ALGORITHM_REGEX = Regex("""<(?:\w+:)?EncryptionMethod\b[^>]*\bAlgorithm\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+    private val CIPHER_URI_REGEX = Regex("""<(?:\w+:)?CipherReference\b[^>]*\bURI\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+    private val FONT_EXTENSIONS = setOf("ttf", "otf", "woff", "woff2", "ttc")
+
+    fun isDrmProtected(entries: Map<String, ByteArray>): Boolean {
+        for (key in entries.keys) {
+            val norm = key.replace('\\', '/').trimStart('/').lowercase(Locale.ROOT)
+            if (norm == "meta-inf/rights.xml" || norm == "meta-inf/license.lcpl" || norm == "meta-inf/sinf.xml") {
+                return true
+            }
+        }
+        val encKey = entries.keys.firstOrNull {
+            it.replace('\\', '/').trimStart('/').equals("meta-inf/encryption.xml", ignoreCase = true)
+        } ?: return false
+        val encBytes = entries[encKey] ?: return false
+        val xml = EbookTextSession.decodeAndPreprocessXml(encBytes)
+        val blocks = ENCRYPTED_DATA_REGEX.findAll(xml).toList()
+        if (blocks.isEmpty()) {
+            return xml.contains("EncryptedData", ignoreCase = true)
+        }
+        for (block in blocks) {
+            val body = block.groupValues[1]
+            val alg = ALGORITHM_REGEX.find(body)?.groupValues?.get(1)?.trim()?.lowercase(Locale.ROOT)
+            val uri = CIPHER_URI_REGEX.find(body)?.groupValues?.get(1)?.trim()?.lowercase(Locale.ROOT) ?: ""
+            val ext = uri.substringAfterLast('.', "")
+            val isAllowedFontObfuscation = alg in ALLOWED_FONT_OBFUSCATION &&
+                    uri.isNotEmpty() &&
+                    (ext in FONT_EXTENSIONS || uri.contains("font"))
+            if (!isAllowedFontObfuscation) {
+                return true
+            }
+        }
+        return false
+    }
+}
+
+class PdfDocumentSession(
+    private val pfd: ParcelFileDescriptor,
+    private val password: String? = null
+) : DocumentSession {
     @Volatile private var isClosed = false
     private val rendererLock = Any()
     private val textExtractLock = Any()
@@ -2464,14 +2144,24 @@ class PdfDocumentSession(private val pfd: ParcelFileDescriptor) : DocumentSessio
     private data class PdfStreamSlice(val offset: Long, val length: Int)
 
     private val readableSource = ZeroCacheReadableSource(pfd.fileDescriptor)
+    override val isCopyRestricted: Boolean = PdfPermissionParser.isCopyRestricted(readableSource)
     private var indexedContentSlices: List<PdfStreamSlice>? = null
     private val cmapTable = HashMap<Int, String>()
     @Volatile private var isStreamsIndexed = false
 
     init {
-        try {
+        if (PdfPermissionParser.isDrmProtected(readableSource)) {
+            pdfRenderer = null
+            lastErrorMsg = PdfPermissionParser.PDF_DRM_ERROR
+            stateVer++
+        } else try {
             try { Os.lseek(pfd.fileDescriptor, 0L, OsConstants.SEEK_SET) } catch (_: Throwable) {}
-            val renderer = PdfRenderer(pfd)
+            val renderer = if (!password.isNullOrEmpty() && Build.VERSION.SDK_INT >= 35) {
+                val params = android.graphics.pdf.LoadParams.Builder().setPassword(password).build()
+                PdfRenderer(pfd, params)
+            } else {
+                PdfRenderer(pfd)
+            }
             pdfRenderer = renderer
             if (renderer.pageCount > 0) {
                 try {
@@ -2483,13 +2173,21 @@ class PdfDocumentSession(private val pfd: ParcelFileDescriptor) : DocumentSessio
             }
         } catch (secEx: SecurityException) {
             pdfRenderer = null
-            lastErrorMsg = "PASSWORD_REQUIRED: PDF document is password protected."
+            lastErrorMsg = if (Build.VERSION.SDK_INT >= 35) {
+                "PASSWORD_REQUIRED: PDF document is password protected."
+            } else {
+                "UNSUPPORTED_ENCRYPTION: Password-protected PDF decryption requires Android 15 (API 35) or newer."
+            }
             stateVer++
         } catch (e: Exception) {
             pdfRenderer = null
             val isEncryptedHeader = checkPdfEncryptionMarker()
             lastErrorMsg = if (isEncryptedHeader) {
-                "PASSWORD_REQUIRED: PDF document is encrypted or password protected."
+                if (Build.VERSION.SDK_INT >= 35) {
+                    "PASSWORD_REQUIRED: PDF document is encrypted or password protected."
+                } else {
+                    "UNSUPPORTED_ENCRYPTION: Password-protected PDF decryption requires Android 15 (API 35) or newer."
+                }
             } else {
                 "CORRUPTED_PDF: PDF file is corrupted or has an unsupported structure (${e.localizedMessage ?: "I/O Error"})."
             }
@@ -2762,7 +2460,7 @@ class PdfDocumentSession(private val pfd: ParcelFileDescriptor) : DocumentSessio
     }
 
     override fun getPageText(pageIndex: Int): String {
-        if (isClosed || pdfRenderer == null || lastErrorMsg != null) return ""
+        if (isClosed || pdfRenderer == null || lastErrorMsg != null || isCopyRestricted) return ""
         val total = pageCount
         if (pageIndex == -1) {
             val cap = minOf(total, 60)
@@ -4073,7 +3771,8 @@ object CleanRoomMhtmlParser {
 class EbookTextSession(
     private val pfd: ParcelFileDescriptor,
     private val format: DetectedFormat,
-    private val extension: String
+    private val extension: String,
+    private val password: String? = null
 ) : DocumentSession {
     @Volatile private var isClosed = false
     private val pages = mutableListOf<String>()
@@ -4112,7 +3811,7 @@ class EbookTextSession(
                         DetectedFormat.PPTX -> DetectedFormat.PPT
                         else -> DetectedFormat.DOC
                     }
-                    val legacySession = CleanRoomLegacyAndIsoEngine.createSession(pfd.fileDescriptor, legacyFormat, extension)
+                    val legacySession = CleanRoomLegacyAndIsoEngine.createSession(pfd.fileDescriptor, legacyFormat, extension, password)
                     try {
                         parseError = legacySession.getLastError()
                         fullText = legacySession.getPageText(-1)
@@ -4120,8 +3819,28 @@ class EbookTextSession(
                         legacySession.close()
                     }
                 } else {
-                    val entries = extractSingleZipArchive(pfd.fileDescriptor, fileSize)
-                    fullText = parseZipTextMap(entries)
+                    val rawEntries = extractSingleZipArchive(pfd.fileDescriptor, fileSize)
+                    if (EpubDrmDetector.isDrmProtected(rawEntries)) {
+                        parseError = EpubDrmDetector.EPUB_DRM_ERROR
+                    } else {
+                        val manifestKey = rawEntries.keys.firstOrNull { it.equals("META-INF/manifest.xml", ignoreCase = true) }
+                        val entries = if (manifestKey != null && CleanRoomOfficeCrypto.isEncryptedOdfManifest(rawEntries[manifestKey])) {
+                            if (password.isNullOrEmpty()) {
+                                parseError = "PASSWORD_REQUIRED: ODF document is encrypted or password protected."
+                                emptyMap()
+                            } else {
+                                CleanRoomOfficeCrypto.decryptOdfEntries(rawEntries, password) ?: run {
+                                    parseError = "PASSWORD_REQUIRED: Incorrect password for ODF document."
+                                    emptyMap()
+                                }
+                            }
+                        } else {
+                            rawEntries
+                        }
+                        if (parseError == null) {
+                            fullText = parseZipTextMap(entries)
+                        }
+                    }
                 }
             } else {
                 val maxRead = if (fileSize > 0L) minOf(fileSize, 32 * 1024 * 1024L).toInt() else 16 * 1024 * 1024
@@ -4141,8 +3860,28 @@ class EbookTextSession(
                     fullText = result.htmlContent
                     embeddedImages.addAll(result.embeddedImages)
                 } else if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
-                    val entries = extractSingleZipArchive(pfd.fileDescriptor, fileSize)
-                    fullText = parseZipTextMap(entries)
+                    val rawEntries = extractSingleZipArchive(pfd.fileDescriptor, fileSize)
+                    if (EpubDrmDetector.isDrmProtected(rawEntries)) {
+                        parseError = EpubDrmDetector.EPUB_DRM_ERROR
+                    } else {
+                        val manifestKey = rawEntries.keys.firstOrNull { it.equals("META-INF/manifest.xml", ignoreCase = true) }
+                        val entries = if (manifestKey != null && CleanRoomOfficeCrypto.isEncryptedOdfManifest(rawEntries[manifestKey])) {
+                            if (password.isNullOrEmpty()) {
+                                parseError = "PASSWORD_REQUIRED: ODF document is encrypted or password protected."
+                                emptyMap()
+                            } else {
+                                CleanRoomOfficeCrypto.decryptOdfEntries(rawEntries, password) ?: run {
+                                    parseError = "PASSWORD_REQUIRED: Incorrect password for ODF document."
+                                    emptyMap()
+                                }
+                            }
+                        } else {
+                            rawEntries
+                        }
+                        if (parseError == null) {
+                            fullText = parseZipTextMap(entries)
+                        }
+                    }
                 } else {
                     val sb = StringBuilder()
                     extractXmlBytesWithCharset(
@@ -4290,7 +4029,7 @@ class EbookTextSession(
                 if (pos + 46 + nameLen > cdRead) break
 
                 if ((gpFlags and 0x01) != 0) {
-                    throw SecurityException("PASSWORD_REQUIRED: Архив или документ защищён паролем.")
+                    throw SecurityException("UNSUPPORTED_ENCRYPTION: ZIP-container password encryption is not supported.")
                 }
 
                 val nameBytes = ByteArray(nameLen)
@@ -4859,6 +4598,7 @@ class EbookTextSession(
             var activeHeadingLevel = 0
             var inListItem = false
             var listIndentLevel = 0
+            var paragraphStartLength = -1
             var inTableCell = false
             var firstCellInRow = true
 
@@ -4928,6 +4668,7 @@ class EbookTextSession(
                                     inListItem = true
                                 }
                                 "p" -> {
+                                    paragraphStartLength = out.length
                                     val pStyle = parser.getAttributeValue(null, "style-name")?.lowercase(Locale.ROOT) ?: ""
                                     if (pStyle.contains("heading") || pStyle.contains("title")) {
                                         if (out.isNotEmpty() && !out.endsWith("\n")) out.append('\n')
@@ -5180,10 +4921,14 @@ class EbookTextSession(
                                             out.append(' ')
                                         }
                                     } else {
+                                        val isEmptyParagraph = localName == "p" && paragraphStartLength == out.length
                                         if (out.isNotEmpty() && !out.endsWith("\n")) {
+                                            out.append('\n')
+                                        } else if (isEmptyParagraph && out.isNotEmpty() && !out.endsWith("\n\n")) {
                                             out.append('\n')
                                         }
                                     }
+                                    if (localName == "p") paragraphStartLength = -1
                                 }
                             }
                         }
@@ -5339,8 +5084,8 @@ class EbookTextSession(
             val imgMatch = INLINE_IMAGE_TAG_REGEX.find(pageText)
             val matchedImgIdx = imgMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
             val pageImg: Bitmap? = when {
+                isIllustrationOnly -> embeddedImages.getOrNull(cleanPageIndex)
                 matchedImgIdx != null -> embeddedImages.getOrNull(matchedImgIdx)
-                isIllustrationOnly && cleanPageIndex < embeddedImages.size -> embeddedImages[cleanPageIndex]
                 else -> null
             }
 
@@ -5597,275 +5342,29 @@ class EbookTextSession(
     }
 }
 
-class PalmDocMobiCleanRoomSession(
-    private val pfd: ParcelFileDescriptor,
-    private val extension: String
-) : DocumentSession {
-    @Volatile private var isClosed = false
-    @Volatile private var lastErrorMsg: String? = null
-    private val pages = mutableListOf<String>()
-    private val embeddedImages = mutableListOf<Bitmap>()
-    private var fullText = ""
+private val NAMED_HTML_ENTITIES = mapOf(
+    "nbsp" to " ", "quot" to "\"", "amp" to "&", "lt" to "<", "gt" to ">", "apos" to "'",
+    "mdash" to "—", "ndash" to "–", "laquo" to "«", "raquo" to "»", "hellip" to "…",
+    "lsquo" to "‘", "rsquo" to "’", "ldquo" to "“", "rdquo" to "”", "bdquo" to "„", "sbquo" to "‚",
+    "copy" to "©", "reg" to "®", "trade" to "™", "deg" to "°", "middot" to "·", "bull" to "•",
+    "shy" to "", "times" to "×", "euro" to "€", "pound" to "£", "sect" to "§", "para" to "¶",
+    "iexcl" to "¡", "iquest" to "¿", "thinsp" to " ", "ensp" to " ", "emsp" to " "
+)
 
-    private val textPaint = TextPaint().apply {
-        color = Color.rgb(30, 32, 38)
-        textSize = 24f
-        typeface = Typeface.SERIF
-        isAntiAlias = true
-    }
+private val HTML_ENTITY_REGEX = Regex("&(#[xX][0-9a-fA-F]{1,6}|#[0-9]{1,7}|[a-zA-Z][a-zA-Z0-9]{1,10});")
 
-    init {
-        try {
-            val fileSize = resolveStreamDescriptorSize(pfd.fileDescriptor)
-            val maxRead = minOf(if (fileSize > 0L) fileSize else 32L * 1024L * 1024L, 32L * 1024L * 1024L).toInt()
-            if (maxRead < 86) {
-                lastErrorMsg = "Файл $extension пуст или повреждён (< 86 байт)."
-            } else {
-                val buf = ByteBuffer.allocateDirect(maxRead)
-                var total = 0
-                while (buf.hasRemaining()) {
-                    val r = try { Os.pread(pfd.fileDescriptor, buf, total.toLong()) } catch (_: Throwable) { -1 }
-                    if (r <= 0) break
-                    total += r
-                }
-                buf.flip()
-                val bytes = ByteArray(total)
-                buf.get(bytes)
-                parsePalmDatabase(bytes)
-            }
-        } catch (e: Exception) {
-            lastErrorMsg = "Ошибка чтения контейнера PalmDB/MOBI: ${e.localizedMessage}"
-        }
-
-        if (fullText.isBlank() && embeddedImages.isEmpty() && lastErrorMsg == null) {
-            lastErrorMsg = "Контейнер электронной книги (.${extension.lowercase(Locale.ROOT)}) не содержит читаемого текста или повреждён."
-        }
-        EbookTextSession.paginateRichText(fullText, embeddedImages.size, pages)
-    }
-
-    private fun parsePalmDatabase(bytes: ByteArray) {
-        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-        val maxPossibleRecords = ((bytes.size - 78) / 8).coerceAtLeast(0)
-        val numRecords = (bb.getShort(76).toInt() and 0xFFFF).coerceIn(0, minOf(16384, maxPossibleRecords))
-        if (numRecords < 2 || 78 + numRecords * 8 > bytes.size) {
-            lastErrorMsg = "Некорректная таблица записей PalmDB ($numRecords записей)."
-            return
-        }
-
-        val recordOffsets = IntArray(numRecords)
-        for (i in 0 until numRecords) {
-            recordOffsets[i] = bb.getInt(78 + i * 8)
-        }
-
-        val rec0Start = recordOffsets[0]
-        val rec0End = if (numRecords > 1) recordOffsets[1] else bytes.size
-        if (rec0Start < 0 || rec0Start + 16 > bytes.size || rec0End <= rec0Start) {
-            lastErrorMsg = "Повреждён нулевой заголовок PalmDOC."
-            return
-        }
-
-        val compression = bb.getShort(rec0Start).toInt() and 0xFFFF
-        val textRecCount = (bb.getShort(rec0Start + 8).toInt() and 0xFFFF).coerceIn(1, numRecords - 1)
-        val encryptionType = bb.getShort(rec0Start + 12).toInt() and 0xFFFF
-
-        if (encryptionType != 0) {
-            lastErrorMsg = "Данная книга защищена криптографической DRM-защитой (Encryption Type $encryptionType). Обход технических средств защиты авторских прав (TPM/DRM) запрещён законом (DMCA § 1201)."
-            return
-        }
-
-        var charset: Charset = StandardCharsets.UTF_8
-        var extraDataFlags = 0
-        if (rec0Start + 24 <= rec0End &&
-            bytes[rec0Start + 16] == 'M'.code.toByte() &&
-            bytes[rec0Start + 17] == 'O'.code.toByte() &&
-            bytes[rec0Start + 18] == 'B'.code.toByte() &&
-            bytes[rec0Start + 19] == 'I'.code.toByte()
-        ) {
-            val mobiHeaderLen = bb.getInt(rec0Start + 20)
-            if (rec0Start + 28 <= rec0End) {
-                val codepage = bb.getInt(rec0Start + 28)
-                if (codepage == 1251) charset = PlainTextSession.CP1251
-                else if (codepage == 1252) charset = Charset.forName("windows-1252")
-            }
-            if (mobiHeaderLen >= 0xE4 && rec0Start + 16 + 0xE4 <= rec0End) {
-                extraDataFlags = bb.getShort(rec0Start + 16 + 0xE2).toInt() and 0xFFFF
-            }
-        }
-
-        fun trimTrailingMobiBytes(data: ByteArray, start: Int, end: Int, flags: Int): Int {
-            if (flags == 0 || end <= start) return end
-            var curEnd = end
-            var f = flags ushr 1
-            while (f != 0 && curEnd > start) {
-                if ((f and 1) != 0) {
-                    var sz = 0
-                    var shift = 0
-                    var p = curEnd - 1
-                    while (p >= start && shift < 28) {
-                        val b = data[p].toInt() and 0xFF
-                        sz = sz or ((b and 0x7F) shl shift)
-                        if ((b and 0x80) != 0) break
-                        shift += 7
-                        p--
-                    }
-                    if (sz in 1..(curEnd - start)) curEnd -= sz
-                }
-                f = f ushr 1
-            }
-            if ((flags and 1) != 0 && curEnd > start) {
-                val overlap = (data[curEnd - 1].toInt() and 0x03) + 1
-                if (overlap <= curEnd - start) curEnd -= overlap
-            }
-            return curEnd.coerceAtLeast(start)
-        }
-
-        if (compression == 17480) {
-            embeddedImages.addAll(EmbeddedImageScanner.scanBinaryForImages(bytes, 16))
-            fullText = CleanRoomDocSession.extractPrintableRunsFromBinary(bytes)
-            return
-        }
-
-        val rawTextOut = ByteArrayOutputStream(minOf(bytes.size * 2, 16 * 1024 * 1024))
-        for (recIdx in 1..textRecCount) {
-            if (recIdx >= numRecords || rawTextOut.size() >= 16 * 1024 * 1024) break
-            val start = recordOffsets[recIdx]
-            val rawEnd = if (recIdx + 1 < numRecords) recordOffsets[recIdx + 1] else bytes.size
-            val end = trimTrailingMobiBytes(bytes, start, rawEnd, extraDataFlags)
-            if (start < 0 || end <= start || end > bytes.size) continue
-
-            val recLen = end - start
-            when (compression) {
-                1 -> rawTextOut.write(bytes, start, recLen)
-                2 -> rawTextOut.write(decompressPalmDocLz77(bytes, start, end))
-                else -> rawTextOut.write(bytes, start, recLen)
-            }
-        }
-
-        val afterTextOffset = if (textRecCount + 1 < numRecords) recordOffsets[textRecCount + 1].coerceIn(0, bytes.size) else bytes.size
-        if (afterTextOffset < bytes.size) {
-            val imgSlice = bytes.copyOfRange(afterTextOffset, bytes.size)
-            embeddedImages.addAll(EmbeddedImageScanner.scanBinaryForImages(imgSlice, 16))
-        }
-
-        val rawHtmlOrMarkup = String(rawTextOut.toByteArray(), charset)
-        fullText = stripMobiHtmlToRichText(rawHtmlOrMarkup, embeddedImages.size)
-    }
-
-    private fun decompressPalmDocLz77(data: ByteArray, start: Int, end: Int): ByteArray {
-        val maxRecordOutputBytes = 65536
-        val bos = ByteArrayOutputStream(minOf((end - start) * 2, 8192))
-        var p = start
-        while (p < end && bos.size() < maxRecordOutputBytes) {
-            val b = data[p++].toInt() and 0xFF
-            when {
-                b == 0x00 -> bos.write(0)
-                b in 0x01..0x08 -> {
-                    val count = minOf(b, end - p, maxRecordOutputBytes - bos.size())
-                    if (count > 0) {
-                        bos.write(data, p, count)
-                        p += count
-                    }
-                }
-                b in 0x09..0x7F -> bos.write(b)
-                b in 0x80..0xBF -> {
-                    if (p >= end) break
-                    val b2 = data[p++].toInt() and 0xFF
-                    val pair = (b shl 8) or b2
-                    val distance = (pair ushr 3) and 0x07FF
-                    val length = (pair and 0x07) + 3
-                    if (distance > 0 && distance <= bos.size()) {
-                        val currentBytes = bos.toByteArray()
-                        var copyPos = currentBytes.size - distance
-                        val safeLen = minOf(length, maxRecordOutputBytes - bos.size())
-                        for (k in 0 until safeLen) {
-                            val copiedByte = if (copyPos < currentBytes.size) {
-                                currentBytes[copyPos].toInt()
-                            } else {
-                                bos.toByteArray()[copyPos].toInt()
-                            }
-                            bos.write(copiedByte)
-                            copyPos++
-                        }
-                    }
-                }
-                b in 0xC0..0xFF -> {
-                    bos.write(' '.code)
-                    if (bos.size() < maxRecordOutputBytes) {
-                        bos.write(b xor 0x80)
-                    }
-                }
-            }
-        }
-        return bos.toByteArray()
-    }
-
-    override val pageCount: Int get() = pages.size.coerceAtLeast(1)
-    override fun getLastError(): String? = lastErrorMsg
-
-    @Synchronized
-    override fun getPageText(pageIndex: Int): String {
-        if (pageIndex == -1) return fullText
-        val cleanIdx = (pageIndex and PAGE_INDEX_MASK).coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-        return pages.getOrElse(cleanIdx) { "" }
-    }
-
-    @Synchronized
-    override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
-        if (isClosed) return
-        val isLightTheme = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0
-        if (lastErrorMsg != null) {
-            bitmap.eraseColor(if (isLightTheme) Color.rgb(250, 248, 242) else Color.rgb(0x14, 0x15, 0x1C))
-            return
-        }
-        val isIllustrationOnly = (pageIndex and ILLUSTRATION_ONLY_PAGE_FLAG) != 0
-        val cleanIdx = (pageIndex and PAGE_INDEX_MASK).coerceIn(0, (pageCount - 1).coerceAtLeast(0))
-        val effectivePageIndex = if (isIllustrationOnly) {
-            (pageIndex and LIGHT_THEME_PAGE_FLAG.inv())
-        } else {
-            cleanIdx
-        }
-        val zoom = (zoomPermille / 1000f).coerceIn(0.5f, 5f)
-        val canvas = Canvas(bitmap)
-
-        EbookTextSession.renderRichDocumentPageToCanvas(
-            canvas = canvas,
-            bitmapWidth = bitmap.width,
-            bitmapHeight = bitmap.height,
-            pageIndex = effectivePageIndex,
-            tileX = tileX,
-            tileY = tileY,
-            zoom = zoom,
-            isLightTheme = isLightTheme,
-            pageText = getPageText(cleanIdx),
-            embeddedImages = embeddedImages,
-            baseTextPaint = textPaint
-        )
-    }
-
-    override fun renderTile(key: PackedTileKey, bitmap: Bitmap) {
-        renderTile(key.zoom, key.x, key.y, 1000, bitmap)
-    }
-
-    @Synchronized
-    override fun search(query: String, startPage: Int): Long {
-        if (query.isBlank() || isClosed) return -1L
-        val start = startPage.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
-        for (i in start until pages.size) if (pages[i].contains(query, true)) return i.toLong()
-        for (i in 0 until start) if (pages[i].contains(query, true)) return i.toLong()
-        return -1L
-    }
-
-    @Synchronized
-    override fun close() {
-        if (isClosed) return
-        isClosed = true
-        embeddedImages.forEach { if (!it.isRecycled) it.recycle() }
-        embeddedImages.clear()
-        try { pfd.close() } catch (_: Exception) {}
+internal fun decodeHtmlEntities(text: String): String = HTML_ENTITY_REGEX.replace(text) { m ->
+    val body = m.groupValues[1]
+    when {
+        body.startsWith("#x") || body.startsWith("#X") -> body.substring(2).toIntOrNull(16)
+            ?.takeIf { Character.isValidCodePoint(it) }?.let { String(Character.toChars(it)) } ?: m.value
+        body.startsWith("#") -> body.substring(1).toIntOrNull()
+            ?.takeIf { Character.isValidCodePoint(it) }?.let { String(Character.toChars(it)) } ?: m.value
+        else -> NAMED_HTML_ENTITIES[body] ?: NAMED_HTML_ENTITIES[body.lowercase()] ?: m.value
     }
 }
 
-internal fun stripMobiHtmlToRichText(html: String, imageCount: Int): String {
+fun stripMobiHtmlToRichText(html: String, imageCount: Int): String {
     val withBreaks = html
         .replace(Regex("<head[\\s\\S]*?</head>", RegexOption.IGNORE_CASE), "")
         .replace(Regex("<style[\\s\\S]*?</style>", RegexOption.IGNORE_CASE), "")
@@ -5878,16 +5377,8 @@ internal fun stripMobiHtmlToRichText(html: String, imageCount: Int): String {
         .replace(Regex("</(b|strong)>", RegexOption.IGNORE_CASE), "</b>")
         .replace(Regex("<(i|em)[^>]*>", RegexOption.IGNORE_CASE), "<i>")
         .replace(Regex("</(i|em)>", RegexOption.IGNORE_CASE), "</i>")
-        .replace(Regex("<[^>]+>"), "")
-        .replace("&nbsp;", " ")
-        .replace("&quot;", "\"")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&mdash;", "—")
-        .replace("&ndash;", "–")
-        .replace("&laquo;", "«")
-        .replace("&raquo;", "»")
+        .replace(Regex("<(?!/?(?:h1|h2|b|i)>)[^>]+>"), "")
+        .let { decodeHtmlEntities(it) }
 
     val sb = StringBuilder()
     if (imageCount > 0) {
@@ -5913,8 +5404,8 @@ class KindleDrmNoticeSession(
     override val pageCount: Int = 1
 
     override fun getLastError(): String =
-        "Данная книга (${format.name}) защищена криптографической DRM-защитой Amazon. " +
-                "Обход технических средств защиты авторских прав (TPM/DRM) запрещён законом (DMCA § 1201 / Директива ЕС 2001/29/EC)."
+        "DRM_PROTECTED: This Kindle e-book (${format.name}) is protected by cryptographic DRM. " +
+                "Circumventing DRM protection is prohibited under DMCA § 1201 and the EU InfoSoc Directive."
 
     override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
         if (isClosed) return
@@ -5937,7 +5428,6 @@ class PlainTextSession(private val pfd: ParcelFileDescriptor) : DocumentSession 
 
     private var detectedCharset: Charset = StandardCharsets.UTF_8
     private var bomSkipBytes: Int = 0
-    private var decompiledBinaryXmlText: String? = null
 
     override val pageCount: Int
 
@@ -5958,33 +5448,16 @@ class PlainTextSession(private val pfd: ParcelFileDescriptor) : DocumentSession 
                 val arr = ByteArray(r)
                 sampleBuf.flip()
                 sampleBuf.get(arr)
-                if (AndroidBinaryXmlDecompiler.isBinaryXmlOrArsc(arr, r)) {
-                    val fullAxmLen = minOf(totalSize, 16L * 1024L * 1024L).toInt()
-                    val fullAxmBuf = ByteBuffer.allocateDirect(fullAxmLen)
-                    val gotAxm = source.readAt(0L, fullAxmBuf)
-                    if (gotAxm > 0) {
-                        fullAxmBuf.flip()
-                        val axmBytes = ByteArray(gotAxm)
-                        fullAxmBuf.get(axmBytes)
-                        decompiledBinaryXmlText = AndroidBinaryXmlDecompiler.decompile(axmBytes)
-                    }
-                }
-                if (decompiledBinaryXmlText == null) {
-                    try {
-                        val result = detectCharsetAndValidateText(arr, r)
-                        detectedCharset = result.first
-                        bomSkipBytes = result.second
-                    } catch (e: IllegalArgumentException) {
-                        lastErrorMsg = e.message
-                    }
+                try {
+                    val result = detectCharsetAndValidateText(arr, r)
+                    detectedCharset = result.first
+                    bomSkipBytes = result.second
+                } catch (e: IllegalArgumentException) {
+                    lastErrorMsg = e.message
                 }
             }
         }
-        val effectiveSize = if (decompiledBinaryXmlText != null) {
-            decompiledBinaryXmlText!!.length.toLong()
-        } else {
-            (totalSize - bomSkipBytes).coerceAtLeast(0L)
-        }
+        val effectiveSize = (totalSize - bomSkipBytes).coerceAtLeast(0L)
         pageCount = ((effectiveSize + chunkSize - 1) / chunkSize).toInt().coerceAtLeast(1)
     }
 
@@ -6133,13 +5606,6 @@ class PlainTextSession(private val pfd: ParcelFileDescriptor) : DocumentSession 
 
     override fun getPageText(pageIndex: Int): String {
         if (isClosed || lastErrorMsg != null) return ""
-        decompiledBinaryXmlText?.let { decompiled ->
-            if (pageIndex == -1) return decompiled
-            val cleanIdx = pageIndex and PAGE_INDEX_MASK
-            val start = (cleanIdx * chunkSize).toInt().coerceAtMost(decompiled.length)
-            val end = minOf(decompiled.length, start + chunkSize.toInt())
-            return if (end > start) decompiled.substring(start, end) else ""
-        }
 
         if (pageIndex == -1) {
             val availBytes = (source.size - bomSkipBytes).coerceAtLeast(0L)

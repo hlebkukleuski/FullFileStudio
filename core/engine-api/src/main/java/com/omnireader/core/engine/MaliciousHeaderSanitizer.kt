@@ -42,7 +42,7 @@ object MaliciousHeaderSanitizer {
         val limit = buffer.limit()
         if (limit <= 0) return SanitizationReport(isSafe = true)
 
-        if (format == DetectedFormat.ELF || format == DetectedFormat.DEX) {
+        if (format == DetectedFormat.ELF || format == DetectedFormat.DEX || format == DetectedFormat.APK) {
             return SanitizationReport(
                 isSafe = false,
                 threatDescription = "Executable machine code ($format) detected. Direct execution is blocked."

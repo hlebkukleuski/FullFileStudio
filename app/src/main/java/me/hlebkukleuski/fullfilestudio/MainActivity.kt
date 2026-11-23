@@ -69,9 +69,12 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -96,7 +99,6 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.google.android.play.core.splitcompat.SplitCompat
 import com.omnireader.core.engine.DetectedFormat
 import com.omnireader.core.engine.DocumentSession
 import com.omnireader.core.engine.FileSignatureDetector
@@ -105,9 +107,11 @@ import com.omnireader.core.engine.ISessionStateCallback
 import com.omnireader.core.engine.LegalLicensePolicy
 import com.omnireader.core.engine.MaliciousHeaderSanitizer
 import com.omnireader.core.engine.OmniServerEndpoints
+import com.omnireader.core.engine.impl.DocumentRendererEngineImpl
 import com.omnireader.core.engine.PackedTileKey
 import com.omnireader.core.engine.StreamingCacheUtils
 import com.omnireader.core.engine.impl.UniversalHexInspectorImpl
+import com.omnireader.core.engine.impl.MediaPlaybackSession
 import com.omnireader.core.engine.impl.ZeroCopyMediaEngineImpl
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CancellationException
@@ -128,7 +132,6 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import me.hlebkukleuski.fullfilestudio.bootstrap.FirstLaunchEngineBootstrapper
-import me.hlebkukleuski.fullfilestudio.bootstrap.PlayFeatureBundle
 import me.hlebkukleuski.fullfilestudio.service.IsolatedRenderService
 import me.hlebkukleuski.fullfilestudio.ui.theme.AppFrameRateMode
 import me.hlebkukleuski.fullfilestudio.ui.screens.ArchiveView
@@ -178,7 +181,6 @@ internal data class ReaderUiState(
     val archiveEntries: List<String> = emptyList(),
     val activeSessionId: Int = -1,
     val hasSessionHistory: Boolean = false,
-    val pendingPluginBundle: PlayFeatureBundle? = null,
     val pendingUri: Uri? = null,
     val lastOpenedUri: Uri? = null,
     val structuredError: StructuredUiError? = null,
@@ -247,6 +249,101 @@ fun EnterpriseErrorDialog(
                     color = palette.primaryText,
                     fontSize = 14.sp,
                     lineHeight = 20.sp
+                )
+            }
+        },
+        containerColor = palette.surface,
+        shape = RoundedCornerShape(24.dp)
+    )
+}
+
+@Composable
+fun PasswordUnlockDialog(
+    badgeText: String,
+    badgeColor: Color,
+    titleText: String,
+    descriptionText: String,
+    placeholderText: String,
+    unlockButtonText: String,
+    hexButtonText: String?,
+    closeButtonText: String,
+    onUnlock: (String) -> Unit,
+    onHexClick: (() -> Unit)?,
+    onDismissRequest: () -> Unit
+) {
+    val palette = LocalAppPalette.current
+    var password by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismissRequest,
+        confirmButton = {
+            Button(
+                onClick = { if (password.isNotEmpty()) onUnlock(password) },
+                enabled = password.isNotEmpty(),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = badgeColor,
+                    contentColor = Color.Black
+                )
+            ) {
+                Text(unlockButtonText, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (hexButtonText != null && onHexClick != null) {
+                    TextButton(onClick = onHexClick) {
+                        Text(hexButtonText, color = palette.secondaryText)
+                    }
+                }
+                TextButton(onClick = onDismissRequest) {
+                    Text(closeButtonText, color = palette.secondaryText)
+                }
+            }
+        },
+        title = {
+            Column {
+                Box(
+                    modifier = Modifier
+                        .background(badgeColor.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 4.dp)
+                ) {
+                    Text(badgeText, color = badgeColor, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(titleText, color = palette.primaryText, fontWeight = FontWeight.Bold, fontSize = 20.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(palette.surfaceElevated, RoundedCornerShape(12.dp))
+                        .border(1.dp, palette.border, RoundedCornerShape(12.dp))
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        text = descriptionText,
+                        color = palette.primaryText,
+                        fontSize = 14.sp,
+                        lineHeight = 20.sp
+                    )
+                }
+                OutlinedTextField(
+                    value = password,
+                    onValueChange = { password = it },
+                    placeholder = { Text(placeholderText, color = palette.secondaryText) },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedTextColor = palette.primaryText,
+                        unfocusedTextColor = palette.primaryText,
+                        focusedBorderColor = badgeColor,
+                        unfocusedBorderColor = palette.border,
+                        cursorColor = badgeColor
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
                 )
             }
         },
@@ -441,26 +538,11 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
     }
 
     fun restoreSavedPendingState(
-        savedBundleId: String?,
-        savedPendingUri: Uri?,
         savedLastUri: Uri?
     ) {
-        if (savedBundleId != null && savedPendingUri != null) {
-            val bundle = bootstrapper.playPluginManager.availableBundles.firstOrNull { it.id == savedBundleId }
-            _uiState.update {
-                it.copy(
-                    pendingPluginBundle = bundle,
-                    pendingUri = savedPendingUri,
-                    lastOpenedUri = savedLastUri ?: savedPendingUri
-                )
-            }
-        } else if (savedLastUri != null && savedLastUri.scheme != "virtual" && _uiState.value.currentSession == null) {
+        if (savedLastUri != null && savedLastUri.scheme != "virtual" && _uiState.value.currentSession == null) {
             openUriWithSafeFallback(savedLastUri)
         }
-    }
-
-    fun dismissPendingPluginPrompt() {
-        _uiState.update { it.copy(pendingPluginBundle = null, pendingUri = null) }
     }
 
     fun dismissStructuredError() {
@@ -526,6 +608,16 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
 
         if (uri.scheme == "file" && !uri.path.isNullOrEmpty()) {
             val directFile = File(uri.path!!)
+            val canonical = try { directFile.canonicalPath } catch (_: Throwable) { directFile.absolutePath }
+            val appDataDir = try { File(appContext.applicationInfo.dataDir).canonicalPath } catch (_: Throwable) { appContext.applicationInfo.dataDir }
+            if (canonical.startsWith("$appDataDir/shared_prefs") ||
+                canonical.startsWith("$appDataDir/databases") ||
+                canonical.startsWith("$appDataDir/files") ||
+                canonical.startsWith("/data/data/") ||
+                canonical.startsWith("/data/user/")
+            ) {
+                throw SecurityException("Access to internal application storage via file:// URI is not permitted.")
+            }
             if (directFile.exists() && directFile.canRead()) {
                 try {
                     pfd = ParcelFileDescriptor.open(directFile, ParcelFileDescriptor.MODE_READ_ONLY)
@@ -755,7 +847,7 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
             DetectedFormat.USDZ -> if (cleanExt in setOf("usd", "usda", "usdc")) cleanExt else "usdz"
             DetectedFormat.STL -> if (cleanExt in setOf(
                     "ply", "off", "3ds", "gltf", "glb", "blend", "usdz", "usd", "usda", "usdc",
-                    "fbx", "3mf", "dae", "step", "stp", "iges", "igs"
+                    "fbx", "3mf", "dae", "zae", "step", "stp", "iges", "igs"
                 )
             ) cleanExt else "stl"
             DetectedFormat.OBJ -> "obj"
@@ -766,6 +858,7 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
             DetectedFormat.MDB -> "mdb"
             DetectedFormat.DBF -> "dbf"
             DetectedFormat.PARQUET -> if (cleanExt in setOf("duckdb", "realm", "bson", "jsonl", "ndjson")) cleanExt else "parquet"
+            DetectedFormat.MHTML -> if (cleanExt == "mht") "mht" else "mhtml"
             DetectedFormat.ONE -> "one"
             DetectedFormat.AZW3 -> "azw3"
             DetectedFormat.MOBI -> "mobi"
@@ -793,6 +886,7 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                 "fbz" -> "fb2"
                 "usdz" -> "usdz"
                 "3mf" -> "3mf"
+                "zae" -> "zae"
                 "apk", "jar", "docx", "xlsx", "pptx", "odt", "ods", "odp", "epub", "fb2" -> cleanExt
                 else -> "zip"
             }
@@ -837,16 +931,27 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
             DetectedFormat.AVIF,
             DetectedFormat.MP4,
             DetectedFormat.MP3,
+            DetectedFormat.MHTML,
             DetectedFormat.PLAINTEXT
         ) || cleanExt in MainActivity.CORE_TEXT_AND_BINARY_EXTENSIONS
     }
 
     private fun classifyError(rawMessage: String, hasReadableDescriptor: Boolean = true): StructuredUiError {
         return when {
+            rawMessage.startsWith("DRM_PROTECTED") -> StructuredUiError(
+                category = UiErrorCategory.CLOSED_LICENSE,
+                message = rawMessage.removePrefix("DRM_PROTECTED:").trim(),
+                allowHexFallback = false
+            )
+            rawMessage.startsWith("UNSUPPORTED_ENCRYPTION") -> StructuredUiError(
+                category = UiErrorCategory.ACCESS_OR_SECURITY,
+                message = rawMessage.removePrefix("UNSUPPORTED_ENCRYPTION:").trim(),
+                allowHexFallback = false
+            )
             rawMessage.startsWith("PASSWORD_REQUIRED") -> StructuredUiError(
                 category = UiErrorCategory.PASSWORD_REQUIRED,
                 message = rawMessage.removePrefix("PASSWORD_REQUIRED:").trim(),
-                allowHexFallback = hasReadableDescriptor
+                allowHexFallback = false
             )
             rawMessage.contains("права", ignoreCase = true) ||
                     rawMessage.contains("permission", ignoreCase = true) ||
@@ -863,7 +968,7 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
         }
     }
 
-    fun openUriWithSafeFallback(uri: Uri) {
+    fun openUriWithSafeFallback(uri: Uri, password: String? = null) {
         openJob?.cancel()
         val prevSession = _uiState.value.currentSession
         closeSessionAsync(prevSession)
@@ -938,13 +1043,14 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                         isDrmEncrypted = (format == DetectedFormat.KINDLE_DRM || format == DetectedFormat.KFX)
                     )
                     if (!legalVerdict.isLegallyPermitted) {
+                        replaceVirtualHexPfd(null)
                         withContext(Dispatchers.Main) {
                             _uiState.update { state ->
                                 state.copy(
                                     structuredError = StructuredUiError(
                                         category = UiErrorCategory.CLOSED_LICENSE,
                                         message = legalVerdict.explanation,
-                                        allowHexFallback = true
+                                        allowHexFallback = false
                                     )
                                 )
                             }
@@ -955,26 +1061,22 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                     val securityReport = MaliciousHeaderSanitizer.inspect(header, format)
                     if (!securityReport.isSafe) {
                         val str = currentStrings()
+                        val threat = securityReport.threatDescription ?: str.errorSuspiciousHeader
+                        val isExecutableBinary = format == DetectedFormat.ELF || format == DetectedFormat.DEX || format == DetectedFormat.APK ||
+                            threat.contains("Executable", ignoreCase = true) || threat.contains("PE/Mach-O", ignoreCase = true)
+                        if (isExecutableBinary) {
+                            replaceVirtualHexPfd(null)
+                        }
                         withContext(Dispatchers.Main) {
                             _uiState.update { state ->
                                 state.copy(
                                     structuredError = StructuredUiError(
                                         category = UiErrorCategory.ACCESS_OR_SECURITY,
-                                        message = securityReport.threatDescription ?: str.errorSuspiciousHeader,
-                                        allowHexFallback = true
+                                        message = threat,
+                                        allowHexFallback = !isExecutableBinary
                                     )
                                 )
                             }
-                        }
-                        return@launch
-                    }
-
-                    val bundle = bootstrapper.playPluginManager.getBundleForFormat(format, effectiveExt)
-                    val isCoreBuiltIn = isBuiltInCoreFormat(format, effectiveExt)
-
-                    if (bundle != null && !isCoreBuiltIn && !bootstrapper.playPluginManager.isModuleDownloaded(bundle.id)) {
-                        withContext(Dispatchers.Main) {
-                            _uiState.update { state -> state.copy(pendingPluginBundle = bundle) }
                         }
                         return@launch
                     }
@@ -989,17 +1091,27 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                             format in setOf(DetectedFormat.MP4, DetectedFormat.MP3) ||
                                     mediaEngine.canHandle(sig, effectiveExt)
                             )
+                    val isHostDecodedImage = format in setOf(DetectedFormat.HEIC, DetectedFormat.AVIF) ||
+                            effectiveExt in setOf("heic", "heif", "hif", "avif", "avifs")
 
                     var isRealArchive = false
                     var newEntries: List<String> = emptyList()
 
-                    val session: DocumentSession? = if (isMedia) {
-                        val dupPfd = ParcelFileDescriptor.dup(pfd.fileDescriptor)
-                        val mediaSession = mediaEngine.createSession(dupPfd.fileDescriptor)
+                    val session: DocumentSession? = if (isMedia || isHostDecodedImage) {
+                        val reused = if (isMedia) me.hlebkukleuski.fullfilestudio.service.MediaPlaybackController.sessionForUri(uri.toString()) else null
+                        val dupPfd = if (reused == null) ParcelFileDescriptor.dup(pfd.fileDescriptor) else null
+                        val mediaSession = reused ?: if (isHostDecodedImage) {
+                            DocumentRendererEngineImpl().createSessionForFormat(dupPfd!!.fileDescriptor, format, effectiveExt)
+                        } else {
+                            mediaEngine.createSession(dupPfd!!.fileDescriptor).also { (it as? MediaPlaybackSession)?.sourceUri = uri.toString() }
+                        }
                         object : DocumentSession by mediaSession {
                             override fun close() {
-                                try { mediaSession.close() } finally {
-                                    try { dupPfd.close() } catch (_: Exception) {}
+                                try {
+                                    val media = mediaSession as? MediaPlaybackSession
+                                    if (media == null || !me.hlebkukleuski.fullfilestudio.service.MediaPlaybackController.releaseFromUi(media)) mediaSession.close()
+                                } finally {
+                                    try { dupPfd?.close() } catch (_: Exception) {}
                                 }
                             }
                         }
@@ -1009,7 +1121,11 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                             ?: throw IllegalStateException(str.errorServiceTimeout)
 
                         val detachedDupPfd = ParcelFileDescriptor.dup(pfd.fileDescriptor)
-                        val sessionId = svc.openSession(detachedDupPfd, effectiveExt)
+                        val sessionId = if (!password.isNullOrEmpty()) {
+                            svc.openSessionWithPassword(detachedDupPfd, effectiveExt, password)
+                        } else {
+                            svc.openSession(detachedDupPfd, effectiveExt)
+                        }
 
                         if (sessionId >= 0) {
                             try { detachedDupPfd.close() } catch (_: Exception) {}
@@ -1030,7 +1146,8 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                                 uri = uri,
                                 extension = effectiveExt,
                                 is3dContent = is3d,
-                                hostPfd = hostDupPfd
+                                hostPfd = hostDupPfd,
+                                sessionPassword = password
                             )
                         } else {
                             try { detachedDupPfd.close() } catch (_: Exception) {}
@@ -1045,6 +1162,10 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                         val immediateError = session.getLastError()
                         withContext(Dispatchers.Main) {
                             if (immediateError != null && (!isRealArchive || newEntries.isEmpty())) {
+                                val classified = classifyError(immediateError, hasReadableDescriptor = true)
+                                if (!classified.allowHexFallback) {
+                                    replaceVirtualHexPfd(null)
+                                }
                                 closeSessionAsync(session)
                                 createdSession = null
                                 openedRemoteSessionId = -1
@@ -1052,7 +1173,7 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                                     state.copy(
                                         isArchiveSession = false,
                                         archiveEntries = emptyList(),
-                                        structuredError = classifyError(immediateError, hasReadableDescriptor = true)
+                                        structuredError = classified
                                     )
                                 }
                             } else {
@@ -1125,6 +1246,38 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
         return entryName.replace(MainActivity.ARCHIVE_SIZE_SUFFIX_REGEX, "").trim()
     }
 
+    private fun resolveArchiveCompanions(svc: IIsolatedEngineService, archiveId: Int, entry: String, proxy: DocumentSession) {
+        val entries = try { svc.getArchiveEntries(archiveId)?.map { extractCleanArchiveEntryName(it) } } catch (_: Throwable) { null } ?: return
+        val byPath = entries.associateBy { it.trimStart('/').lowercase(Locale.ROOT) }
+        val byBase = entries.groupBy { it.substringAfterLast('/').lowercase(Locale.ROOT) }
+        val dir = entry.substringBeforeLast('/', "")
+        fun join(ref: String): String {
+            val parts = ArrayList<String>()
+            val combined = if (ref.startsWith("/")) ref else if (dir.isEmpty()) ref else "$dir/$ref"
+            for (seg in combined.replace('\\', '/').split('/')) {
+                when (seg) {
+                    "", "." -> {}
+                    ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.size - 1)
+                    else -> parts.add(seg)
+                }
+            }
+            return parts.joinToString("/").lowercase(Locale.ROOT)
+        }
+        val tried = HashSet<String>()
+        repeat(8) {
+            val missing = try { proxy.getMissingResources() } catch (_: Throwable) { emptyList() }
+            var provided = false
+            for (ref in missing) {
+                if (!tried.add(ref)) continue
+                val hit = byPath[join(ref)] ?: byBase[ref.substringAfterLast('/').lowercase(Locale.ROOT)]?.firstOrNull() ?: continue
+                val vfd = try { svc.openVirtualFile(archiveId, hit) } catch (_: Throwable) { null } ?: continue
+                vfd.use { if (proxy.provideResource(ref, it.fileDescriptor)) provided = true }
+            }
+            if (!provided) return
+            proxy.applyProvidedResources()
+        }
+    }
+
     fun openVirtualFileFromArchive(entryName: String) {
         val parentSessionId = _uiState.value.activeSessionId
         if (parentSessionId < 0) return
@@ -1141,14 +1294,19 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
 
                 if (vFd == null) {
                     val parentErr = try { svc.getLastError(parentSessionId) } catch (_: Throwable) { null }
+                    val classified = if (!parentErr.isNullOrBlank()) {
+                        classifyError(parentErr, hasReadableDescriptor = false)
+                    } else {
+                        StructuredUiError(
+                            category = UiErrorCategory.FORMAT_STRUCTURE,
+                            message = "${str.errorArchiveExtractFailed}: «$cleanName».",
+                            allowHexFallback = false
+                        )
+                    }
                     withContext(Dispatchers.Main) {
                         _uiState.update { state ->
                             state.copy(
-                                structuredError = StructuredUiError(
-                                    category = UiErrorCategory.FORMAT_STRUCTURE,
-                                    message = parentErr ?: "${str.errorArchiveExtractFailed}: «$cleanName».",
-                                    allowHexFallback = false
-                                )
+                                structuredError = classified
                             )
                         }
                     }
@@ -1182,6 +1340,7 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                         isDrmEncrypted = (format == DetectedFormat.KINDLE_DRM || format == DetectedFormat.KFX)
                     )
                     if (!legalVerdict.isLegallyPermitted) {
+                        replaceVirtualHexPfd(null)
                         withContext(Dispatchers.Main) {
                             _uiState.update { state ->
                                 state.copy(
@@ -1189,7 +1348,7 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                                     structuredError = StructuredUiError(
                                         category = UiErrorCategory.CLOSED_LICENSE,
                                         message = legalVerdict.explanation,
-                                        allowHexFallback = hexBackupPfd != null
+                                        allowHexFallback = false
                                     )
                                 )
                             }
@@ -1199,30 +1358,21 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
 
                     val securityReport = MaliciousHeaderSanitizer.inspect(header, format)
                     if (!securityReport.isSafe) {
+                        val threat = securityReport.threatDescription ?: str.errorSuspiciousHeader
+                        val isExecutableBinary = format == DetectedFormat.ELF || format == DetectedFormat.DEX || format == DetectedFormat.APK ||
+                            threat.contains("Executable", ignoreCase = true) || threat.contains("PE/Mach-O", ignoreCase = true)
+                        if (isExecutableBinary) {
+                            replaceVirtualHexPfd(null)
+                        }
                         withContext(Dispatchers.Main) {
                             _uiState.update { state ->
                                 state.copy(
                                     pendingUri = virtualUri,
                                     structuredError = StructuredUiError(
                                         category = UiErrorCategory.ACCESS_OR_SECURITY,
-                                        message = securityReport.threatDescription ?: str.errorSuspiciousHeader,
-                                        allowHexFallback = hexBackupPfd != null
+                                        message = threat,
+                                        allowHexFallback = !isExecutableBinary && hexBackupPfd != null
                                     )
-                                )
-                            }
-                        }
-                        return@launch
-                    }
-
-                    val bundle = bootstrapper.playPluginManager.getBundleForFormat(format, effectiveExt)
-                    val isCoreBuiltIn = isBuiltInCoreFormat(format, effectiveExt)
-
-                    if (bundle != null && !isCoreBuiltIn && !bootstrapper.playPluginManager.isModuleDownloaded(bundle.id)) {
-                        withContext(Dispatchers.Main) {
-                            _uiState.update { state ->
-                                state.copy(
-                                    pendingUri = virtualUri,
-                                    pendingPluginBundle = bundle
                                 )
                             }
                         }
@@ -1239,39 +1389,64 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                             format in setOf(DetectedFormat.MP4, DetectedFormat.MP3) ||
                                     mediaEngine.canHandle(sig, effectiveExt)
                             )
+                    val isHostDecodedImage = format in setOf(DetectedFormat.HEIC, DetectedFormat.AVIF) ||
+                            effectiveExt in setOf("heic", "heif", "hif", "avif", "avifs")
 
-                    if (isMedia) {
+                    if (isMedia || isHostDecodedImage) {
                         val dupPfd = ParcelFileDescriptor.dup(pfd.fileDescriptor)
-                        val rawMediaSession = mediaEngine.createSession(dupPfd.fileDescriptor)
+                        val rawMediaSession = if (isHostDecodedImage) {
+                            DocumentRendererEngineImpl().createSessionForFormat(dupPfd.fileDescriptor, format, effectiveExt)
+                        } else {
+                            mediaEngine.createSession(dupPfd.fileDescriptor)
+                        }
                         val mediaSession = object : DocumentSession by rawMediaSession {
                             override fun close() {
-                                try { rawMediaSession.close() } finally {
+                                try {
+                                    val media = rawMediaSession as? MediaPlaybackSession
+                                    if (media == null || !me.hlebkukleuski.fullfilestudio.service.MediaPlaybackController.releaseFromUi(media)) rawMediaSession.close()
+                                } finally {
                                     try { dupPfd.close() } catch (_: Exception) {}
                                 }
                             }
                         }
                         createdSession = mediaSession
+                        val mediaErr = mediaSession.getLastError()
                         coroutineContext.ensureActive()
                         withContext(Dispatchers.Main) {
-                            val snap = _uiState.value
-                            val curr = snap.currentSession
-                            if (curr != null) {
-                                sessionHistoryStack.add(
-                                    SessionStateFrame(curr, snap.isArchiveSession, snap.archiveEntries, parentSessionId)
-                                )
+                            if (!mediaErr.isNullOrBlank()) {
+                                val classified = classifyError(mediaErr, hasReadableDescriptor = hexBackupPfd != null)
+                                if (!classified.allowHexFallback) {
+                                    replaceVirtualHexPfd(null)
+                                }
+                                closeSessionAsync(mediaSession)
+                                createdSession = null
+                                _uiState.update { state ->
+                                    state.copy(
+                                        pendingUri = virtualUri,
+                                        structuredError = classified
+                                    )
+                                }
+                            } else {
+                                val snap = _uiState.value
+                                val curr = snap.currentSession
+                                if (curr != null) {
+                                    sessionHistoryStack.add(
+                                        SessionStateFrame(curr, snap.isArchiveSession, snap.archiveEntries, parentSessionId)
+                                    )
+                                }
+                                _uiState.update { state ->
+                                    state.copy(
+                                        lastOpenedUri = virtualUri,
+                                        pendingUri = null,
+                                        isArchiveSession = false,
+                                        archiveEntries = emptyList(),
+                                        activeSessionId = -1,
+                                        currentSession = mediaSession,
+                                        hasSessionHistory = sessionHistoryStack.isNotEmpty()
+                                    )
+                                }
+                                createdSession = null
                             }
-                            _uiState.update { state ->
-                                state.copy(
-                                    lastOpenedUri = virtualUri,
-                                    pendingUri = null,
-                                    isArchiveSession = false,
-                                    archiveEntries = emptyList(),
-                                    activeSessionId = -1,
-                                    currentSession = mediaSession,
-                                    hasSessionHistory = sessionHistoryStack.isNotEmpty()
-                                )
-                            }
-                            createdSession = null
                         }
                     } else {
                         val detachedDupPfd = ParcelFileDescriptor.dup(pfd.fileDescriptor)
@@ -1297,18 +1472,23 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                                 hostPfd = hostDupPfd
                             )
                             createdSession = proxy
+                            if (is3d) resolveArchiveCompanions(svc, parentSessionId, cleanName, proxy)
                             val err = proxy.getLastError()
                             coroutineContext.ensureActive()
 
                             withContext(Dispatchers.Main) {
                                 if (err != null && (!arcRes || newEntries.isEmpty())) {
+                                    val classified = classifyError(err, hasReadableDescriptor = hexBackupPfd != null)
+                                    if (!classified.allowHexFallback) {
+                                        replaceVirtualHexPfd(null)
+                                    }
                                     closeSessionAsync(proxy)
                                     createdSession = null
                                     openedRemoteSessionId = -1
                                     _uiState.update { state ->
                                         state.copy(
                                             pendingUri = virtualUri,
-                                            structuredError = classifyError(err, hasReadableDescriptor = hexBackupPfd != null)
+                                            structuredError = classified
                                         )
                                     }
                                 } else {
@@ -1367,14 +1547,20 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
                     }
                 }
                 val str = currentStrings()
+                val rawErr = e.message ?: e.localizedMessage ?: ""
+                val classified = if (rawErr.startsWith("DRM_PROTECTED") ||
+                    rawErr.startsWith("UNSUPPORTED_ENCRYPTION") ||
+                    rawErr.startsWith("PASSWORD_REQUIRED")
+                ) {
+                    replaceVirtualHexPfd(null)
+                    classifyError(rawErr, hasReadableDescriptor = false)
+                } else {
+                    classifyError("${str.errorArchiveReadPrefix}: $rawErr", hasReadableDescriptor = lastVirtualHexPfd != null)
+                }
                 withContext(Dispatchers.Main) {
                     _uiState.update { state ->
                         state.copy(
-                            structuredError = StructuredUiError(
-                                category = UiErrorCategory.FORMAT_STRUCTURE,
-                                message = "${str.errorArchiveReadPrefix}: ${e.localizedMessage ?: ""}",
-                                allowHexFallback = lastVirtualHexPfd != null
-                            )
+                            structuredError = classified
                         )
                     }
                 }
@@ -1520,209 +1706,10 @@ internal class MainReaderViewModel(application: Application) : AndroidViewModel(
     }
 }
 
-internal data class StandaloneReleaseInfo(
-    val versionCode: Int,
-    val versionName: String,
-    val apkUrl: String,
-    val releaseNotes: String
-)
-
-internal data class StandaloneUpdateUiState(
-    val isChecking: Boolean = false,
-    val isUpToDate: Boolean = false,
-    val availableRelease: StandaloneReleaseInfo? = null,
-    val isDownloading: Boolean = false,
-    val downloadProgress: Float = 0f,
-    val errorText: String? = null
-)
-
-internal class StandaloneUpdateManager(
-    private val appContext: Context,
-    private val scope: CoroutineScope
-) {
-    private val _state = MutableStateFlow(StandaloneUpdateUiState())
-    val state: StateFlow<StandaloneUpdateUiState> = _state.asStateFlow()
-
-    fun checkForUpdates(manual: Boolean = false) {
-        if (!BuildConfig.ALLOW_CUSTOM_SERVER_DOWNLOADS) return
-        if (_state.value.isChecking || _state.value.isDownloading) return
-
-        scope.launch(Dispatchers.IO) {
-            _state.update { it.copy(isChecking = true, errorText = null, isUpToDate = false) }
-            try {
-                val url = java.net.URL(OmniServerEndpoints.appVersionManifestUrl)
-                val conn = (url.openConnection() as java.net.HttpURLConnection).apply {
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                    requestMethod = "GET"
-                    setRequestProperty("Accept", "application/json")
-                }
-                val code = conn.responseCode
-                if (code !in 200..299) {
-                    conn.disconnect()
-                    _state.update { it.copy(isChecking = false) }
-                    return@launch
-                }
-                val body = conn.inputStream.bufferedReader(Charsets.UTF_8).use { it.readText() }
-                conn.disconnect()
-
-                val json = org.json.JSONObject(body)
-                val remoteCode = json.optInt("versionCode", BuildConfig.VERSION_CODE)
-                val remoteName = json.optString("versionName", BuildConfig.VERSION_NAME)
-                val apkUrl = json.optString("apkUrl", "").trim()
-                val notes = json.optString("releaseNotes", "").trim()
-
-                if (remoteCode > BuildConfig.VERSION_CODE && apkUrl.startsWith("https://")) {
-                    _state.update {
-                        it.copy(
-                            isChecking = false,
-                            isUpToDate = false,
-                            availableRelease = StandaloneReleaseInfo(
-                                versionCode = remoteCode,
-                                versionName = remoteName,
-                                apkUrl = apkUrl,
-                                releaseNotes = notes
-                            )
-                        )
-                    }
-                } else {
-                    _state.update {
-                        it.copy(
-                            isChecking = false,
-                            isUpToDate = manual
-                        )
-                    }
-                }
-            } catch (_: Throwable) {
-                _state.update { it.copy(isChecking = false) }
-            }
-        }
-    }
-
-    fun dismissDialog() {
-        if (_state.value.isDownloading) return
-        _state.update { it.copy(availableRelease = null, errorText = null) }
-    }
-
-    fun downloadAndInstall(activityContext: Context) {
-        val release = _state.value.availableRelease ?: return
-        if (_state.value.isDownloading) return
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !appContext.packageManager.canRequestPackageInstalls()) {
-            try {
-                val permIntent = Intent(
-                    Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                    Uri.parse("package:${appContext.packageName}")
-                ).apply {
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-                activityContext.startActivity(permIntent)
-            } catch (_: Throwable) {}
-            return
-        }
-
-        scope.launch(Dispatchers.IO) {
-            _state.update { it.copy(isDownloading = true, downloadProgress = 0f, errorText = null) }
-            try {
-                val updatesDir = File(appContext.cacheDir, "updates").apply { mkdirs() }
-                val apkFile = File(updatesDir, "fullfilestudio-update.apk")
-                if (apkFile.exists()) apkFile.delete()
-
-                var currentUrl = release.apkUrl
-                var conn: java.net.HttpURLConnection? = null
-                for (redirect in 0..5) {
-                    val c = (java.net.URL(currentUrl).openConnection() as java.net.HttpURLConnection).apply {
-                        instanceFollowRedirects = false
-                        connectTimeout = 10000
-                        readTimeout = 20000
-                        requestMethod = "GET"
-                    }
-                    val status = c.responseCode
-                    if (status in setOf(301, 302, 303, 307, 308)) {
-                        val nextLoc = c.getHeaderField("Location")
-                        c.disconnect()
-                        if (nextLoc.isNullOrBlank()) throw IllegalStateException("Empty redirect")
-                        currentUrl = nextLoc
-                    } else {
-                        conn = c
-                        break
-                    }
-                }
-
-                val activeConn = conn ?: throw IllegalStateException("Unable to connect to release server")
-                if (activeConn.responseCode !in 200..299) {
-                    activeConn.disconnect()
-                    throw IllegalStateException("HTTP ${activeConn.responseCode}")
-                }
-
-                val totalBytes = activeConn.contentLengthLong
-                activeConn.inputStream.use { input ->
-                    apkFile.outputStream().use { output ->
-                        val buf = ByteArray(16384)
-                        var downloaded = 0L
-                        while (true) {
-                            val r = input.read(buf)
-                            if (r <= 0) break
-                            output.write(buf, 0, r)
-                            downloaded += r
-                            if (totalBytes > 0L) {
-                                val pct = (downloaded.toFloat() / totalBytes.toFloat()).coerceIn(0f, 0.99f)
-                                _state.update { it.copy(downloadProgress = pct) }
-                            }
-                        }
-                        output.flush()
-                    }
-                }
-                activeConn.disconnect()
-
-                val apkUri = FileProvider.getUriForFile(
-                    appContext,
-                    "${appContext.packageName}.fileprovider",
-                    apkFile
-                )
-                val installIntent = Intent(Intent.ACTION_VIEW).apply {
-                    setDataAndType(apkUri, "application/vnd.android.package-archive")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-
-                withContext(Dispatchers.Main) {
-                    _state.update {
-                        it.copy(
-                            isDownloading = false,
-                            downloadProgress = 1f,
-                            availableRelease = null
-                        )
-                    }
-                    activityContext.startActivity(installIntent)
-                }
-            } catch (e: Throwable) {
-                _state.update {
-                    it.copy(
-                        isDownloading = false,
-                        errorText = e.localizedMessage ?: "Download failed"
-                    )
-                }
-            }
-        }
-    }
-}
-
 class MainActivity : ComponentActivity() {
 
     private val viewModel: MainReaderViewModel by viewModels()
 
-    override fun attachBaseContext(newBase: Context) {
-        super.attachBaseContext(newBase)
-        try {
-            SplitCompat.installActivity(this)
-        } catch (_: Throwable) {}
-    }
-
-    /**
-     * Synchronizes Android 17 (API 37) system bars with the active reader state.
-     * Avoids hiding navigation bars while the soft keyboard (IME) is open so that
-     * search input in presentations behaves identically to all other document formats.
-     */
     private fun syncImmersiveSystemBars() {
         val windowVal = window ?: return
         val decorView = windowVal.decorView
@@ -1781,10 +1768,12 @@ class MainActivity : ComponentActivity() {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         val snap = viewModel.uiState.value
-        snap.pendingPluginBundle?.id?.let { outState.putString(KEY_PENDING_BUNDLE_ID, it) }
         snap.pendingUri?.toString()?.let { outState.putString(KEY_PENDING_URI, it) }
         snap.lastOpenedUri?.toString()?.let { outState.putString(KEY_LAST_OPENED_URI, it) }
+        consumedIntentUri?.let { outState.putString(KEY_CONSUMED_INTENT_URI, it) }
     }
+
+    private var consumedIntentUri: String? = null
 
     private fun applyFrameRateMode(mode: AppFrameRateMode) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1824,17 +1813,17 @@ class MainActivity : ComponentActivity() {
         OmniServerEndpoints.baseUrl = BuildConfig.SERVER_BASE_URL
         val bootstrapper = viewModel.bootstrapper
 
-        if (savedInstanceState == null) {
-            extractIncomingIntentUri(intent)?.let { initialUri ->
-                bootstrapper.skipFirstLaunch()
-                clearConsumedIntentPayload(intent)
-                viewModel.openUriWithSafeFallback(initialUri)
-            }
-        } else {
-            val savedBundleId = savedInstanceState.getString(KEY_PENDING_BUNDLE_ID)
-            val savedPendingUri = savedInstanceState.getString(KEY_PENDING_URI)?.let { Uri.parse(it) }
+        val incomingUri = extractIncomingIntentUri(intent)
+        val previouslyConsumedUri = savedInstanceState?.getString(KEY_CONSUMED_INTENT_URI)
+        if (incomingUri != null && (savedInstanceState == null || incomingUri.toString() != previouslyConsumedUri)) {
+            consumedIntentUri = incomingUri.toString()
+            bootstrapper.skipFirstLaunch()
+            clearConsumedIntentPayload(intent)
+            viewModel.openUriWithSafeFallback(incomingUri)
+        } else if (savedInstanceState != null) {
+            consumedIntentUri = previouslyConsumedUri
             val savedLastUri = savedInstanceState.getString(KEY_LAST_OPENED_URI)?.let { Uri.parse(it) }
-            viewModel.restoreSavedPendingState(savedBundleId, savedPendingUri, savedLastUri)
+            viewModel.restoreSavedPendingState(savedLastUri)
         }
 
         setContent {
@@ -2099,40 +2088,6 @@ class MainActivity : ComponentActivity() {
                                 )
                             }
 
-                            uiState.pendingPluginBundle?.let { bundle ->
-                                uiState.pendingUri?.let { targetUri ->
-                                    EnterpriseErrorDialog(
-                                        badgeText = strings.playModuleBadge,
-                                        badgeColor = palette.infoBadge,
-                                        titleText = "${strings.playModuleRequiredTitle}: «${strings.localizedBundleName(bundle.id, bundle.name)}»",
-                                        descriptionText = strings.formatPlayModulePrompt(bundle.id, bundle.description),
-                                        primaryButtonText = strings.downloadModuleBtn,
-                                        onPrimaryClick = {
-                                            val bId = bundle.id
-                                            val isArc = uiState.isArchiveSession
-                                            val activeId = uiState.activeSessionId
-                                            viewModel.dismissPendingPluginPrompt()
-                                            bootstrapper.downloadSingleBundle(bId) {
-                                                try { SplitCompat.installActivity(this@MainActivity) } catch (_: Throwable) {}
-                                                if (targetUri.scheme == "virtual") {
-                                                    val vName = Uri.decode(targetUri.toString().removePrefix("virtual://"))
-                                                    if (isArc && activeId >= 0 && vName.isNotEmpty()) {
-                                                        viewModel.openVirtualFileFromArchive(vName)
-                                                    } else {
-                                                        viewModel.openUriWithSafeFallback(targetUri)
-                                                    }
-                                                } else {
-                                                    viewModel.openUriWithSafeFallback(targetUri)
-                                                }
-                                            }
-                                        },
-                                        secondaryButtonText = strings.cancelBtn,
-                                        onSecondaryClick = { viewModel.dismissPendingPluginPrompt() },
-                                        onDismissRequest = { viewModel.dismissPendingPluginPrompt() }
-                                    )
-                                }
-                            }
-
                             uiState.structuredError?.let { err ->
                                 val targetUri = uiState.pendingUri ?: uiState.lastOpenedUri
                                 val canOpenHex = err.allowHexFallback && (targetUri != null || uiState.hasVirtualHexBackup)
@@ -2166,23 +2121,47 @@ class MainActivity : ComponentActivity() {
                                     localizedMessage
                                 }
 
-                                EnterpriseErrorDialog(
-                                    badgeText = badgeText,
-                                    badgeColor = badgeColor,
-                                    titleText = titleText,
-                                    descriptionText = fullDescription,
-                                    primaryButtonText = if (canOpenHex) strings.openInHexBtn else strings.closeBtn,
-                                    onPrimaryClick = {
-                                        val uriToHex = targetUri ?: Uri.parse("virtual://hex_fallback")
-                                        viewModel.dismissStructuredError()
-                                        if (canOpenHex) {
-                                            viewModel.openHexFallback(uriToHex)
-                                        }
-                                    },
-                                    secondaryButtonText = if (canOpenHex) strings.closeBtn else null,
-                                    onSecondaryClick = { viewModel.dismissStructuredError() },
-                                    onDismissRequest = { viewModel.dismissStructuredError() }
-                                )
+                                if (err.category == UiErrorCategory.PASSWORD_REQUIRED && targetUri != null) {
+                                    PasswordUnlockDialog(
+                                        badgeText = badgeText,
+                                        badgeColor = badgeColor,
+                                        titleText = titleText,
+                                        descriptionText = localizedMessage,
+                                        placeholderText = strings.passwordPlaceholder,
+                                        unlockButtonText = strings.unlockBtn,
+                                        hexButtonText = if (canOpenHex) strings.openInHexBtn else null,
+                                        closeButtonText = strings.closeBtn,
+                                        onUnlock = { enteredPassword ->
+                                            viewModel.dismissStructuredError()
+                                            viewModel.openUriWithSafeFallback(targetUri, enteredPassword)
+                                        },
+                                        onHexClick = if (canOpenHex) {
+                                            {
+                                                viewModel.dismissStructuredError()
+                                                viewModel.openHexFallback(targetUri)
+                                            }
+                                        } else null,
+                                        onDismissRequest = { viewModel.dismissStructuredError() }
+                                    )
+                                } else {
+                                    EnterpriseErrorDialog(
+                                        badgeText = badgeText,
+                                        badgeColor = badgeColor,
+                                        titleText = titleText,
+                                        descriptionText = fullDescription,
+                                        primaryButtonText = if (canOpenHex) strings.openInHexBtn else strings.closeBtn,
+                                        onPrimaryClick = {
+                                            val uriToHex = targetUri ?: Uri.parse("virtual://hex_fallback")
+                                            viewModel.dismissStructuredError()
+                                            if (canOpenHex) {
+                                                viewModel.openHexFallback(uriToHex)
+                                            }
+                                        },
+                                        secondaryButtonText = if (canOpenHex) strings.closeBtn else null,
+                                        onSecondaryClick = { viewModel.dismissStructuredError() },
+                                        onDismissRequest = { viewModel.dismissStructuredError() }
+                                    )
+                                }
                             }
                         }
                     }
@@ -2197,6 +2176,7 @@ class MainActivity : ComponentActivity() {
         clearConsumedIntentPayload(intent)
         setIntent(intent)
         if (uri != null) {
+            consumedIntentUri = uri.toString()
             viewModel.bootstrapper.skipFirstLaunch()
             viewModel.openUriWithSafeFallback(uri)
         }
@@ -2231,7 +2211,8 @@ class MainActivity : ComponentActivity() {
         private val uri: Uri,
         val extension: String,
         override val is3dContent: Boolean,
-        private var hostPfd: ParcelFileDescriptor? = null
+        private var hostPfd: ParcelFileDescriptor? = null,
+        private val sessionPassword: String? = null
     ) : DocumentSession {
 
         fun getSessionId(): Int = sessionId
@@ -2246,6 +2227,7 @@ class MainActivity : ComponentActivity() {
         @Volatile private var cachedDocWidth = 0f
         @Volatile private var cachedDocHeight = 0f
         @Volatile private var cachedColWidths: FloatArray = FloatArray(0)
+        @Volatile private var cachedRowHeights: FloatArray = FloatArray(0)
         @Volatile private var cachedLastError: String? = null
         @Volatile private var lastMetadataPageIndex = -1
         @Volatile private var lastMetadataStateVersion = -1L
@@ -2269,6 +2251,7 @@ class MainActivity : ComponentActivity() {
                 cachedDocWidth = svc.getDocumentWidth(sessionId)
                 cachedDocHeight = svc.getDocumentHeight(sessionId)
                 cachedColWidths = try { svc.getColumnWidths(sessionId) ?: FloatArray(0) } catch (_: Throwable) { FloatArray(0) }
+                cachedRowHeights = try { svc.getRowHeights(sessionId) ?: FloatArray(0) } catch (_: Throwable) { FloatArray(0) }
                 cachedLastError = svc.getLastError(sessionId)
                 lastMetadataStateVersion = ver
             } catch (_: Throwable) {}
@@ -2335,7 +2318,11 @@ class MainActivity : ComponentActivity() {
                     }
                     sourcePfd?.use { pfd ->
                         val detachedDupPfd = ParcelFileDescriptor.dup(pfd.fileDescriptor)
-                        val newId = svc.openSession(detachedDupPfd, extension)
+                        val newId = if (!sessionPassword.isNullOrEmpty()) {
+                            svc.openSessionWithPassword(detachedDupPfd, extension, sessionPassword)
+                        } else {
+                            svc.openSession(detachedDupPfd, extension)
+                        }
 
                         if (newId >= 0) {
                             try { detachedDupPfd.close() } catch (_: Exception) {}
@@ -2456,6 +2443,23 @@ class MainActivity : ComponentActivity() {
             }
         }
 
+        @Volatile
+        private var cachedCopyRestricted: Boolean? = null
+
+        override val isCopyRestricted: Boolean
+            get() {
+                cachedCopyRestricted?.let { return it }
+                if (isClosed) return false
+                val svc = controller.peekIsolatedService() ?: return false
+                return try {
+                    val restricted = svc.isCopyRestricted(sessionId)
+                    cachedCopyRestricted = restricted
+                    restricted
+                } catch (_: Exception) {
+                    false
+                }
+            }
+
         override fun getPageText(pageIndex: Int): String {
             if (isClosed) return ""
             val cacheKey = if (pageIndex == -1) -1 else (pageIndex and 0x000FFFFF)
@@ -2509,6 +2513,7 @@ class MainActivity : ComponentActivity() {
             cachedActiveSheetIndex = index
             lastMetadataPageIndex = -1
             cachedColWidths = FloatArray(0)
+            cachedRowHeights = FloatArray(0)
             synchronized(pageTextCache) { pageTextCache.evictAll() }
             try {
                 val svc = controller.peekIsolatedService()
@@ -2535,6 +2540,14 @@ class MainActivity : ComponentActivity() {
             return cachedColWidths
         }
 
+        override fun getRowHeights(): FloatArray {
+            if (isClosed) return cachedRowHeights
+            if (cachedRowHeights.isEmpty() && lastMetadataStateVersion < 0L) {
+                refreshCachedMetadataFromService(controller.peekIsolatedService())
+            }
+            return cachedRowHeights
+        }
+
         override fun getCellText(row: Int, col: Int): String {
             return try { controller.peekIsolatedService()?.getCellText(sessionId, row, col) ?: "" } catch (_: Exception) { "" }
         }
@@ -2543,8 +2556,98 @@ class MainActivity : ComponentActivity() {
             return try { controller.peekIsolatedService()?.getSelectedRangeText(sessionId, startRow, startCol, endRow, endCol) ?: "" } catch (_: Exception) { "" }
         }
 
+        override fun getMissingResources(): List<String> {
+            if (isClosed) return emptyList()
+            return try { controller.peekIsolatedService()?.getMissingResources(sessionId)?.toList() } catch (_: Exception) { null } ?: emptyList()
+        }
+
+        override fun provideResource(name: String, fd: java.io.FileDescriptor): Boolean {
+            if (isClosed) return false
+            val svc = controller.peekIsolatedService() ?: return false
+            return try {
+                ParcelFileDescriptor.dup(fd).use { svc.provideResource(sessionId, name, it) }
+            } catch (_: Exception) {
+                false
+            }
+        }
+
+        override fun applyProvidedResources(): Boolean {
+            if (isClosed) return false
+            val svc = controller.peekIsolatedService() ?: return false
+            val ok = try { svc.applyProvidedResources(sessionId) } catch (_: Exception) { false }
+            synchronized(lock) {
+                hostMeshScene?.let { scene ->
+                    scene.preview?.let { if (!it.isRecycled) it.recycle() }
+                    scene.textures.forEach { if (!it.isRecycled) it.recycle() }
+                }
+                hostMeshScene = null
+                try { hostMeshRenderer?.release() } catch (_: Throwable) {}
+                hostMeshRenderer = null
+            }
+            try { refreshCachedMetadataFromService(svc) } catch (_: Exception) {}
+            applyStateVersionIfNewer(lastAppliedVersion.get() + 1L)
+            return ok
+        }
+
+        @Volatile private var hostMeshScene: com.omnireader.core.engine.MeshScene? = null
+        private var hostMeshRenderer: com.omnireader.core.engine.MeshSceneRenderer? = null
+        @Volatile private var animationTime = -1f
+        @Volatile private var animationClip = 0
+
+        override fun getAnimationDuration(): Float {
+            if (isClosed || !is3dContent) return 0f
+            return synchronized(lock) { loadHostMeshSceneLocked()?.animation?.duration(animationClip) ?: 0f }
+        }
+
+        override fun setAnimationTime(seconds: Float) {
+            animationTime = seconds
+        }
+
+        override fun getAnimationClips(): List<String> {
+            if (isClosed || !is3dContent) return emptyList()
+            return synchronized(lock) {
+                val a = loadHostMeshSceneLocked()?.animation ?: return@synchronized emptyList()
+                List(a.clipCount) { a.clipName(it) }
+            }
+        }
+
+        override fun setAnimationClip(index: Int) {
+            animationClip = index.coerceAtLeast(0)
+        }
+
+        private fun loadHostMeshSceneLocked(): com.omnireader.core.engine.MeshScene? {
+            hostMeshScene?.let { return it }
+            val svc = controller.peekIsolatedService() ?: return null
+            val memory = try { svc.exportMeshScene(sessionId) } catch (_: Exception) { null } ?: return null
+            var mapped: java.nio.ByteBuffer? = null
+            return try {
+                mapped = memory.mapReadOnly()
+                com.omnireader.core.engine.MeshSceneCodec.decode(mapped).also { hostMeshScene = it }
+            } catch (_: Throwable) {
+                null
+            } finally {
+                if (mapped != null) try { SharedMemory.unmap(mapped) } catch (_: Throwable) {}
+                try { memory.close() } catch (_: Throwable) {}
+            }
+        }
+
         override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
             if (isClosed) return
+            if (is3dContent) {
+                synchronized(lock) {
+                    if (isClosed) return
+                    val scene = loadHostMeshSceneLocked()
+                    if (scene != null) {
+                        val renderer = hostMeshRenderer ?: com.omnireader.core.engine.MeshSceneRenderer().also { hostMeshRenderer = it }
+                        renderer.animationTime = animationTime
+                        renderer.animationClip = animationClip
+                        try {
+                            renderer.render(scene, pageIndex, tileX, tileY, zoomPermille, bitmap)
+                        } catch (_: Throwable) {}
+                        return
+                    }
+                }
+            }
             synchronized(lock) {
                 if (isClosed) return
                 val w = bitmap.width
@@ -2649,6 +2752,11 @@ class MainActivity : ComponentActivity() {
                     try { mem.close() } catch (_: Throwable) {}
                 }
                 try { hostPfd?.close() } catch (_: Throwable) {}
+                try { hostMeshRenderer?.release() } catch (_: Throwable) {}
+                hostMeshRenderer = null
+                hostMeshScene?.preview?.let { if (!it.isRecycled) it.recycle() }
+                hostMeshScene?.textures?.forEach { if (!it.isRecycled) it.recycle() }
+                hostMeshScene = null
             }
             try { svcToCall?.registerSessionStateCallback(idToClose, null) } catch (_: Throwable) {}
             try { svcToCall?.closeSession(idToClose) } catch (_: Throwable) {}
@@ -2656,9 +2764,9 @@ class MainActivity : ComponentActivity() {
     }
 
     companion object {
-        private const val KEY_PENDING_BUNDLE_ID = "pending_bundle_id"
         private const val KEY_PENDING_URI = "pending_uri"
         private const val KEY_LAST_OPENED_URI = "last_opened_uri"
+        private const val KEY_CONSUMED_INTENT_URI = "consumed_intent_uri"
         internal val ARCHIVE_SIZE_SUFFIX_REGEX = Regex(""" \(\d+ B\)$| \(unknown size\)$""", RegexOption.IGNORE_CASE)
 
         internal val MODULE_MANAGED_EXTENSIONS = setOf(
@@ -2670,7 +2778,7 @@ class MainActivity : ComponentActivity() {
             // CAD & Vector module
             "svg", "svgz", "stl", "obj", "dxf", "dwg", "ply", "off",
             "3ds", "gltf", "glb", "blend", "usdz", "usd", "usda", "usdc", "fbx",
-            "3mf", "dae", "step", "stp", "iges", "igs",
+            "3mf", "dae", "zae", "step", "stp", "iges", "igs",
             // Archives & Disk Images module
             "zip", "7z", "rar", "tar", "gz", "bz2", "xz", "tgz", "apk", "jar", "iso"
         )

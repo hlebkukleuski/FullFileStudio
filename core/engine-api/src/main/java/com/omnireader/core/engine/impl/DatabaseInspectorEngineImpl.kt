@@ -77,8 +77,12 @@ interface DatabaseInspectorEngineLocal {
     fun createSession(fd: FileDescriptor): DocumentSession
     fun createSessionWithCacheDir(fd: FileDescriptor, cacheDir: File?): DocumentSession
     fun createSessionWithCacheDir(fd: FileDescriptor, cacheDir: File?, extension: String): DocumentSession
+    fun createSessionWithCacheDir(fd: FileDescriptor, cacheDir: File?, extension: String, password: String?): DocumentSession =
+        openSafeDatabase(fd, cacheDir, extension, password)
     fun openSafeDatabase(fd: FileDescriptor, cacheDir: File? = null): DatabaseSessionLocal
     fun openSafeDatabase(fd: FileDescriptor, cacheDir: File? = null, extension: String = ""): DatabaseSessionLocal
+    fun openSafeDatabase(fd: FileDescriptor, cacheDir: File? = null, extension: String = "", password: String? = null): DatabaseSessionLocal =
+        openSafeDatabase(fd, cacheDir, extension)
 }
 
 interface DatabaseSessionLocal : DocumentSession, DatabaseSession {
@@ -109,7 +113,7 @@ class DatabaseInspectorEngineImpl : DatabaseInspectorEngineLocal, DatabaseInspec
             signature[0] == 'P'.code.toByte() &&
             signature[1] == 'A'.code.toByte() &&
             signature[2] == 'R'.code.toByte() &&
-            signature[3] == '1'.code.toByte()
+            (signature[3] == '1'.code.toByte() || signature[3] == 'E'.code.toByte())
         ) {
             return true
         }
@@ -125,18 +129,26 @@ class DatabaseInspectorEngineImpl : DatabaseInspectorEngineLocal, DatabaseInspec
     }
 
     override fun createSessionWithCacheDir(fd: FileDescriptor, cacheDir: File?, extension: String): DocumentSession {
-        return openSafeDatabase(fd, cacheDir, extension)
+        return openSafeDatabase(fd, cacheDir, extension, null)
+    }
+
+    override fun createSessionWithCacheDir(fd: FileDescriptor, cacheDir: File?, extension: String, password: String?): DocumentSession {
+        return openSafeDatabase(fd, cacheDir, extension, password)
     }
 
     override fun openSafeDatabase(fd: FileDescriptor): DatabaseSessionLocal {
-        return openSafeDatabase(fd, null, "")
+        return openSafeDatabase(fd, null, "", null)
     }
 
     override fun openSafeDatabase(fd: FileDescriptor, cacheDir: File?): DatabaseSessionLocal {
-        return openSafeDatabase(fd, cacheDir, "")
+        return openSafeDatabase(fd, cacheDir, "", null)
     }
 
     override fun openSafeDatabase(fd: FileDescriptor, cacheDir: File?, extension: String): DatabaseSessionLocal {
+        return openSafeDatabase(fd, cacheDir, extension, null)
+    }
+
+    override fun openSafeDatabase(fd: FileDescriptor, cacheDir: File?, extension: String, password: String?): DatabaseSessionLocal {
         val cleanExt = extension.lowercase(Locale.ROOT).trim()
         val header = ByteBuffer.allocateDirect(4096)
         val fileSize = try { Os.fstat(fd).st_size } catch (_: Throwable) { -1L }
@@ -150,27 +162,23 @@ class DatabaseInspectorEngineImpl : DatabaseInspectorEngineLocal, DatabaseInspec
             if (arr[0].toInt() == 0 && arr[1].toInt() == 1 && arr[2].toInt() == 0 && arr[3].toInt() == 0) {
                 val magic = String(arr, 4, 15, StandardCharsets.US_ASCII)
                 if (magic.startsWith("Standard Jet DB") || magic.startsWith("Standard ACE DB")) {
-                    return CleanRoomAccessDatabaseSession(ParcelFileDescriptor.dup(fd))
+                    val dup = ParcelFileDescriptor.dup(fd)
+                    return GplCoreEngineBridgeLoader.get()?.createAccessSession(dup, password)
+                        ?: UnavailableGplDatabaseSession(dup, "Microsoft Access (.mdb/.accdb)")
                 }
             }
             if (r >= 16 && String(arr, 0, 15, StandardCharsets.US_ASCII) == "SQLite format 3") {
                 return SqliteDatabaseSession(ParcelFileDescriptor.dup(fd), cacheDir)
             }
             if (arr[0] == 'P'.code.toByte() && arr[1] == 'A'.code.toByte() &&
-                arr[2] == 'R'.code.toByte() && arr[3] == '1'.code.toByte()
+                arr[2] == 'R'.code.toByte() && (arr[3] == '1'.code.toByte() || arr[3] == 'E'.code.toByte())
             ) {
                 return CleanRoomParquetAndNoSqlDatabaseSession(ParcelFileDescriptor.dup(fd), "parquet")
             }
-            if (r >= 12 &&
-                arr[8] == 'D'.code.toByte() && arr[9] == 'U'.code.toByte() &&
-                arr[10] == 'C'.code.toByte() && arr[11] == 'K'.code.toByte()
-            ) {
+            if (CleanRoomDuckDbReader.isDuckDbHeader(arr)) {
                 return CleanRoomParquetAndNoSqlDatabaseSession(ParcelFileDescriptor.dup(fd), "duckdb")
             }
-            if (r >= 4 &&
-                arr[0] == 'T'.code.toByte() && arr[1] == '-'.code.toByte() &&
-                arr[2] == 'D'.code.toByte() && arr[3] == 'B'.code.toByte()
-            ) {
+            if (CleanRoomRealmReader.isRealmHeader(arr)) {
                 return CleanRoomParquetAndNoSqlDatabaseSession(ParcelFileDescriptor.dup(fd), "realm")
             }
         }
@@ -590,7 +598,7 @@ class CleanRoomParquetAndNoSqlDatabaseSession(
                 lastErrorMsg = "Database file (${formatHint.uppercase(Locale.ROOT)}) is empty (0 bytes)."
                 return
             }
-            val maxRead = minOf(fileSize, 32L * 1024L * 1024L).toInt()
+            val maxRead = if (formatHint == "parquet") minOf(fileSize, 64L).toInt() else minOf(fileSize, 32L * 1024L * 1024L).toInt()
             val buf = ByteBuffer.allocateDirect(maxRead)
             val got = source.readAt(0L, buf)
             if (got <= 0) {
@@ -601,19 +609,29 @@ class CleanRoomParquetAndNoSqlDatabaseSession(
             val bytes = ByteArray(got)
             buf.get(bytes)
 
-            val isParquet = (got >= 4 && String(bytes, 0, 4, StandardCharsets.US_ASCII) == "PAR1") ||
-                    formatHint == "parquet"
-            val isDuckDb = (got >= 12 && String(bytes, 8, 4, StandardCharsets.US_ASCII) == "DUCK") ||
-                    formatHint == "duckdb"
-            val isRealm = (got >= 4 && String(bytes, 0, 4, StandardCharsets.US_ASCII) == "T-DB") ||
-                    formatHint == "realm"
+            val headMagic = if (got >= 4) String(bytes, 0, 4, StandardCharsets.US_ASCII) else ""
+            if (headMagic == "PARE") {
+                lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted Apache Parquet files is not supported in this version."
+                return
+            }
+            val isParquet = headMagic == "PAR1" || formatHint == "parquet"
+            val isDuckDb = CleanRoomDuckDbReader.isDuckDbHeader(bytes) || formatHint == "duckdb"
+            val isRealm = CleanRoomRealmReader.isRealmHeader(bytes) || formatHint == "realm"
             val isBson = formatHint == "bson" || (!isParquet && !isDuckDb && !isRealm && isLikelyBsonDocument(bytes))
 
             when {
                 isParquet -> parseParquetFile(bytes, fileSize)
                 isBson -> parseBsonDocuments(bytes)
-                isDuckDb || isRealm -> parseDuckDbOrRealmCatalog(bytes, if (isDuckDb) "DuckDB" else "Realm")
+                isDuckDb -> parseDuckDb(bytes)
+                isRealm -> parseRealm(bytes)
                 else -> parseJsonLines(bytes)
+            }
+        } catch (uoe: UnsupportedOperationException) {
+            val msg = uoe.message.orEmpty()
+            lastErrorMsg = if (msg.contains("encrypted", ignoreCase = true)) {
+                "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted ${formatHint.uppercase(Locale.ROOT)} files is not supported in this version."
+            } else {
+                "Database parse error (${formatHint.uppercase(Locale.ROOT)}): $msg"
             }
         } catch (e: Exception) {
             lastErrorMsg = "Database parse error (${formatHint.uppercase(Locale.ROOT)}): ${e.localizedMessage}"
@@ -796,129 +814,87 @@ class CleanRoomParquetAndNoSqlDatabaseSession(
         tables.add(InMemoryTable("BSON Collection (${rows.size})", colList, rows))
     }
 
-    private fun parseParquetFile(headBytes: ByteArray, totalFileSize: Long) {
-        if (totalFileSize < 12L || headBytes.size < 4 || String(headBytes, 0, 4, StandardCharsets.US_ASCII) != "PAR1") {
-            lastErrorMsg = "Invalid Apache Parquet header (missing PAR1 magic)."
-            return
-        }
-
-        val tailLen = minOf(totalFileSize, 2L * 1024L * 1024L).toInt()
-        val tailBuf = ByteBuffer.allocateDirect(tailLen).order(ByteOrder.LITTLE_ENDIAN)
-        val tailRead = source.readAt(totalFileSize - tailLen, tailBuf)
-        if (tailRead < 8) {
-            lastErrorMsg = "Unable to read Apache Parquet footer."
-            return
-        }
-        tailBuf.flip()
-        val tailBytes = ByteArray(tailRead)
-        tailBuf.get(tailBytes)
-
-        if (String(tailBytes, tailRead - 4, 4, StandardCharsets.US_ASCII) != "PAR1") {
-            lastErrorMsg = "Corrupted Apache Parquet file (missing trailing PAR1 magic)."
-            return
-        }
-
-        val footerLen = ByteBuffer.wrap(tailBytes, tailRead - 8, 4).order(ByteOrder.LITTLE_ENDIAN).int
-        if (footerLen <= 0 || footerLen > tailRead - 8) {
-            lastErrorMsg = "Invalid Apache Parquet FileMetaData footer length ($footerLen)."
-            return
-        }
-
-        val footerStart = tailRead - 8 - footerLen
-        val footerSlice = tailBytes.copyOfRange(footerStart, footerStart + footerLen)
-
-        val footerStrings = extractReadableAsciiStrings(footerSlice, minLen = 2, maxCount = 512)
-        val ignoredCreatorTokens = setOf("parquet-mr", "parquet-cpp", "arrow", "spark", "pandas", "pyarrow", "duckdb", "schema", "root", "hive_schema")
-        val schemaColumns = footerStrings.filter { token ->
-            token.length in 2..64 &&
-                    token.lowercase(Locale.ROOT) !in ignoredCreatorTokens &&
-                    !token.contains("version", ignoreCase = true) &&
-                    !token.contains("build", ignoreCase = true) &&
-                    token.all { it.isLetterOrDigit() || it == '_' || it == '-' || it == '.' }
-        }.distinct()
-
-        val dataRegionEnd = minOf(headBytes.size.toLong(), totalFileSize - 8L - footerLen).toInt().coerceAtLeast(4)
-        val dataStrings = if (dataRegionEnd > 4) {
-            extractReadableAsciiStrings(headBytes.copyOfRange(4, dataRegionEnd), minLen = 2, maxCount = 2000)
-        } else emptyList()
-
-        val effectiveCols = if (schemaColumns.isNotEmpty()) schemaColumns.take(32) else listOf("Column_1", "Value")
-        val dataRows = ArrayList<List<String>>()
-        if (dataStrings.isNotEmpty() && effectiveCols.isNotEmpty()) {
-            val colCount = effectiveCols.size
-            var idx = 0
-            while (idx < dataStrings.size && dataRows.size < 2000) {
-                val row = ArrayList<String>(colCount)
-                for (c in 0 until colCount) {
-                    row.add(if (idx < dataStrings.size) dataStrings[idx++] else "")
-                }
-                dataRows.add(row)
+    private class ParquetRowList(private val reader: CleanRoomParquetReader) : AbstractList<List<String>>() {
+        override val size: Int = reader.numRows.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
+        override fun get(index: Int): List<String> {
+            if (index < 0 || index >= size) throw IndexOutOfBoundsException("Row $index")
+            return try {
+                reader.row(index.toLong())
+            } catch (e: Exception) {
+                reader.leaves.map { "⚠ ${e.message ?: "decode error"}" }
             }
         }
+    }
 
-        val schemaRows = effectiveCols.mapIndexed { idx, colName ->
-            listOf((idx + 1).toString(), colName, "PARQUET_COLUMN", "$footerLen B footer")
-        }
-
-        if (dataRows.isNotEmpty()) {
-            tables.add(InMemoryTable("Parquet Data (${dataRows.size} rows)", effectiveCols, dataRows))
+    private fun parseParquetFile(@Suppress("UNUSED_PARAMETER") headBytes: ByteArray, totalFileSize: Long) {
+        val reader = CleanRoomParquetReader(ParquetByteSource { offset, length ->
+            if (length < 0 || offset < 0 || offset + length > totalFileSize) throw CorruptedDataException("Read beyond end of Parquet file")
+            val buf = ByteBuffer.allocateDirect(length)
+            var done = 0
+            while (done < length) {
+                val r = source.readAt(offset + done, buf)
+                if (r <= 0) break
+                done += r
+            }
+            if (done != length) throw CorruptedDataException("Unexpected end of Parquet file")
+            buf.flip()
+            ByteArray(length).also { buf.get(it) }
+        }, totalFileSize)
+        parquetReader = reader
+        val columnNames = reader.leaves.map { it.displayName }
+        tables.add(InMemoryTable("Parquet Data (${reader.numRows} rows)", columnNames, ParquetRowList(reader)))
+        val schemaRows = reader.leaves.mapIndexed { idx, leaf ->
+            listOf((idx + 1).toString(), leaf.path.joinToString("."), reader.physicalTypeName(leaf), "def ${leaf.maxDefinition} / rep ${leaf.maxRepetition}")
         }
         tables.add(
             InMemoryTable(
-                name = "Parquet Schema (${effectiveCols.size} cols)",
-                columnNames = listOf("#", "Column Name", "Storage", "Metadata"),
+                name = "Parquet Schema (${columnNames.size} cols, ${reader.rowGroups.size} row groups)",
+                columnNames = listOf("#", "Column", "Type", "Levels"),
                 rows = schemaRows
             )
         )
     }
 
-    private fun parseDuckDbOrRealmCatalog(bytes: ByteArray, engineLabel: String) {
-        val strings = extractReadableAsciiStrings(bytes, minLen = 3, maxCount = 3000)
-        if (strings.isEmpty()) {
-            lastErrorMsg = "$engineLabel database contains no readable schema or records."
-            return
-        }
-        val rows = strings.chunked(4).take(2000).mapIndexed { idx, chunk ->
-            listOf(
-                (idx + 1).toString(),
-                chunk.getOrElse(0) { "" },
-                chunk.getOrElse(1) { "" },
-                chunk.getOrElse(2) { "" },
-                chunk.getOrElse(3) { "" }
-            )
-        }
-        tables.add(
-            InMemoryTable(
-                name = "$engineLabel Inspector (${rows.size} entries)",
-                columnNames = listOf("ID", "Entry / Key", "Field 1", "Field 2", "Field 3"),
-                rows = rows
-            )
-        )
+    private var parquetReader: CleanRoomParquetReader? = null
+
+    override fun getPageText(pageIndex: Int): String {
+        if (parquetReader == null) return super.getPageText(pageIndex)
+        val cleanIdx = pageIndex and LIGHT_THEME_PAGE_FLAG.inv()
+        val targetIdx = if (cleanIdx in tables.indices) cleanIdx else getActiveSheetIndex()
+        val tbl = tables.getOrNull(targetIdx) ?: return ""
+        val sb = StringBuilder(tbl.columnNames.joinToString("\t"))
+        for (i in 0 until minOf(tbl.rows.size, 2000)) sb.append('\n').append(tbl.rows[i].joinToString("\t"))
+        return sb.toString()
     }
 
-    private fun extractReadableAsciiStrings(data: ByteArray, minLen: Int, maxCount: Int): List<String> {
-        val out = ArrayList<String>()
-        val sb = StringBuilder()
-        for (b in data) {
-            val v = b.toInt() and 0xFF
-            if (v in 32..126) {
-                sb.append(v.toChar())
+    private fun parseDuckDb(bytes: ByteArray) {
+        if (CleanRoomDuckDbReader.isEncrypted(bytes)) {
+            lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted DuckDB databases is not supported in this version."
+            return
+        }
+        val parsed = CleanRoomDuckDbReader.parse(bytes)
+        if (parsed == null || parsed.tables.isEmpty()) {
+            lastErrorMsg = "DuckDB database header or catalog is invalid."
+            return
+        }
+        for (t in parsed.tables) {
+            tables.add(InMemoryTable(t.name, t.columns, t.rows))
+        }
+    }
+
+    private fun parseRealm(bytes: ByteArray) {
+        val parsed = CleanRoomRealmReader.parse(bytes)
+        if (parsed == null || parsed.tables.isEmpty()) {
+            lastErrorMsg = if (bytes.size >= 4096 && !CleanRoomRealmReader.isRealmHeader(bytes)) {
+                "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted Realm databases is not supported in this version."
             } else {
-                if (sb.length >= minLen) {
-                    val s = sb.toString().trim()
-                    if (s.length >= minLen && s.any { it.isLetterOrDigit() }) {
-                        out.add(s)
-                        if (out.size >= maxCount) break
-                    }
-                }
-                sb.setLength(0)
+                "Realm database header or group structure is invalid."
             }
+            return
         }
-        if (sb.length >= minLen && out.size < maxCount) {
-            val s = sb.toString().trim()
-            if (s.length >= minLen && s.any { it.isLetterOrDigit() }) out.add(s)
+        for (t in parsed.tables) {
+            tables.add(InMemoryTable(t.name, t.columns, t.rows))
         }
-        return out
     }
 }
 
@@ -926,337 +902,15 @@ class CleanRoomParquetAndNoSqlDatabaseSession(
  * Clean-Room read-only inspector for Microsoft Access Jet 3.x / Jet 4.0 (.mdb) and ACE 12/14/16 (.accdb)
  * databases without using closed Microsoft ACE drivers.
  */
-class CleanRoomAccessDatabaseSession(
-    pfd: ParcelFileDescriptor
+private class UnavailableGplDatabaseSession(
+    pfd: ParcelFileDescriptor,
+    formatName: String
 ) : BaseInMemoryTableDatabaseSession(pfd) {
-
-    data class AccessColumnDef(
-        val name: String,
-        val colType: Int,
-        val colId: Int,
-        val varColIndex: Int,
-        val fixedOffset: Int,
-        val byteLength: Int,
-        val isFixed: Boolean
-    )
-
     init {
-        parseAccessDatabase()
+        lastErrorMsg = "$formatName engine is not included in this build."
     }
 
-    private fun parseAccessDatabase() {
-        try {
-            val fileSize = source.size
-            if (fileSize < 4096L) {
-                lastErrorMsg = "Microsoft Access database (.mdb / .accdb) is empty or truncated."
-                return
-            }
-
-            val headBuf = ByteBuffer.allocateDirect(4096).order(ByteOrder.LITTLE_ENDIAN)
-            val headRead = source.readAt(0L, headBuf)
-            if (headRead < 256) {
-                lastErrorMsg = "Unable to read Jet/ACE database header page."
-                return
-            }
-            val headBytes = ByteArray(headRead)
-            headBuf.flip()
-            headBuf.get(headBytes)
-
-            val magic = String(headBytes, 4, 15, StandardCharsets.US_ASCII)
-            if (!magic.startsWith("Standard Jet DB") && !magic.startsWith("Standard ACE DB")) {
-                lastErrorMsg = "File is not a valid Microsoft Access Jet/ACE database."
-                return
-            }
-
-            val jetVersion = headBytes[0x14].toInt() and 0xFF
-            val isJet3 = (jetVersion == 0)
-            val pageSize = if (isJet3) 2048 else 4096
-
-            val maxInspectSize = minOf(fileSize, 64L * 1024L * 1024L)
-            val totalPages = (maxInspectSize / pageSize).toInt().coerceAtLeast(1)
-
-            val tdefColumnsMap = LinkedHashMap<Int, List<AccessColumnDef>>()
-            val dataPageRowsByTdef = HashMap<Int, MutableList<ByteArray>>()
-
-            val pageBuf = ByteBuffer.allocateDirect(pageSize).order(ByteOrder.LITTLE_ENDIAN)
-            val pageArr = ByteArray(pageSize)
-
-            for (pageNum in 1 until totalPages) {
-                pageBuf.clear()
-                val r = source.readAt(pageNum.toLong() * pageSize, pageBuf)
-                if (r < pageSize) break
-                pageBuf.flip()
-                pageBuf.get(pageArr)
-
-                val p0 = pageArr[0].toInt() and 0xFF
-                val p1 = pageArr[1].toInt() and 0xFF
-
-                if (p0 == 0x02 && p1 == 0x01) {
-                    val cols = parseTdefPageColumns(pageArr, isJet3)
-                    if (cols.isNotEmpty()) {
-                        tdefColumnsMap[pageNum] = cols
-                    }
-                } else if (p0 == 0x01 && p1 == 0x01) {
-                    val bb = ByteBuffer.wrap(pageArr).order(ByteOrder.LITTLE_ENDIAN)
-                    val ownerTdef = bb.getInt(4)
-                    val rowCountOffset = if (isJet3) 8 else 12
-                    val rowOffsetsBase = if (isJet3) 10 else 14
-                    if (ownerTdef > 0 && rowCountOffset + 2 <= pageSize) {
-                        val numRecords = (bb.getShort(rowCountOffset).toInt() and 0xFFFF).coerceIn(0, 512)
-                        val recordList = dataPageRowsByTdef.getOrPut(ownerTdef) { ArrayList() }
-                        var prevEnd = pageSize
-                        for (recIdx in 0 until numRecords) {
-                            val ptrPos = rowOffsetsBase + recIdx * 2
-                            if (ptrPos + 2 > pageSize) break
-                            val rawOffset = bb.getShort(ptrPos).toInt() and 0xFFFF
-                            val isDeleted = (rawOffset and 0x8000) != 0
-                            val isLookupOverflow = (rawOffset and 0x4000) != 0
-                            val recStart = rawOffset and 0x1FFF
-                            if (!isDeleted && !isLookupOverflow && recStart in rowOffsetsBase until prevEnd) {
-                                val recLen = prevEnd - recStart
-                                if (recLen in 2..pageSize && recStart + recLen <= pageSize) {
-                                    recordList.add(pageArr.copyOfRange(recStart, recStart + recLen))
-                                }
-                            }
-                            if (recStart in 1..pageSize) {
-                                prevEnd = recStart
-                            }
-                        }
-                    }
-                }
-            }
-
-            val tableNameByTdef = HashMap<Int, String>()
-            val msysCols = tdefColumnsMap[2]
-            val msysRecords = dataPageRowsByTdef[2]
-            if (msysCols != null && msysRecords != null) {
-                val idColIdx = msysCols.indexOfFirst { it.name.equals("Id", ignoreCase = true) }
-                val nameColIdx = msysCols.indexOfFirst { it.name.equals("Name", ignoreCase = true) }
-                val typeColIdx = msysCols.indexOfFirst { it.name.equals("Type", ignoreCase = true) }
-                for (rec in msysRecords) {
-                    val decodedRow = decodeAccessRow(rec, msysCols, isJet3)
-                    val idVal = if (idColIdx in decodedRow.indices) decodedRow[idColIdx].toIntOrNull() else null
-                    val nameVal = if (nameColIdx in decodedRow.indices) decodedRow[nameColIdx] else ""
-                    val typeVal = if (typeColIdx in decodedRow.indices) decodedRow[typeColIdx].toIntOrNull() else 1
-                    if (idVal != null && idVal > 2 && nameVal.isNotBlank() && (typeVal == null || typeVal == 1)) {
-                        tableNameByTdef[idVal] = nameVal
-                    }
-                }
-            }
-
-            var fallbackTableCounter = 1
-            for ((tdefPage, cols) in tdefColumnsMap) {
-                val rawName = tableNameByTdef[tdefPage] ?: if (tdefPage == 2) "MSysObjects" else "Table_${fallbackTableCounter++}"
-                if (rawName.startsWith("MSys", ignoreCase = true) && tdefColumnsMap.size > 1 && tdefPage != 2) {
-                    continue
-                }
-                val rawRecs = dataPageRowsByTdef[tdefPage] ?: emptyList()
-                val decodedRows = ArrayList<List<String>>(rawRecs.size)
-                for (rec in rawRecs) {
-                    if (decodedRows.size >= 10_000) break
-                    decodedRows.add(decodeAccessRow(rec, cols, isJet3))
-                }
-                if (!rawName.startsWith("MSys", ignoreCase = true) || tdefColumnsMap.size == 1) {
-                    tables.add(InMemoryTable(rawName, cols.map { it.name }, decodedRows))
-                }
-            }
-
-            val userTables = tables.filter { !it.name.startsWith("MSys", ignoreCase = true) }
-            if (userTables.isNotEmpty() && userTables.size < tables.size) {
-                tables.clear()
-                tables.addAll(userTables)
-            }
-
-            if (tables.isEmpty()) {
-                lastErrorMsg = "PASSWORD_REQUIRED: Access database contains no readable user tables or is encrypted."
-            }
-        } catch (e: Exception) {
-            lastErrorMsg = "Access database read error: ${e.localizedMessage}"
-        }
-    }
-
-    private fun parseTdefPageColumns(page: ByteArray, isJet3: Boolean): List<AccessColumnDef> {
-        return try {
-            val bb = ByteBuffer.wrap(page).order(ByteOrder.LITTLE_ENDIAN)
-            val numColsPos = if (isJet3) 25 else 45
-            val numIdxPos = if (isJet3) 27 else 47
-            val colEntrySize = if (isJet3) 18 else 25
-            val headerEnd = if (isJet3) 43 else 63
-
-            if (headerEnd >= page.size) return emptyList()
-            val numCols = (bb.getShort(numColsPos).toInt() and 0xFFFF).coerceIn(0, 256)
-            val numRealIndices = (bb.getInt(numIdxPos)).coerceIn(0, 256)
-            if (numCols <= 0) return emptyList()
-
-            val colsStart = headerEnd + numRealIndices * (if (isJet3) 8 else 12)
-            if (colsStart + numCols * colEntrySize > page.size) return emptyList()
-
-            val rawSpecs = ArrayList<AccessColumnDef>(numCols)
-            for (i in 0 until numCols) {
-                val base = colsStart + i * colEntrySize
-                val colType = page[base].toInt() and 0xFF
-                val colId = bb.getShort(base + (if (isJet3) 1 else 5)).toInt() and 0xFFFF
-                val varColNum = bb.getShort(base + (if (isJet3) 3 else 7)).toInt() and 0xFFFF
-                val fixedOffset = bb.getShort(base + (if (isJet3) 12 else 21)).toInt() and 0xFFFF
-                val flags = page[base + (if (isJet3) 13 else 15)].toInt() and 0xFF
-                val colLen = bb.getShort(base + (if (isJet3) 16 else 23)).toInt() and 0xFFFF
-                val isFixed = (flags and 0x01) != 0
-
-                rawSpecs.add(
-                    AccessColumnDef(
-                        name = "Col_${i + 1}",
-                        colType = colType,
-                        colId = colId,
-                        varColIndex = varColNum,
-                        fixedOffset = fixedOffset,
-                        byteLength = colLen,
-                        isFixed = isFixed
-                    )
-                )
-            }
-
-            var namePos = colsStart + numCols * colEntrySize
-            val namedCols = ArrayList<AccessColumnDef>(numCols)
-            for (i in 0 until numCols) {
-                val spec = rawSpecs[i]
-                if (isJet3) {
-                    if (namePos + 1 > page.size) {
-                        namedCols.add(spec)
-                        continue
-                    }
-                    val nLen = page[namePos].toInt() and 0xFF
-                    namePos += 1
-                    val safeLen = minOf(nLen, page.size - namePos).coerceAtLeast(0)
-                    val colName = if (safeLen > 0) String(page, namePos, safeLen, PlainTextSession.CP1251) else spec.name
-                    namePos += safeLen
-                    namedCols.add(spec.copy(name = colName))
-                } else {
-                    if (namePos + 2 > page.size) {
-                        namedCols.add(spec)
-                        continue
-                    }
-                    val byteLen = (bb.getShort(namePos).toInt() and 0xFFFF)
-                    namePos += 2
-                    val safeLen = minOf(byteLen, page.size - namePos).coerceAtLeast(0)
-                    val colName = if (safeLen >= 2) {
-                        String(page, namePos, safeLen and -2, StandardCharsets.UTF_16LE)
-                    } else spec.name
-                    namePos += safeLen
-                    namedCols.add(spec.copy(name = colName))
-                }
-            }
-            namedCols.sortedBy { it.colId }
-        } catch (_: Throwable) {
-            emptyList()
-        }
-    }
-
-    private fun decodeAccessRow(
-        rec: ByteArray,
-        cols: List<AccessColumnDef>,
-        isJet3: Boolean
-    ): List<String> {
-        if (rec.size < 2 || cols.isEmpty()) return List(cols.size) { "" }
-        val bb = ByteBuffer.wrap(rec).order(ByteOrder.LITTLE_ENDIAN)
-        val dataStart = if (isJet3) 1 else 2
-
-        val nullBitmapBytes = (cols.size + 7) / 8
-        val nullMaskStart = (rec.size - nullBitmapBytes).coerceAtLeast(0)
-
-        fun isNotNull(colId: Int): Boolean {
-            val byteIdx = nullMaskStart + (colId shr 3)
-            if (byteIdx !in rec.indices) return true
-            return ((rec[byteIdx].toInt() ushr (colId and 7)) and 1) != 0
-        }
-
-        val varOffsets = HashMap<Int, IntRange>()
-        try {
-            if (!isJet3 && nullMaskStart >= 4) {
-                val numVarCols = (bb.getShort(nullMaskStart - 2).toInt() and 0xFFFF).coerceIn(0, 128)
-                val tableBase = nullMaskStart - 2 - (numVarCols + 1) * 2
-                if (tableBase >= dataStart) {
-                    for (v in 0 until numVarCols) {
-                        val vStart = bb.getShort(tableBase - v * 2 + numVarCols * 2).toInt() and 0x1FFF
-                        val vEnd = bb.getShort(tableBase - (v + 1) * 2 + numVarCols * 2).toInt() and 0x1FFF
-                        if (vStart in dataStart..rec.size && vEnd in vStart..rec.size) {
-                            varOffsets[v] = vStart until vEnd
-                        }
-                    }
-                }
-            } else if (isJet3 && nullMaskStart >= 2) {
-                val numVarCols = (rec[nullMaskStart - 1].toInt() and 0xFF).coerceIn(0, 128)
-                val tableBase = nullMaskStart - 1 - (numVarCols + 1)
-                if (tableBase >= dataStart) {
-                    for (v in 0 until numVarCols) {
-                        val vStart = rec[nullMaskStart - 2 - v].toInt() and 0xFF
-                        val vEnd = rec[nullMaskStart - 2 - (v + 1)].toInt() and 0xFF
-                        if (vStart in dataStart..rec.size && vEnd in vStart..rec.size) {
-                            varOffsets[v] = vStart until vEnd
-                        }
-                    }
-                }
-            }
-        } catch (_: Throwable) {}
-
-        return cols.map { col ->
-            if (!isNotNull(col.colId)) {
-                "NULL"
-            } else if (col.isFixed) {
-                val pos = dataStart + col.fixedOffset
-                decodeFixedAccessField(rec, bb, pos, col.colType)
-            } else {
-                val range = varOffsets[col.varColIndex]
-                if (range != null && !range.isEmpty() && range.last < rec.size) {
-                    decodeVariableAccessField(rec, range.first, range.last + 1 - range.first, col.colType, isJet3)
-                } else {
-                    ""
-                }
-            }
-        }
-    }
-
-    private fun decodeFixedAccessField(rec: ByteArray, bb: ByteBuffer, pos: Int, colType: Int): String {
-        if (pos < 0 || pos >= rec.size) return ""
-        return try {
-            when (colType) {
-                0x01 -> "TRUE"
-                0x02 -> (rec[pos].toInt() and 0xFF).toString()
-                0x03 -> if (pos + 2 <= rec.size) bb.getShort(pos).toString() else ""
-                0x04 -> if (pos + 4 <= rec.size) bb.getInt(pos).toString() else ""
-                0x05 -> if (pos + 8 <= rec.size) String.format(Locale.US, "%.2f", bb.getLong(pos) / 10000.0) else ""
-                0x06 -> if (pos + 4 <= rec.size) bb.getFloat(pos).toString() else ""
-                0x07 -> if (pos + 8 <= rec.size) bb.getDouble(pos).toString() else ""
-                0x08 -> if (pos + 8 <= rec.size) {
-                    ExcelDateFormatter.formatExcelSerialDate(bb.getDouble(pos), false)
-                } else ""
-                else -> ""
-            }
-        } catch (_: Throwable) {
-            ""
-        }
-    }
-
-    private fun decodeVariableAccessField(
-        rec: ByteArray,
-        offset: Int,
-        length: Int,
-        colType: Int,
-        isJet3: Boolean
-    ): String {
-        if (length <= 0 || offset < 0 || offset + length > rec.size) return ""
-        if (colType == 0x0A || colType == 0x0C) {
-            if (isJet3) {
-                return String(rec, offset, length, PlainTextSession.CP1251).trim()
-            }
-            if (length >= 2 && (rec[offset].toInt() and 0xFF) == 0xFF && (rec[offset + 1].toInt() and 0xFF) == 0xFE) {
-                return String(rec, offset + 2, length - 2, PlainTextSession.CP1251).trim()
-            }
-            if (length >= 2) {
-                return String(rec, offset, length and -2, StandardCharsets.UTF_16LE).trim()
-            }
-        }
-        return "[BLOB $length B]"
-    }
+    override fun getPageText(pageIndex: Int): String = ""
 }
 
 object SqliteFieldType {
@@ -1444,11 +1098,25 @@ class SqliteDatabaseSession(
                     directOpenError = e
                 }
 
-                val targetCacheDir = resolveEffectiveCacheDir()
-                if (openedConn == null && targetCacheDir != null) {
+                if (openedConn == null && android.os.Process.isIsolated()) {
+                    try {
+                        val size = android.system.Os.fstat(pfd.fileDescriptor).st_size
+                        val reader = CleanRoomSqliteReader(SqlitePageSource { offset, dst, length ->
+                            android.system.Os.pread(pfd.fileDescriptor, dst, 0, length, offset)
+                        }, size)
+                        val candidate = CleanRoomSqliteConnection(reader)
+                        applySecurityPragmasAndReadTables(candidate)
+                        openedConn = candidate
+                    } catch (e: Throwable) {
+                        if (directOpenError != null) e.addSuppressed(directOpenError)
+                        directOpenError = e
+                    }
+                }
+
+                if (openedConn == null) {
                     var tempFile: File? = null
                     try {
-                        tempFile = File.createTempFile("sqlite_inspect_", ".db", targetCacheDir)
+                        tempFile = com.omnireader.core.engine.ScratchFiles.createTempFile("sqlite_inspect_", ".db", resolveEffectiveCacheDir())
                         copyDescriptorViaPread(pfd.fileDescriptor, tempFile)
 
                         val params = OpenParams.Builder()
@@ -1465,7 +1133,7 @@ class SqliteDatabaseSession(
                             throw schemaErr
                         }
                     } catch (fallbackErr: Throwable) {
-                        try { tempFile?.delete() } catch (_: Throwable) {}
+                        com.omnireader.core.engine.ScratchFiles.delete(tempFile)
                         if (directOpenError != null) {
                             fallbackErr.addSuppressed(directOpenError)
                         }
@@ -1501,7 +1169,7 @@ class SqliteDatabaseSession(
             }
             try { dbConn?.close() } catch (s: Throwable) { initError.addSuppressed(s) }
             dbConn = null
-            try { activeTempFile?.delete() } catch (_: Throwable) {}
+            com.omnireader.core.engine.ScratchFiles.delete(activeTempFile)
             activeTempFile = null
             try { pfd?.close() } catch (s: Throwable) { initError.addSuppressed(s) }
             try { metadataExecutor.shutdownNow() } catch (_: Throwable) {}
@@ -2254,7 +1922,7 @@ class SqliteDatabaseSession(
         } catch (_: Throwable) {
         } finally {
             try { pfd?.close() } catch (_: Throwable) {}
-            try { tempToDelete?.delete() } catch (_: Throwable) {}
+            com.omnireader.core.engine.ScratchFiles.delete(tempToDelete)
         }
     }
 }

@@ -19,6 +19,21 @@
     public <init>();
     public *** canHandle(...);
     public *** createSession(...);
+    public *** createSessionWithPassword(...);
+}
+-keep interface com.omnireader.core.engine.impl.GplCoreEngineBridge { *; }
+-keep class * implements com.omnireader.core.engine.impl.GplCoreEngineBridge {
+    public <init>();
+    public *** createDjvuSession(...);
+    public *** createMobiSession(...);
+    public *** createAccessSession(...);
+    public *** renderDwg(...);
+}
+-keep interface me.hlebkukleuski.fullfilestudio.feature.cadvector.GplCad3dBridge { *; }
+-keep class * implements me.hlebkukleuski.fullfilestudio.feature.cadvector.GplCad3dBridge {
+    public <init>();
+    public *** parseBlend(...);
+    public *** parseFbx(...);
 }
 
 # 2. Keep ArchiveSession contract (invoked in IsolatedRenderService)

@@ -1,6 +1,13 @@
 BSD 3-Clause License
 
-Copyright (c) 2010 Edouard Goubault. All rights reserved.
+Copyright (c) 2008-2026, Google Inc. / Google LLC (Protobuf, R8, Tink, Dawn, Skia, Snappy). All rights reserved.
+Copyright (c) 2015-2026, Meta Platforms, Inc. and affiliates (Zstandard). All rights reserved.
+Copyright (c) 2006-2026, assimp team (Open Asset Import Library / Assimp). All rights reserved.
+Copyright (c) 2020, Yevhenii Reizner (tiny-skia). All rights reserved.
+Copyright (c) 1991, 1992, 1993, The Regents of the University of California (FreeBSD / UC Berkeley stdlib qsort.c and heapsort.c). All rights reserved.
+Copyright (c) 2001, Robert Penner (easing equations). All rights reserved.
+Copyright (c) 2009-2010, Sony Pictures Imageworks Inc., et al. (OpenShadingLanguage noise tables and functions). All rights reserved.
+Copyright (c) 2023-2026, Arm Limited and/or its affiliates (KleidiAI). All rights reserved.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:

@@ -1,0 +1,5 @@
+Test .blend fixtures in this directory include:
+- anim_*.blend: derived from KhronosGroup/glTF-Blender-IO test suite
+  (Apache License 2.0; see LICENSE-glTF-Blender-IO.txt).
+- startup_279.blend, startup_293.blend, startup_36.blend: default startup scenes created with
+  Blender (Copyright Blender Foundation, https://www.blender.org/, GPL-2.0-or-later / CC0).

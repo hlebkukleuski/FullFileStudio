@@ -1,6 +1,9 @@
 /*
  * Copyright (C) 2026 Hleb Kukleuski <hlebkukleuski@gmail.com>
  *
+ * RAR 5.0 decompression logic informed by libarchive (BSD 2-Clause License,
+ * Copyright (c) 2018-2024 The libarchive Authors).
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
@@ -24,7 +27,6 @@ import android.graphics.Paint
 import android.os.ParcelFileDescriptor
 import android.system.Os
 import android.system.OsConstants
-import com.github.junrar.Archive
 import com.omnireader.core.engine.DetectedFormat
 import com.omnireader.core.engine.DocumentSession
 import com.omnireader.core.engine.FileSignatureDetector
@@ -194,11 +196,6 @@ internal class PfdPositionalInputStream(
     }
 }
 
-/**
- * Clean-Room RAR 5.0 (`Rar!\x1A\x07\x01\x00`) read-only header parser and stream extractor.
- * The WinRAR/UnRAR license only restricts recreating the RAR compression algorithm; read-only
- * parsing and extraction of RAR 5.0 archives is 100% permitted in commercial applications.
- */
 internal object CleanRoomRar5Parser {
 
     data class Rar5FileEntry(
@@ -212,7 +209,8 @@ internal object CleanRoomRar5Parser {
         val isDirectory: Boolean,
         val isSymlink: Boolean,
         val isEncrypted: Boolean,
-        val dataCrc32: Int?
+        val dataCrc32: Int?,
+        val isSplit: Boolean = false
     )
 
     data class Rar5ParseResult(
@@ -253,7 +251,14 @@ internal object CleanRoomRar5Parser {
         }
     }
 
-    fun parseEntries(source: ZeroCacheReadableSource, fileSize: Long): Rar5ParseResult {
+    fun interface PositionalReader {
+        fun readAt(offset: Long, buffer: ByteBuffer): Int
+    }
+
+    fun parseEntries(source: ZeroCacheReadableSource, fileSize: Long): Rar5ParseResult =
+        parseEntries(PositionalReader { offset, buffer -> source.readAt(offset, buffer) }, fileSize)
+
+    fun parseEntries(source: PositionalReader, fileSize: Long): Rar5ParseResult {
         val entries = ArrayList<Rar5FileEntry>()
         val sigBuf = ByteBuffer.allocateDirect(8)
         if (source.readAt(0L, sigBuf) < 8) {
@@ -333,7 +338,7 @@ internal object CleanRoomRar5Parser {
                     val isSolid = (compInfo and 0x40) != 0
                     val compMethod = (compInfo ushr 7) and 0x07
                     val dictSizePower = (compInfo ushr 10) and 0x1F
-                    val dictSizeBytes = (128 * 1024) shl dictSizePower.coerceIn(0, 15)
+                    val dictSizeBytes = ((128L * 1024L) shl dictSizePower.coerceIn(0, 20)).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
 
                     reader.readVint()
                     val nameLen = reader.readVint().toInt().coerceIn(0, hLen - reader.pos)
@@ -373,7 +378,8 @@ internal object CleanRoomRar5Parser {
                                 isDirectory = isDir,
                                 isSymlink = isSymlink,
                                 isEncrypted = isFileEncrypted,
-                                dataCrc32 = crc32
+                                dataCrc32 = crc32,
+                                isSplit = (headerFlags and 0x0018) != 0
                             )
                         )
                     }
@@ -387,97 +393,159 @@ internal object CleanRoomRar5Parser {
         return Rar5ParseResult(entries, isHeaderEncrypted = false)
     }
 
-    fun decompressRar5Stream(
-        compressed: ByteArray,
-        expectedUnpackedSize: Long,
-        dictSizeBytes: Int,
-        output: OutputStream,
-        maxAllowedBytes: Long
-    ): Boolean {
-        if (expectedUnpackedSize == 0L) return true
-        if (compressed.isEmpty()) return expectedUnpackedSize <= 0L
-        val targetSize = if (expectedUnpackedSize > 0L) {
-            minOf(expectedUnpackedSize, maxAllowedBytes).toInt()
-        } else {
-            minOf(compressed.size.toLong() * 8L, maxAllowedBytes).toInt()
+    fun unpackEntry(
+        all: List<Rar5FileEntry>,
+        target: Rar5FileEntry,
+        maxFileBytes: Long,
+        readPacked: (Rar5FileEntry) -> ByteArray
+    ): ByteArray {
+        if (target.isEncrypted) throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version.")
+        if (target.isSplit) throw IllegalStateException("Multi-volume RAR5 archives are not supported")
+        if (target.unpackedSize == 0L) {
+            val empty = ByteArray(0)
+            verifyCrc(target, empty)
+            return empty
         }
-        if (targetSize <= 0) return true
+        if (target.compressionMethod == 0) {
+            val raw = readPacked(target)
+            if (target.unpackedSize >= 0 && raw.size.toLong() != target.unpackedSize) throw IllegalStateException("Stored RAR5 size mismatch")
+            return raw.also { verifyCrc(target, it) }
+        }
+        val chain = ArrayList<Rar5FileEntry>()
+        if (target.isSolid) {
+            val idx = all.indexOfFirst { it.dataOffset == target.dataOffset }
+            if (idx < 0) throw IllegalStateException("Solid RAR5 entry not found")
+            var start = idx
+            while (start > 0 && all[start].isSolid) start--
+            for (i in start..idx) {
+                val e = all[i]
+                if (!e.isDirectory && e.compressionMethod != 0 && e.unpackedSize != 0L) chain.add(e)
+            }
+        } else {
+            chain.add(target)
+        }
+        if (chain.isEmpty()) {
+            val empty = ByteArray(0)
+            verifyCrc(target, empty)
+            return empty
+        }
+        val unpacker = Rar5Unpacker(maxOf(chain.maxOf { it.dictSizeBytes.toLong() }, 1L shl 17), maxFileBytes)
+        var result: ByteArray? = null
+        for (e in chain) {
+            if (e.isEncrypted) throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version.")
+            if (e.isSplit) throw IllegalStateException("Multi-volume RAR5 archives are not supported")
+            if (!e.isSolid) unpacker.resetForNonSolidFile()
+            val produced = unpacker.unpackFile(readPacked(e), e.unpackedSize)
+            if (e.dataOffset == target.dataOffset) result = produced
+        }
+        val data = result ?: ByteArray(0)
+        verifyCrc(target, data)
+        return data
+    }
 
-        return try {
-            val bitReader = Rar5BitReader(compressed)
-            val windowCap = minOf(maxOf(dictSizeBytes, 128 * 1024), 16 * 1024 * 1024)
-            val window = ByteArray(windowCap)
-            var winPos = 0
-            var totalWritten = 0
-            val outChunk = ByteArray(16 * 1024)
-            var outChunkPos = 0
+    private fun verifyCrc(entry: Rar5FileEntry, data: ByteArray) {
+        val expected = entry.dataCrc32 ?: return
+        val crc = java.util.zip.CRC32()
+        crc.update(data)
+        if (crc.value.toInt() != expected) throw IllegalStateException("RAR5 CRC mismatch")
+    }
 
-            fun emitByte(b: Byte) {
-                window[winPos] = b
-                winPos = (winPos + 1) % windowCap
-                outChunk[outChunkPos++] = b
-                totalWritten++
-                if (outChunkPos == outChunk.size) {
-                    output.write(outChunk, 0, outChunkPos)
-                    outChunkPos = 0
+    class Rar5Unpacker(dictSizeBytes: Long, private val maxFileBytes: Long) {
+        private val windowSize: Int
+        private val window: ByteArray
+        private var totalProduced = 0L
+        private val oldDist = LongArray(4)
+        private var lastLength = 0
+        private var tablesRead = false
+        private val mainTable = Rar5HuffmanTable(306)
+        private val distTable = Rar5HuffmanTable(64)
+        private val lowDistTable = Rar5HuffmanTable(16)
+        private val lenTable = Rar5HuffmanTable(44)
+
+        private class Filter(val type: Int, val startInFile: Long, val length: Int, val channels: Int)
+
+        init {
+            var size = 1 shl 17
+            val target = dictSizeBytes.coerceIn(1L shl 17, 1L shl 28)
+            while (size < target) size = size shl 1
+            windowSize = size
+            window = ByteArray(windowSize)
+        }
+
+        fun resetForNonSolidFile() {
+            oldDist.fill(0)
+            lastLength = 0
+            tablesRead = false
+        }
+
+        fun unpackFile(compressed: ByteArray, unpackedSize: Long): ByteArray {
+            if (unpackedSize < 0 || unpackedSize > maxFileBytes) throw IllegalStateException("RAR5 entry too large")
+            val out = ByteArray(unpackedSize.toInt())
+            var produced = 0
+            val fileStart = totalProduced
+            val filters = ArrayList<Filter>()
+            val br = Rar5BitReader(compressed)
+
+            fun put(b: Byte) {
+                window[(totalProduced and (windowSize - 1).toLong()).toInt()] = b
+                totalProduced++
+                if (produced < out.size) out[produced] = b
+                produced++
+            }
+
+            fun copy(length: Int, distance: Long) {
+                if (distance <= 0 || distance > totalProduced || distance > windowSize) throw IllegalStateException("RAR5 distance out of range")
+                var src = totalProduced - distance
+                for (i in 0 until length) {
+                    if (produced >= out.size) return
+                    put(window[(src and (windowSize - 1).toLong()).toInt()])
+                    src++
                 }
             }
 
-            val prevDist = IntArray(4)
-            var lastLength = 0
-
-            val mainTable = Rar5HuffmanTable(306)
-            val distTable = Rar5HuffmanTable(64)
-            val lowDistTable = Rar5HuffmanTable(16)
-            val lenTable = Rar5HuffmanTable(44)
-
-            var isLastBlock = false
-            while (!isLastBlock && totalWritten < targetSize && bitReader.hasBits(8)) {
-                bitReader.alignToByte()
-                if (!bitReader.hasBits(16)) break
-                val blockFlags = bitReader.readBits(8)
-                bitReader.readBits(8)
-
-                val byteCount = ((blockFlags ushr 3) and 0x03) + 1
-                if (byteCount > 3) break
-                val bitSize = (blockFlags and 0x07) + 1
-                isLastBlock = (blockFlags and 0x40) != 0
-                val tablePresent = (blockFlags and 0x80) != 0
-
-                var blockByteSize = 0
-                for (i in 0 until byteCount) {
-                    blockByteSize = blockByteSize or (bitReader.readBits(8) shl (i * 8))
+            var lastBlock = false
+            while (produced < out.size && !lastBlock) {
+                br.alignToByte()
+                if (!br.hasBits(16)) break
+                val flags = br.readBits(8)
+                val checksum = br.readBits(8)
+                val byteCount = ((flags ushr 3) and 3) + 1
+                if (byteCount == 4) throw IllegalStateException("Bad RAR5 block header")
+                val bitSize = (flags and 7) + 1
+                var blockSize = 0
+                for (i in 0 until byteCount) blockSize = blockSize or (br.readBits(8) shl (8 * i))
+                var check = 0x5A xor flags
+                for (i in 0 until byteCount) check = check xor ((blockSize ushr (8 * i)) and 0xFF)
+                if ((check and 0xFF) != checksum) throw IllegalStateException("RAR5 block checksum mismatch")
+                lastBlock = flags and 0x40 != 0
+                val blockEnd = br.bitPosition + (blockSize - 1) * 8 + bitSize
+                if (flags and 0x80 != 0) {
+                    if (!readRar5HuffmanTables(br, mainTable, distTable, lowDistTable, lenTable)) throw IllegalStateException("Bad RAR5 tables")
+                    tablesRead = true
                 }
-                val blockEndBitPos = bitReader.bitPosition + (blockByteSize - 1) * 8 + bitSize
-
-                if (tablePresent) {
-                    if (!readRar5HuffmanTables(bitReader, mainTable, distTable, lowDistTable, lenTable)) {
-                        break
-                    }
-                }
-
-                while (bitReader.bitPosition < blockEndBitPos && totalWritten < targetSize) {
-                    val sym = mainTable.decodeSymbol(bitReader)
-                    if (sym < 0) break
+                if (!tablesRead) throw IllegalStateException("RAR5 block without tables")
+                while (br.bitPosition < blockEnd && produced < out.size) {
+                    val sym = mainTable.decodeSymbol(br)
+                    if (sym < 0) throw IllegalStateException("Bad RAR5 symbol")
                     when {
-                        sym < 256 -> {
-                            emitByte(sym.toByte())
-                        }
+                        sym < 256 -> put(sym.toByte())
                         sym >= 262 -> {
-                            var length = slotToLength(bitReader, sym - 262)
-                            val distSlot = distTable.decodeSymbol(bitReader)
-                            if (distSlot < 0) break
-                            val distance: Int = if (distSlot < 4) {
-                                distSlot + 1
+                            var length = slotToLength(br, sym - 262)
+                            val distSlot = distTable.decodeSymbol(br)
+                            if (distSlot < 0) throw IllegalStateException("Bad RAR5 distance")
+                            var distance = 1L
+                            if (distSlot < 4) {
+                                distance += distSlot
                             } else {
-                                val dBits = (distSlot / 2) - 1
-                                val base = (2 or (distSlot and 1)) shl dBits
+                                val dBits = distSlot / 2 - 1
+                                distance += (2L or (distSlot and 1).toLong()) shl dBits
                                 if (dBits >= 4) {
-                                    val highPart = if (dBits > 4) bitReader.readBits(dBits - 4) shl 4 else 0
-                                    val lowPart = lowDistTable.decodeSymbol(bitReader).coerceAtLeast(0)
-                                    base + highPart + lowPart + 1
+                                    if (dBits > 4) distance += br.readBits(dBits - 4).toLong() shl 4
+                                    val low = lowDistTable.decodeSymbol(br)
+                                    if (low < 0) throw IllegalStateException("Bad RAR5 low distance")
+                                    distance += low
                                 } else {
-                                    base + bitReader.readBits(dBits) + 1
+                                    distance += br.readBits(dBits)
                                 }
                             }
                             if (distance > 0x100) {
@@ -487,60 +555,103 @@ internal object CleanRoomRar5Parser {
                                     if (distance > 0x40000) length++
                                 }
                             }
-                            prevDist[3] = prevDist[2]
-                            prevDist[2] = prevDist[1]
-                            prevDist[1] = prevDist[0]
-                            prevDist[0] = distance
+                            oldDist[3] = oldDist[2]; oldDist[2] = oldDist[1]; oldDist[1] = oldDist[0]; oldDist[0] = distance
                             lastLength = length
-
-                            for (k in 0 until length) {
-                                if (totalWritten >= targetSize) break
-                                val srcIdx = (winPos - distance + windowCap) % windowCap
-                                emitByte(window[srcIdx])
-                            }
+                            copy(length, distance)
                         }
                         sym == 256 -> {
-                            break
-                        }
-                        sym == 257 -> {
-                            if (lastLength > 0 && prevDist[0] > 0) {
-                                val dist = prevDist[0]
-                                for (k in 0 until lastLength) {
-                                    if (totalWritten >= targetSize) break
-                                    val srcIdx = (winPos - dist + windowCap) % windowCap
-                                    emitByte(window[srcIdx])
-                                }
+                            val start = readFilterData(br)
+                            val len = readFilterData(br)
+                            val type = br.readBits(3)
+                            val channels = if (type == 0) br.readBits(5) + 1 else 0
+                            if (len in 1..(0x400000) && type in 0..3) {
+                                filters.add(Filter(type, (totalProduced - fileStart) + start, len.toInt(), channels))
                             }
                         }
-                        sym in 258..261 -> {
+                        sym == 257 -> if (lastLength != 0) copy(lastLength, oldDist[0])
+                        else -> {
                             val idx = sym - 258
-                            val dist = prevDist[idx]
-                            for (k in idx downTo 1) {
-                                prevDist[k] = prevDist[k - 1]
-                            }
-                            prevDist[0] = dist
-                            val lenSym = lenTable.decodeSymbol(bitReader)
-                            if (lenSym < 0) break
-                            val length = slotToLength(bitReader, lenSym)
+                            val distance = oldDist[idx]
+                            for (k in idx downTo 1) oldDist[k] = oldDist[k - 1]
+                            oldDist[0] = distance
+                            val lenSlot = lenTable.decodeSymbol(br)
+                            if (lenSlot < 0) throw IllegalStateException("Bad RAR5 length")
+                            val length = slotToLength(br, lenSlot)
                             lastLength = length
-                            if (dist > 0) {
-                                for (k in 0 until length) {
-                                    if (totalWritten >= targetSize) break
-                                    val srcIdx = (winPos - dist + windowCap) % windowCap
-                                    emitByte(window[srcIdx])
-                                }
-                            }
+                            copy(length, distance)
                         }
                     }
                 }
             }
+            if (produced < out.size) throw IllegalStateException("RAR5 stream ended early")
+            for (f in filters) applyFilter(out, f)
+            return out
+        }
 
-            if (outChunkPos > 0) {
-                output.write(outChunk, 0, outChunkPos)
+        private fun readFilterData(br: Rar5BitReader): Long {
+            val byteCount = br.readBits(2) + 1
+            var data = 0L
+            for (i in 0 until byteCount) data = data or (br.readBits(8).toLong() shl (8 * i))
+            return data
+        }
+
+        private fun applyFilter(data: ByteArray, f: Filter) {
+            if (f.startInFile < 0 || f.startInFile >= data.size) return
+            val start = f.startInFile.toInt()
+            val size = minOf(f.length, data.size - start)
+            when (f.type) {
+                0 -> {
+                    val src = data.copyOfRange(start, start + size)
+                    var srcPos = 0
+                    for (channel in 0 until f.channels) {
+                        var prev = 0
+                        var dest = channel
+                        while (dest < size) {
+                            prev = (prev - src[srcPos++]) and 0xFF
+                            data[start + dest] = prev.toByte()
+                            dest += f.channels
+                        }
+                    }
+                }
+                1, 2 -> {
+                    val fileSize = 0x1000000L
+                    val cmp2 = if (f.type == 2) 0xE9 else 0xE8
+                    var cur = 0
+                    while (cur + 4 < size) {
+                        val b = data[start + cur].toInt() and 0xFF
+                        cur++
+                        if (b == 0xE8 || b == cmp2) {
+                            val offset = (cur + f.startInFile) % fileSize
+                            val p = start + cur
+                            val addr = (data[p].toLong() and 0xFF) or ((data[p + 1].toLong() and 0xFF) shl 8) or
+                                    ((data[p + 2].toLong() and 0xFF) shl 16) or ((data[p + 3].toLong() and 0xFF) shl 24)
+                            var newAddr = -1L
+                            if (addr and 0x80000000L != 0L) {
+                                if (((addr + offset) and 0x80000000L) == 0L) newAddr = (addr + fileSize) and 0xFFFFFFFFL
+                            } else {
+                                if (((addr - fileSize) and 0x80000000L) != 0L) newAddr = (addr - offset) and 0xFFFFFFFFL
+                            }
+                            if (newAddr >= 0) {
+                                data[p] = newAddr.toByte(); data[p + 1] = (newAddr ushr 8).toByte()
+                                data[p + 2] = (newAddr ushr 16).toByte(); data[p + 3] = (newAddr ushr 24).toByte()
+                            }
+                            cur += 4
+                        }
+                    }
+                }
+                3 -> {
+                    var cur = 0
+                    while (cur + 3 < size) {
+                        val p = start + cur
+                        if ((data[p + 3].toInt() and 0xFF) == 0xEB) {
+                            var offset = (data[p].toLong() and 0xFF) or ((data[p + 1].toLong() and 0xFF) shl 8) or ((data[p + 2].toLong() and 0xFF) shl 16)
+                            offset -= (f.startInFile + cur) / 4
+                            data[p] = offset.toByte(); data[p + 1] = (offset ushr 8).toByte(); data[p + 2] = (offset ushr 16).toByte()
+                        }
+                        cur += 4
+                    }
+                }
             }
-            totalWritten > 0 || expectedUnpackedSize == 0L
-        } catch (_: Throwable) {
-            false
         }
     }
 
@@ -719,9 +830,11 @@ class ArchiveNavigatorEngineImpl : ArchiveNavigatorEngine {
         return false
     }
 
-    override fun createSession(fd: FileDescriptor): DocumentSession = createArchiveSession(fd)
+    override fun createSession(fd: FileDescriptor): DocumentSession = createArchiveSession(fd, null)
 
-    override fun createArchiveSession(fd: FileDescriptor): ArchiveSession {
+    override fun createArchiveSession(fd: FileDescriptor): ArchiveSession = createArchiveSession(fd, null)
+
+    fun createArchiveSession(fd: FileDescriptor, password: String? = null): ArchiveSession {
         val header = ByteBuffer.allocateDirect(8)
         val fileSize = resolveArchiveDescriptorSize(fd, -1L)
         if (fileSize >= 0x8006L) {
@@ -739,11 +852,14 @@ class ArchiveNavigatorEngineImpl : ArchiveNavigatorEngine {
         }
         try { Os.pread(fd, header, 0L) } catch (_: Exception) {}
         val pfd = ParcelFileDescriptor.dup(fd)
-        return ArchiveSessionImpl(pfd)
+        return ArchiveSessionImpl(pfd, password)
     }
 }
 
-class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession {
+class ArchiveSessionImpl(
+    private val pfd: ParcelFileDescriptor,
+    private val password: String? = null
+) : ArchiveSession {
     @Volatile private var isClosed = false
     @Volatile private var lastErrorMsg: String? = null
     private val source = ZeroCacheReadableSource(pfd.fileDescriptor)
@@ -754,7 +870,8 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
         val rawNameInArchive: String,
         val uncompressedSize: Long,
         val isSingleCompressedStream: Boolean = false,
-        val rar5Entry: CleanRoomRar5Parser.Rar5FileEntry? = null
+        val rar5Entry: CleanRoomRar5Parser.Rar5FileEntry? = null,
+        val rar4Entry: Rar4Parser.Rar4FileEntry? = null
     )
 
     private val entryMetaList = mutableListOf<ArchiveEntryMeta>()
@@ -863,7 +980,10 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
         when (arcType) {
             ArcType.ZIP -> {
                 parseZipEntries()
-                if (entryMetaList.isEmpty() && lastErrorMsg?.startsWith("PASSWORD_REQUIRED") != true) {
+                if (entryMetaList.isEmpty() &&
+                    lastErrorMsg?.startsWith("PASSWORD_REQUIRED") != true &&
+                    lastErrorMsg?.startsWith("UNSUPPORTED_ENCRYPTION") != true
+                ) {
                     lastErrorMsg = null
                     parseTarEntries { openPositionalStream() }
                     if (entryMetaList.isNotEmpty()) {
@@ -900,7 +1020,8 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
         rawArchiveKey: String = displayName,
         compressedSize: Long = -1L,
         isSingleStream: Boolean = false,
-        rar5Entry: CleanRoomRar5Parser.Rar5FileEntry? = null
+        rar5Entry: CleanRoomRar5Parser.Rar5FileEntry? = null,
+        rar4Entry: Rar4Parser.Rar4FileEntry? = null
     ) {
         if (entryMetaList.size >= MAX_ARCHIVE_ENTRIES) return
         val clean = sanitizeArchiveEntryPath(displayName) ?: return
@@ -923,7 +1044,8 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
                 rawNameInArchive = rawArchiveKey,
                 uncompressedSize = normalizedSize,
                 isSingleCompressedStream = isSingleStream,
-                rar5Entry = rar5Entry
+                rar5Entry = rar5Entry,
+                rar4Entry = rar4Entry
             )
         )
         val sizeLabel = if (normalizedSize >= 0L) "$normalizedSize B" else "unknown size"
@@ -1026,7 +1148,7 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
         }
 
         if (sawEncryptedEntry && entryMetaList.isEmpty()) {
-            lastErrorMsg = "PASSWORD_REQUIRED: Архив ZIP защищён паролем."
+            lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted ZIP archives is not supported in this version."
         } else if (entryMetaList.isEmpty() && lastErrorMsg == null) {
             lastErrorMsg = "В архиве не найдено файлов или оглавление повреждено."
         }
@@ -1035,23 +1157,36 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
     private fun parseSevenZEntries() {
         try {
             openNewChannel().use { channel ->
-                SevenZFile.builder()
-                    .setSeekableByteChannel(channel)
-                    .get()
-                    .use { sevenZ ->
-                        for (entry in sevenZ.entries) {
-                            if (!entry.isDirectory) {
-                                registerArchiveEntry(entry.name, entry.size)
-                            }
+                val builder = SevenZFile.builder().setSeekableByteChannel(channel)
+                if (!password.isNullOrEmpty()) {
+                    builder.setPassword(password.toCharArray())
+                }
+                builder.get().use { sevenZ ->
+                    for (entry in sevenZ.entries) {
+                        if (!entry.isDirectory) {
+                            registerArchiveEntry(entry.name, entry.size)
                         }
                     }
+                }
             }
         } catch (_: PasswordRequiredException) {
-            lastErrorMsg = "PASSWORD_REQUIRED: Архив 7z защищён паролем."
+            lastErrorMsg = if (password.isNullOrEmpty()) {
+                "PASSWORD_REQUIRED: Архив 7z защищён паролем."
+            } else {
+                "PASSWORD_REQUIRED: Incorrect password for 7z archive."
+            }
         } catch (e: Exception) {
             val msg = e.message ?: ""
-            if (msg.contains("password", ignoreCase = true) || msg.contains("encrypted", ignoreCase = true)) {
-                lastErrorMsg = "PASSWORD_REQUIRED: Архив 7z защищён паролем."
+            if (!password.isNullOrEmpty() ||
+                msg.contains("password", ignoreCase = true) ||
+                msg.contains("encrypted", ignoreCase = true) ||
+                msg.contains("0x06f10701", ignoreCase = true)
+            ) {
+                lastErrorMsg = if (password.isNullOrEmpty()) {
+                    "PASSWORD_REQUIRED: Архив 7z защищён паролем."
+                } else {
+                    "PASSWORD_REQUIRED: Incorrect password for 7z archive."
+                }
             } else {
                 lastErrorMsg = "Ошибка чтения 7z-архива: ${e.localizedMessage}"
             }
@@ -1151,48 +1286,81 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
         registerArchiveEntry(effectiveName, -1L, rawArchiveKey = effectiveName, isSingleStream = true)
     }
 
+    @Volatile private var rar4AllEntries: List<Rar4Parser.Rar4FileEntry> = emptyList()
+
+    private fun readRar4Packed(entry: Rar4Parser.Rar4FileEntry): ByteArray {
+        if (entry.packedSize < 0L || entry.packedSize > MAX_SINGLE_EXTRACTED_BYTES || entry.dataOffset + entry.packedSize > actualFileSize) {
+            throw IllegalStateException("Invalid RAR data area")
+        }
+        val size = entry.packedSize.toInt()
+        val buf = ByteBuffer.allocateDirect(size)
+        var done = 0
+        while (done < size) {
+            val r = source.readAt(entry.dataOffset + done, buf)
+            if (r <= 0) break
+            done += r
+        }
+        if (done < size) throw IllegalStateException("Truncated RAR data")
+        buf.flip()
+        return ByteArray(size).also { buf.get(it) }
+    }
+
     private fun parseRar4Entries() {
-        var tmpRar: File? = null
         try {
-            tmpRar = createSafeTempFile("omni_rar4_", ".rar")
-            FileOutputStream(tmpRar).use { fos ->
-                openPositionalStream().use { input ->
-                    copyWithSlidingWindow(input, fos, MAX_SINGLE_EXTRACTED_BYTES)
+            val result = Rar4Parser.parseEntries(source, actualFileSize)
+            rar4AllEntries = result.entries
+            if (result.isHeaderEncrypted) {
+                lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR archives is not supported in this version."
+                return
+            }
+            var sawEncrypted = false
+            for (fh in result.entries) {
+                if (fh.isEncrypted) {
+                    sawEncrypted = true
+                }
+                if (!fh.isDirectory) {
+                    registerArchiveEntry(
+                        displayName = fh.rawName,
+                        size = fh.unpackedSize,
+                        rawArchiveKey = fh.rawName,
+                        compressedSize = fh.packedSize,
+                        rar4Entry = fh
+                    )
                 }
             }
-            Archive(tmpRar).use { rar ->
-                if (rar.isEncrypted || rar.isPasswordProtected) {
-                    lastErrorMsg = "PASSWORD_REQUIRED: Архив RAR защищён паролем."
-                    return
-                }
-                for (fh in rar.fileHeaders) {
-                    if (fh.isEncrypted) {
-                        lastErrorMsg = "PASSWORD_REQUIRED: Архив RAR защищён паролем."
-                        return
-                    }
-                    if (!fh.isDirectory) {
-                        val name = fh.fileName
-                        registerArchiveEntry(
-                            displayName = name,
-                            size = fh.fullUnpackSize,
-                            rawArchiveKey = name,
-                            compressedSize = fh.fullPackSize
-                        )
-                    }
-                }
+            if (entryMetaList.isEmpty() && sawEncrypted) {
+                lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR archives is not supported in this version."
             }
         } catch (e: Exception) {
             lastErrorMsg = "Ошибка чтения RAR-архива: ${e.localizedMessage}"
-        } finally {
-            try { tmpRar?.delete() } catch (_: Throwable) {}
         }
+    }
+
+    @Volatile private var rar5AllEntries: List<CleanRoomRar5Parser.Rar5FileEntry> = emptyList()
+
+    private fun readRar5Packed(entry: CleanRoomRar5Parser.Rar5FileEntry): ByteArray {
+        if (entry.packedSize < 0L || entry.packedSize > MAX_SINGLE_EXTRACTED_BYTES || entry.dataOffset + entry.packedSize > actualFileSize) {
+            throw IllegalStateException("Invalid RAR5 data area")
+        }
+        val size = entry.packedSize.toInt()
+        val buf = ByteBuffer.allocateDirect(size)
+        var done = 0
+        while (done < size) {
+            val r = source.readAt(entry.dataOffset + done, buf)
+            if (r <= 0) break
+            done += r
+        }
+        if (done < size) throw IllegalStateException("Truncated RAR5 data")
+        buf.flip()
+        return ByteArray(size).also { buf.get(it) }
     }
 
     private fun parseRar5Entries() {
         try {
             val result = CleanRoomRar5Parser.parseEntries(source, actualFileSize)
+            rar5AllEntries = result.entries
             if (result.isHeaderEncrypted) {
-                lastErrorMsg = "PASSWORD_REQUIRED: Архив RAR 5.0 защищён паролем (заголовки зашифрованы)."
+                lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version."
                 return
             }
             var sawEncryptedFile = false
@@ -1212,7 +1380,7 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
             }
             if (entryMetaList.isEmpty()) {
                 lastErrorMsg = if (sawEncryptedFile) {
-                    "PASSWORD_REQUIRED: Архив RAR 5.0 защищён паролем."
+                    "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version."
                 } else {
                     "В архиве RAR 5.0 не найдено файлов или оглавление повреждено."
                 }
@@ -1222,29 +1390,8 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
         }
     }
 
-    private fun createSafeTempFile(prefix: String, suffix: String): File {
-        val candidateDirs = listOfNotNull(
-            System.getProperty("omnireader.cache.dir")?.let { File(it) },
-            System.getProperty("java.io.tmpdir")?.let { File(it) },
-            File("/data/data/me.hlebkukleuski.fullfilestudio/cache"),
-            File("/data/data/me.hlebkukleuski.fullfilestudio.sitedl/cache"),
-            File("/data/user/0/me.hlebkukleuski.fullfilestudio/cache"),
-            File("/data/user/0/me.hlebkukleuski.fullfilestudio.sitedl/cache")
-        )
-        for (dir in candidateDirs) {
-            try {
-                if (!dir.exists()) dir.mkdirs()
-                if (dir.exists() && dir.canWrite()) {
-                    val f = File.createTempFile(prefix, suffix, dir)
-                    f.deleteOnExit()
-                    return f
-                }
-            } catch (_: Throwable) {}
-        }
-        val fallback = File.createTempFile(prefix, suffix)
-        fallback.deleteOnExit()
-        return fallback
-    }
+    private fun createSafeTempFile(prefix: String, suffix: String): File =
+        com.omnireader.core.engine.ScratchFiles.createTempFile(prefix, suffix)
 
     override fun openVirtualFile(entryPath: String): ParcelFileDescriptor? {
         if (isClosed) return null
@@ -1269,26 +1416,26 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
             tempFile = createSafeTempFile("omni_vfile_", safeSuffix)
             val extractedSuccess = extractEntryToFile(targetMeta, tempFile)
 
-            if (!extractedSuccess || !tempFile.exists()) {
-                tempFile.delete()
+            if (!extractedSuccess || !com.omnireader.core.engine.ScratchFiles.exists(tempFile)) {
+                com.omnireader.core.engine.ScratchFiles.delete(tempFile)
                 return null
             }
 
             synchronized(this) {
                 if (isClosed) {
-                    tempFile.delete()
+                    com.omnireader.core.engine.ScratchFiles.delete(tempFile)
                     return null
                 }
                 tempExtractedFiles.add(tempFile)
             }
 
-            ParcelFileDescriptor.open(tempFile, ParcelFileDescriptor.MODE_READ_ONLY)
+            com.omnireader.core.engine.ScratchFiles.openReadOnly(tempFile)
         } catch (sec: SecurityException) {
             lastErrorMsg = sec.message
-            try { tempFile?.delete() } catch (_: Throwable) {}
+            com.omnireader.core.engine.ScratchFiles.delete(tempFile)
             null
         } catch (_: Throwable) {
-            try { tempFile?.delete() } catch (_: Throwable) {}
+            com.omnireader.core.engine.ScratchFiles.delete(tempFile)
             null
         }
     }
@@ -1304,7 +1451,7 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
     }
 
     private inline fun writeFreshFile(destFile: File, block: (OutputStream) -> Boolean): Boolean {
-        FileOutputStream(destFile, false).use { fos ->
+        com.omnireader.core.engine.ScratchFiles.openOutput(destFile).use { fos ->
             val ok = block(fos)
             if (ok) fos.flush()
             return ok
@@ -1318,27 +1465,34 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
                 var extracted = false
                 try {
                     openNewChannel().use { channel ->
-                        SevenZFile.builder()
-                            .setSeekableByteChannel(channel)
-                            .get()
-                            .use { sevenZ ->
-                                var entry = sevenZ.nextEntry
-                                while (entry != null) {
-                                    if (!entry.isDirectory && matchesTargetEntry(entry.name, target)) {
-                                        sevenZ.getInputStream(entry).use { sis ->
-                                            extracted = writeFreshFile(destFile) { fos ->
-                                                copyWithSlidingWindow(sis, fos, target.uncompressedSize)
-                                                true
-                                            }
+                        val builder = SevenZFile.builder().setSeekableByteChannel(channel)
+                        if (!password.isNullOrEmpty()) {
+                            builder.setPassword(password.toCharArray())
+                        }
+                        builder.get().use { sevenZ ->
+                            var entry = sevenZ.nextEntry
+                            while (entry != null) {
+                                if (!entry.isDirectory && matchesTargetEntry(entry.name, target)) {
+                                    sevenZ.getInputStream(entry).use { sis ->
+                                        extracted = writeFreshFile(destFile) { fos ->
+                                            copyWithSlidingWindow(sis, fos, target.uncompressedSize)
+                                            true
                                         }
-                                        break
                                     }
-                                    entry = sevenZ.nextEntry
+                                    break
                                 }
+                                entry = sevenZ.nextEntry
                             }
+                        }
                     }
                 } catch (_: PasswordRequiredException) {
-                    throw SecurityException("PASSWORD_REQUIRED: Архив 7z защищён паролем.")
+                    throw SecurityException(
+                        if (password.isNullOrEmpty()) {
+                            "PASSWORD_REQUIRED: Архив 7z защищён паролем."
+                        } else {
+                            "PASSWORD_REQUIRED: Incorrect password for 7z archive."
+                        }
+                    )
                 } catch (sec: SecurityException) {
                     throw sec
                 } catch (_: Throwable) {}
@@ -1356,48 +1510,50 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
             ArcType.XZ -> writeFreshFile(destFile) { fos ->
                 extractFromCompressedStream({ XZCompressorInputStream(openPositionalStream(), true) }, target, fos)
             }
-            ArcType.RAR4 -> {
-                var extracted = false
-                var tmpRar: File? = null
-                try {
-                    tmpRar = createSafeTempFile("omni_rar4_ext_", ".rar")
-                    FileOutputStream(tmpRar).use { rfos ->
-                        openPositionalStream().use { input ->
-                            copyWithSlidingWindow(input, rfos, MAX_SINGLE_EXTRACTED_BYTES)
-                        }
-                    }
-                    Archive(tmpRar).use { rar ->
-                        for (fh in rar.fileHeaders) {
-                            val name = fh.fileName
-                            if (!fh.isDirectory && matchesTargetEntry(name, target)) {
-                                if (fh.isEncrypted) {
-                                    throw SecurityException("PASSWORD_REQUIRED: Запись в архиве RAR защищена паролем.")
-                                }
-                                extracted = writeFreshFile(destFile) { fos ->
-                                    rar.extractFile(fh, fos)
-                                    true
-                                }
-                                break
-                            }
-                        }
-                    }
-                } catch (sec: SecurityException) {
-                    throw sec
-                } catch (_: Throwable) {
-                } finally {
-                    try { tmpRar?.delete() } catch (_: Throwable) {}
-                }
-                extracted
-            }
+            ArcType.RAR4 -> extractRar4EntryToFile(target, destFile)
             ArcType.RAR5 -> extractRar5EntryToFile(target, destFile)
             else -> false
+        }
+    }
+
+    private fun extractRar4EntryToFile(target: ArchiveEntryMeta, destFile: File): Boolean {
+        val r4 = target.rar4Entry ?: return false
+        if (r4.isEncrypted) {
+            throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR archives is not supported in this version.")
+        }
+        if (r4.isSplit) {
+            throw IllegalStateException("Multi-volume RAR4 archives are not supported")
+        }
+        if (r4.packedSize < 0L || r4.packedSize > MAX_SINGLE_EXTRACTED_BYTES || r4.dataOffset + r4.packedSize > actualFileSize) {
+            return false
+        }
+        if (r4.method == 0x30) {
+            return writeFreshFile(destFile) { fos ->
+                PfdPositionalInputStream(pfd.fileDescriptor, actualFileSize, r4.dataOffset, r4.packedSize).use { input ->
+                    copyWithSlidingWindow(input, fos, r4.unpackedSize, r4.packedSize)
+                }
+                true
+            }
+        }
+        val data = Rar4Parser.unpackEntry(rar4AllEntries.ifEmpty { listOf(r4) }, r4, MAX_SINGLE_EXTRACTED_BYTES) {
+            if (it.isEncrypted) {
+                throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR archives is not supported in this version.")
+            }
+            readRar4Packed(it)
+        }
+        return writeFreshFile(destFile) { fos ->
+            fos.write(data)
+            true
         }
     }
 
     private fun extractRar5EntryToFile(target: ArchiveEntryMeta, destFile: File): Boolean {
         val r5 = target.rar5Entry ?: return false
         if (r5.isEncrypted) {
-            throw SecurityException("PASSWORD_REQUIRED: Файл в архиве RAR 5.0 защищён паролем.")
+            throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version.")
+        }
+        if (r5.isSplit) {
+            throw IllegalStateException("Multi-volume RAR5 archives are not supported")
         }
         if (r5.packedSize < 0L || r5.packedSize > MAX_SINGLE_EXTRACTED_BYTES || r5.dataOffset + r5.packedSize > actualFileSize) {
             return false
@@ -1412,29 +1568,12 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
             }
         }
 
-        val compSize = r5.packedSize.toInt()
-        val compBuf = ByteBuffer.allocateDirect(compSize)
-        val got = source.readAt(r5.dataOffset, compBuf)
-        if (got < compSize) return false
-        compBuf.flip()
-        val compBytes = ByteArray(compSize)
-        compBuf.get(compBytes)
-
-        val bos = ByteArrayOutputStream(minOf(maxOf(r5.unpackedSize, 4096L), 64L * 1024L * 1024L).toInt())
-        val ok = CleanRoomRar5Parser.decompressRar5Stream(
-            compressed = compBytes,
-            expectedUnpackedSize = r5.unpackedSize,
-            dictSizeBytes = r5.dictSizeBytes,
-            output = bos,
-            maxAllowedBytes = MAX_SINGLE_EXTRACTED_BYTES
-        )
-        if (!ok) return false
-
-        val unpackedBytes = bos.toByteArray()
+        val data = CleanRoomRar5Parser.unpackEntry(rar5AllEntries.ifEmpty { listOf(r5) }, r5, MAX_SINGLE_EXTRACTED_BYTES) {
+            if (it.isEncrypted) throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version.")
+            readRar5Packed(it)
+        }
         return writeFreshFile(destFile) { fos ->
-            ByteArrayInputStream(unpackedBytes).use { bais ->
-                copyWithSlidingWindow(bais, fos, r5.unpackedSize, r5.packedSize)
-            }
+            fos.write(data)
             true
         }
     }
@@ -1466,7 +1605,7 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
                                 }
                             }
                             if (matchedEntry != null && matchedEntry.generalPurposeBit.usesEncryption()) {
-                                throw SecurityException("PASSWORD_REQUIRED: Файл в архиве ZIP защищён паролем.")
+                                throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted ZIP archives is not supported in this version.")
                             }
                             if (matchedEntry != null && !matchedEntry.isUnixSymlink && zipFile.canReadEntryData(matchedEntry)) {
                                 zipFile.getInputStream(matchedEntry).use { zis ->
@@ -1492,7 +1631,7 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
                             val decoded = decodeZipEntryName(entry)
                             if (matchesTargetEntry(decoded, target) || matchesTargetEntry(entry.name, target)) {
                                 if (entry.generalPurposeBit.usesEncryption()) {
-                                    throw SecurityException("PASSWORD_REQUIRED: Файл в архиве ZIP защищён паролем.")
+                                    throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted ZIP archives is not supported in this version.")
                                 }
                                 return writeFreshFile(destFile) { fos ->
                                     copyWithSlidingWindow(zais, fos, target.uncompressedSize, entry.compressedSize)
@@ -1634,7 +1773,7 @@ class ArchiveSessionImpl(private val pfd: ParcelFileDescriptor) : ArchiveSession
         }
         try { pfd.close() } catch (_: Throwable) {}
         filesToDelete.forEach { file ->
-            try { file.delete() } catch (_: Throwable) {}
+            com.omnireader.core.engine.ScratchFiles.delete(file)
         }
     }
 }

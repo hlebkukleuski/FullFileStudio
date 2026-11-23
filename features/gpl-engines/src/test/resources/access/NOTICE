@@ -1,0 +1,5 @@
+Test database fixtures in this directory are derived from the Jackcess
+open-source test suite (https://github.com/spannm/jackcess).
+
+Copyright (c) 2008-2026 Health Market Science, Inc. and Jackcess Contributors.
+Licensed under the Apache License, Version 2.0 (see app/src/main/assets/licenses/Apache-2.0.txt).

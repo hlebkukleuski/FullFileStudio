@@ -29,7 +29,7 @@ class CadVectorEngineFactory : DynamicEngineFactory {
         if (ext in setOf(
                 "svg", "svgz", "stl", "obj", "dxf", "dwg", "ply", "off",
                 "3ds", "gltf", "glb", "blend", "usdz", "usd", "usda", "usdc", "fbx",
-                "3mf", "dae", "step", "stp", "iges", "igs"
+                "3mf", "dae", "zae", "step", "stp", "iges", "igs"
             )
         ) {
             return true
@@ -74,11 +74,15 @@ class CadVectorEngineFactory : DynamicEngineFactory {
     }
 
     override fun createSession(fd: FileDescriptor, extension: String): DocumentSession {
+        return createSessionWithPassword(fd, extension, null)
+    }
+
+    override fun createSessionWithPassword(fd: FileDescriptor, extension: String, password: String?): DocumentSession {
         val ext = extension.lowercase(Locale.ROOT).trim()
         return if (ext == "svg" || ext == "svgz") {
             SvgVectorEngineImpl().createSession(fd)
         } else {
-            Cad3dEngineImpl().createSessionForFormat(fd, ext)
+            Cad3dEngineImpl().createSessionForFormat(fd, ext, password)
         }
     }
 }

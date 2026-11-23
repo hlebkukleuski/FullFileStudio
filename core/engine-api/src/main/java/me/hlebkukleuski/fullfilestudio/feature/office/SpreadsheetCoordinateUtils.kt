@@ -73,8 +73,38 @@ object SpreadsheetCoordinateUtils {
      * into unzoomed pixel widths on the canvas, clamped to a readable range.
      */
     fun excelCharWidthToPixels(charWidth: Float): Float {
-        if (!charWidth.isFinite() || charWidth <= 0f) return BASE_CELL_WIDTH
-        return (charWidth * 18.5f + 16f).coerceIn(64f, 680f)
+        if (!charWidth.isFinite() || charWidth < 0f) return BASE_CELL_WIDTH
+        return (Math.round(charWidth * 7f) * (BASE_CELL_HEIGHT / 20f)).coerceAtMost(MAX_COLUMN_WIDTH)
+    }
+
+    const val MAX_COLUMN_WIDTH = 4000f
+
+    fun effectiveColumnWidth(w: Float?): Float =
+        if (w == null || !w.isFinite() || w < 0f) BASE_CELL_WIDTH else w.coerceAtMost(MAX_COLUMN_WIDTH)
+
+    fun rowOffsets(rowCount: Int, customRowHeightsPx: FloatArray?): FloatArray {
+        val n = rowCount.coerceAtLeast(1)
+        val out = FloatArray(n + 1)
+        var acc = 0f
+        for (r in 0 until n) {
+            out[r] = acc
+            val h = customRowHeightsPx?.getOrNull(r)
+            acc += if (h == null || !h.isFinite() || h < 0f) BASE_CELL_HEIGHT else h
+        }
+        out[n] = acc
+        return out
+    }
+
+    fun findRowAtContentY(rowOffsetsUnzoomed: FloatArray, zoom: Float, contentY: Float): Int {
+        val n = (rowOffsetsUnzoomed.size - 1).coerceAtLeast(1)
+        if (contentY <= 0f) return 0
+        var lo = 0
+        var hi = n - 1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (rowOffsetsUnzoomed[mid + 1] * zoom <= contentY) lo = mid + 1 else hi = mid - 1
+        }
+        return lo.coerceIn(0, n - 1)
     }
 
     /**
@@ -89,8 +119,7 @@ object SpreadsheetCoordinateUtils {
         if (customColWidthsPx != null && customColWidthsPx.isNotEmpty()) {
             var customSum = 0f
             for (w in customColWidthsPx) {
-                val cleanW = if (w.isFinite() && w > 0f) w else BASE_CELL_WIDTH
-                customSum += cleanW.coerceIn(60f, 680f)
+                customSum += effectiveColumnWidth(w)
             }
             val extraWidth = (docWidth - BASE_HEADER_WIDTH - customSum).coerceAtLeast(0f)
             val extraCols = (extraWidth / BASE_CELL_WIDTH).roundToInt().coerceAtLeast(0)
@@ -117,15 +146,10 @@ object SpreadsheetCoordinateUtils {
         val safeCols = colCount.coerceAtLeast(1)
         val unzoomedAvailW = (viewportWidth - BASE_HEADER_WIDTH).coerceAtLeast(BASE_CELL_WIDTH)
         val rawUnzoomed = FloatArray(safeCols) { c ->
-            val w = if (customColWidthsPx != null && c < customColWidthsPx.size && customColWidthsPx[c] > 0f) {
-                customColWidthsPx[c]
-            } else {
-                BASE_CELL_WIDTH
-            }
-            w.coerceIn(60f, 680f)
+            if (customColWidthsPx != null) effectiveColumnWidth(customColWidthsPx.getOrNull(c)) else BASE_CELL_WIDTH
         }
         val rawSum = rawUnzoomed.sum().coerceAtLeast(1f)
-        val stretchFactor = if (viewportWidth > BASE_HEADER_WIDTH && rawSum < unzoomedAvailW) {
+        val stretchFactor = if (customColWidthsPx == null && viewportWidth > BASE_HEADER_WIDTH && rawSum < unzoomedAvailW) {
             unzoomedAvailW / rawSum
         } else {
             1f
@@ -169,7 +193,8 @@ object SpreadsheetCoordinateUtils {
         colOffsets: FloatArray,
         zoom: Float,
         effScrollX: Float,
-        effScrollY: Float
+        effScrollY: Float,
+        customRowHeightsPx: FloatArray? = null
     ): RectF {
         val colCount = (colOffsets.size - 1).coerceAtLeast(1)
         val c0 = startCol.coerceIn(0, colCount - 1)
@@ -183,8 +208,10 @@ object SpreadsheetCoordinateUtils {
 
         val left = headerW + colOffsets[c0] - effScrollX
         val right = headerW + colOffsets[c1 + 1] - effScrollX
-        val top = headerH + r0 * cellH - effScrollY
-        val bottom = headerH + (r1 + 1) * cellH - effScrollY
+        val rowsKnown = customRowHeightsPx != null && customRowHeightsPx.isNotEmpty()
+        val offs = if (rowsKnown) rowOffsets(maxOf(customRowHeightsPx!!.size, r1 + 1), customRowHeightsPx) else null
+        val top = headerH + (offs?.get(r0)?.times(zoom) ?: (r0 * cellH)) - effScrollY
+        val bottom = headerH + (offs?.get(r1 + 1)?.times(zoom) ?: ((r1 + 1) * cellH)) - effScrollY
         return RectF(left, top, right, bottom)
     }
 
@@ -201,7 +228,8 @@ object SpreadsheetCoordinateUtils {
         docWidth: Float = 0f,
         viewportHeight: Float = 0f,
         docHeight: Float = 0f,
-        customColWidthsPx: FloatArray? = null
+        customColWidthsPx: FloatArray? = null,
+        customRowHeightsPx: FloatArray? = null
     ): CellRange {
         val zoom = (scale * fontScaleMultiplier).coerceIn(0.5f, 4f)
         val headerWidth = BASE_HEADER_WIDTH * zoom
@@ -212,7 +240,8 @@ object SpreadsheetCoordinateUtils {
             customColWidthsPx = customColWidthsPx,
             minRequiredCols = 1
         )
-        val rowCount = if (docHeight > BASE_HEADER_HEIGHT) {
+        val rowsKnown = customRowHeightsPx != null && customRowHeightsPx.isNotEmpty()
+        val rowCount = if (rowsKnown) customRowHeightsPx!!.size else if (docHeight > BASE_HEADER_HEIGHT) {
             ((docHeight - BASE_HEADER_HEIGHT) / BASE_CELL_HEIGHT).roundToInt().coerceAtLeast(1)
         } else {
             1
@@ -227,7 +256,8 @@ object SpreadsheetCoordinateUtils {
         val cellHeight = BASE_CELL_HEIGHT * zoom
 
         val totalTableW = headerWidth + colOffsets[colCount]
-        val totalTableH = headerHeight + rowCount * cellHeight
+        val rowOffs = if (rowsKnown) rowOffsets(rowCount, customRowHeightsPx) else null
+        val totalTableH = headerHeight + (rowOffs?.get(rowCount)?.times(zoom) ?: (rowCount * cellHeight))
 
         val maxEffX = if (viewportWidth > 0f) (totalTableW - viewportWidth).coerceAtLeast(0f) else Float.MAX_VALUE
         val maxEffY = if (viewportHeight > 0f) (totalTableH - viewportHeight).coerceAtLeast(0f) else Float.MAX_VALUE
@@ -244,8 +274,8 @@ object SpreadsheetCoordinateUtils {
         val startCol = findColumnAtContentX(colOffsets, contentMinX)
         val endCol = findColumnAtContentX(colOffsets, contentMaxX).coerceAtLeast(startCol)
 
-        val startRow = (contentMinY / cellHeight).toInt().coerceIn(0, rowCount - 1)
-        val endRow = (contentMaxY / cellHeight).toInt().coerceIn(startRow, rowCount - 1)
+        val startRow = if (rowOffs != null) findRowAtContentY(rowOffs, zoom, contentMinY) else (contentMinY / cellHeight).toInt().coerceIn(0, rowCount - 1)
+        val endRow = if (rowOffs != null) findRowAtContentY(rowOffs, zoom, contentMaxY).coerceAtLeast(startRow) else (contentMaxY / cellHeight).toInt().coerceIn(startRow, rowCount - 1)
 
         return CellRange(
             startRow = startRow,

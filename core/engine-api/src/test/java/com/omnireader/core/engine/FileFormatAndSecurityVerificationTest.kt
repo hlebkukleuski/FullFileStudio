@@ -23,6 +23,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import org.robolectric.annotation.Config
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -30,6 +33,8 @@ import java.nio.charset.StandardCharsets
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
+@RunWith(RobolectricTestRunner::class)
+@Config(sdk = [35])
 class FileFormatAndSecurityVerificationTest {
 
     private fun buildZipContainer(entries: List<Pair<String, ByteArray>>): ByteBuffer {

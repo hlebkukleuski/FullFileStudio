@@ -49,7 +49,11 @@ class OfficeEngineFactory : DynamicEngineFactory {
     }
 
     override fun createSession(fd: FileDescriptor, extension: String): DocumentSession {
-        return OfficeEngineImpl().createSessionForExtension(fd, extension)
+        return OfficeEngineImpl().createSessionForExtension(fd, extension, null)
+    }
+
+    override fun createSessionWithPassword(fd: FileDescriptor, extension: String, password: String?): DocumentSession {
+        return OfficeEngineImpl().createSessionForExtension(fd, extension, password)
     }
 
     companion object {

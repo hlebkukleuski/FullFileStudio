@@ -17,52 +17,17 @@
 
 package me.hlebkukleuski.fullfilestudio
 
-import android.app.Activity
 import android.app.Application
 import android.content.ComponentCallbacks2
-import android.content.Context
-import android.os.Bundle
-import com.google.android.play.core.splitcompat.SplitCompat
 import com.omnireader.core.engine.AdaptiveRingBitmapPool
-import com.omnireader.core.engine.SecurityArena
 import me.hlebkukleuski.fullfilestudio.ocr.PaddleOcrManager
 
 class OmniReaderApp : Application() {
 
-    companion object {
-        private const val DEFAULT_ARENA_SIZE_BYTES = 16L * 1024L * 1024L
-    }
-
-    override fun attachBaseContext(base: Context) {
-        super.attachBaseContext(base)
-        try {
-            SplitCompat.install(this)
-        } catch (_: Throwable) {}
-    }
-
     override fun onCreate() {
         super.onCreate()
-        SecurityArena.safeInitArena(DEFAULT_ARENA_SIZE_BYTES)
-
-        registerActivityLifecycleCallbacks(object : ActivityLifecycleCallbacks {
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {
-                try { SplitCompat.installActivity(activity) } catch (_: Throwable) {}
-                SecurityArena.safeInitArena(DEFAULT_ARENA_SIZE_BYTES)
-            }
-
-            override fun onActivityStarted(activity: Activity) {
-                SecurityArena.safeInitArena(DEFAULT_ARENA_SIZE_BYTES)
-            }
-
-            override fun onActivityResumed(activity: Activity) {
-                SecurityArena.safeInitArena(DEFAULT_ARENA_SIZE_BYTES)
-            }
-
-            override fun onActivityPaused(activity: Activity) {}
-            override fun onActivityStopped(activity: Activity) {}
-            override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-            override fun onActivityDestroyed(activity: Activity) {}
-        })
+        me.hlebkukleuski.fullfilestudio.service.MediaPlaybackController.init(this)
+        try { com.omnireader.core.engine.impl.OfficeFonts.install(assets) } catch (_: Throwable) {}
     }
 
     override fun onTrimMemory(level: Int) {
@@ -73,11 +38,7 @@ class OmniReaderApp : Application() {
 
         if (isForegroundLowMemory || isBackgroundHidden) {
             AdaptiveRingBitmapPool.trimToZero()
-            if (SecurityArena.isNativeLoaded) {
-                try { SecurityArena.zeroBufferNeonNative() } catch (_: Throwable) {}
-            }
             if (isForegroundLowMemory) {
-                SecurityArena.safeReleaseArena()
                 PaddleOcrManager.release()
             }
         }
@@ -86,7 +47,6 @@ class OmniReaderApp : Application() {
     override fun onLowMemory() {
         super.onLowMemory()
         AdaptiveRingBitmapPool.trimToZero()
-        SecurityArena.safeReleaseArena()
         PaddleOcrManager.release()
     }
 }

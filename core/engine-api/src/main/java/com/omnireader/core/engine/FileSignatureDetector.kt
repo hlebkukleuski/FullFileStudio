@@ -41,7 +41,7 @@ enum class DetectedFormat {
 object FileSignatureDetector {
 
     private val NESTED_CONTAINER_EXTENSIONS = setOf(
-        "zip", "jar", "apk", "usdz", "3mf",
+        "zip", "jar", "apk", "usdz", "3mf", "zae",
         "docx", "docm", "dotx", "dotm",
         "xlsx", "xlsm", "xlsb", "xltx", "xltm",
         "pptx", "pptm", "ppsx", "ppsm", "potx", "potm",
@@ -266,6 +266,15 @@ object FileSignatureDetector {
         return false
     }
 
+    private fun isLikelyIgesHeader(headText: String): Boolean {
+        val firstLine = headText.lineSequence().firstOrNull { it.isNotEmpty() }?.trimEnd('\r') ?: return false
+        if (firstLine.length != 80) return false
+        val sec = firstLine[72]
+        if (sec != 'S' && sec != 's') return false
+        val seq = firstLine.substring(73).trim()
+        return seq.isNotEmpty() && seq.all { it.isDigit() }
+    }
+
     private fun resolveFormatInternal(
         fd: FileDescriptor?,
         headerBuffer: ByteBuffer,
@@ -372,8 +381,7 @@ object FileSignatureDetector {
                 return DetectedFormat.FONT
             }
 
-            // Apache Parquet columnar database ("PAR1")
-            if (b0 == 'P'.code && b1 == 'A'.code && b2 == 'R'.code && b3 == '1'.code) {
+            if (b0 == 'P'.code && b1 == 'A'.code && b2 == 'R'.code && (b3 == '1'.code || b3 == 'E'.code)) {
                 return DetectedFormat.PARQUET
             }
 
@@ -383,6 +391,17 @@ object FileSignatureDetector {
                 bytes[9] == 'U'.code.toByte() &&
                 bytes[10] == 'C'.code.toByte() &&
                 bytes[11] == 'K'.code.toByte()
+            ) {
+                return DetectedFormat.PARQUET
+            }
+
+            if (bytes.size >= 24 &&
+                bytes[16] == 'T'.code.toByte() &&
+                bytes[17] == '-'.code.toByte() &&
+                bytes[18] == 'D'.code.toByte() &&
+                bytes[19] == 'B'.code.toByte() &&
+                (bytes[20].toInt() and 0xFF) in 0..1 &&
+                (bytes[21].toInt() and 0xFF) in 0..1
             ) {
                 return DetectedFormat.PARQUET
             }
@@ -616,6 +635,9 @@ object FileSignatureDetector {
         if (trimmedHead.startsWith("iso-10303-21;") || (lowerHead.contains("iso-10303-21;") && lowerHead.contains("header;"))) {
             return DetectedFormat.STL
         }
+        if (isLikelyIgesHeader(headText)) {
+            return DetectedFormat.STL
+        }
         if (isLikelyAsciiDxf(headText)) {
             return DetectedFormat.DXF
         }
@@ -688,7 +710,7 @@ object FileSignatureDetector {
             "glb" -> DetectedFormat.GLB
             "blend" -> DetectedFormat.BLEND
             "usdz", "usd", "usda", "usdc" -> DetectedFormat.USDZ
-            "stl", "ply", "off", "3ds", "fbx", "3mf", "dae", "step", "stp", "iges", "igs" -> DetectedFormat.STL
+            "stl", "ply", "off", "3ds", "fbx", "3mf", "dae", "zae", "step", "stp", "iges", "igs" -> DetectedFormat.STL
             "obj" -> DetectedFormat.OBJ
             "dxf" -> DetectedFormat.DXF
             "zip", "jar" -> DetectedFormat.ZIP
@@ -791,6 +813,13 @@ object FileSignatureDetector {
                         val arr = ByteArray(r)
                         buf.get(arr)
                         val utf16Str = String(arr, StandardCharsets.UTF_16LE)
+                        if (utf16Str.contains("EncryptedPackage") || utf16Str.contains("EncryptionInfo")) {
+                            return when (ext) {
+                                "xlsx", "xlsm", "xlsb", "xltx", "xltm" -> DetectedFormat.XLSX
+                                "pptx", "pptm", "ppsx", "ppsm", "potx", "potm" -> DetectedFormat.PPTX
+                                else -> DetectedFormat.DOCX
+                            }
+                        }
                         when {
                             utf16Str.contains("RevitPreview") || utf16Str.contains("BasicFileInfo") -> return DetectedFormat.RVT
                             utf16Str.contains("FileAssetMetaData") || utf16Str.contains("VideoPostQueue") || utf16Str.contains("Scene") -> return DetectedFormat.MAX
@@ -803,6 +832,13 @@ object FileSignatureDetector {
             } catch (_: Throwable) {}
         } else if (headerBytes.size >= 512) {
             val utf16Str = String(headerBytes, StandardCharsets.UTF_16LE)
+            if (utf16Str.contains("EncryptedPackage") || utf16Str.contains("EncryptionInfo")) {
+                return when (ext) {
+                    "xlsx", "xlsm", "xlsb", "xltx", "xltm" -> DetectedFormat.XLSX
+                    "pptx", "pptm", "ppsx", "ppsm", "potx", "potm" -> DetectedFormat.PPTX
+                    else -> DetectedFormat.DOCX
+                }
+            }
             when {
                 utf16Str.contains("RevitPreview") || utf16Str.contains("BasicFileInfo") -> return DetectedFormat.RVT
                 utf16Str.contains("FileAssetMetaData") || utf16Str.contains("VideoPostQueue") -> return DetectedFormat.MAX
@@ -864,7 +900,7 @@ object FileSignatureDetector {
 
         return when (ext) {
             "usdz" -> DetectedFormat.USDZ
-            "3mf" -> DetectedFormat.STL
+            "3mf", "zae" -> DetectedFormat.STL
             "pptx", "pptm", "ppsx", "ppsm", "potx", "potm" -> DetectedFormat.PPTX
             "xlsx", "xlsm", "xlsb", "xltx", "xltm" -> DetectedFormat.XLSX
             "docx", "docm", "dotx", "dotm" -> DetectedFormat.DOCX
@@ -873,7 +909,7 @@ object FileSignatureDetector {
             "odt", "ott" -> DetectedFormat.ODT
             "ods", "ots" -> DetectedFormat.ODS
             "odp", "otp" -> DetectedFormat.ODP
-            "apk", "jar" -> DetectedFormat.APK
+            "apk" -> DetectedFormat.APK
             else -> DetectedFormat.ZIP
         }
     }
@@ -1110,8 +1146,10 @@ object FileSignatureDetector {
             return DetectedFormat.USDZ
         }
 
-        // 3MF 3D Manufacturing Format package (contains 3d/3dmodel.model or *.model)
-        if (ext == "3mf" || entries.any { it == "3d/3dmodel.model" || (it.startsWith("3d/") && it.endsWith(".model")) }) {
+        if (ext == "3mf" || ext == "zae" ||
+            entries.any { it == "3d/3dmodel.model" || (it.startsWith("3d/") && it.endsWith(".model")) } ||
+            (entries.any { it.endsWith(".dae") } && (ext == "zae" || "manifest.xml" in entries))
+        ) {
             return DetectedFormat.STL
         }
 

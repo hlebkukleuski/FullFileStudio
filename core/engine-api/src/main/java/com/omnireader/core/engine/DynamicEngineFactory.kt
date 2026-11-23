@@ -22,4 +22,6 @@ import java.io.FileDescriptor
 interface DynamicEngineFactory {
     fun canHandle(signature: ByteArray, extension: String): Boolean
     fun createSession(fd: FileDescriptor, extension: String = ""): DocumentSession
+    fun createSessionWithPassword(fd: FileDescriptor, extension: String = "", password: String? = null): DocumentSession =
+        createSession(fd, extension)
 }

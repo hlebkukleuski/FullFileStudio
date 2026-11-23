@@ -33,4 +33,8 @@ class ArchiveEngineFactory : DynamicEngineFactory {
     override fun createSession(fd: FileDescriptor, extension: String): DocumentSession {
         return engine.createSession(fd)
     }
+
+    override fun createSessionWithPassword(fd: FileDescriptor, extension: String, password: String?): DocumentSession {
+        return engine.createArchiveSession(fd, password)
+    }
 }

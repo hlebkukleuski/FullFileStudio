@@ -15,15 +15,4 @@
   You should have received a copy of the GNU General Public License
   along with this program. If not, see <https://gnu.org>.
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    xmlns:dist="http://schemas.android.com/apk/distribution">
-
-    <dist:module
-        dist:instant="false"
-        dist:title="@string/title_office">
-        <dist:delivery>
-            <dist:on-demand />
-        </dist:delivery>
-        <dist:fusing dist:include="true" />
-    </dist:module>
-</manifest>
+<manifest />

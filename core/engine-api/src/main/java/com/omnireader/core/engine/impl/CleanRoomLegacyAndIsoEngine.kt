@@ -13,6 +13,12 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://gnu.org>.
+ *
+ * Implements OLE2 Compound File Binary ([MS-CFB]), Excel BIFF8/BIFF12 ([MS-XLS] / [MS-XLSB]),
+ * Word Binary ([MS-DOC]), PowerPoint Binary ([MS-PPT]), OneNote ([MS-ONE] / [MS-ONESTORE])
+ * under the Microsoft Open Specifications Promise (OSP), ISO-9660 (ECMA-119), and dBase DBF,
+ * with BIFF8/OLE2 structure definitions informed by Apache POI (https://poi.apache.org/,
+ * Copyright 2003-2026 The Apache Software Foundation, Apache-2.0).
  */
 
 package com.omnireader.core.engine.impl
@@ -31,7 +37,6 @@ import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
 import android.util.Base64
-import androidx.core.graphics.PathParser
 import com.omnireader.core.engine.DetectedFormat
 import com.omnireader.core.engine.DocumentSession
 import com.omnireader.core.engine.PackedTileKey
@@ -75,102 +80,7 @@ private const val PAGE_INDEX_MASK = 0x000FFFFF
 private val DARK_PRESENTATION_BG_COLOR = Color.rgb(0x12, 0x12, 0x12)
 private val LIGHT_PRESENTATION_BG_COLOR = Color.rgb(0xF5, 0xF7, 0xFA)
 
-private val DARK_SHEET_BG_COLOR = Color.rgb(0x12, 0x12, 0x12)
-private val DARK_SHEET_CELL_BG_COLOR = Color.rgb(0x1E, 0x1E, 0x2E)
-private val DARK_SHEET_HEADER_BG_COLOR = Color.rgb(0x18, 0x18, 0x25)
-private val DARK_SHEET_GRID_COLOR = Color.rgb(0x31, 0x32, 0x44)
-private val DARK_SHEET_TEXT_COLOR = Color.rgb(0xFF, 0xFF, 0xFF)
-private val DARK_SHEET_HEADER_TEXT_COLOR = Color.rgb(0xBA, 0xC2, 0xDE)
 
-private val LIGHT_SHEET_BG_COLOR = Color.rgb(0xF5, 0xF7, 0xFA)
-private val LIGHT_SHEET_CELL_BG_COLOR = Color.rgb(0xFF, 0xFF, 0xFF)
-private val LIGHT_SHEET_HEADER_BG_COLOR = Color.rgb(0xEE, 0xF1, 0xF6)
-private val LIGHT_SHEET_GRID_COLOR = Color.rgb(0xD8, 0xDE, 0xE9)
-private val LIGHT_SHEET_TEXT_COLOR = Color.rgb(0x1A, 0x1C, 0x24)
-private val LIGHT_SHEET_HEADER_TEXT_COLOR = Color.rgb(0x5A, 0x62, 0x75)
-
-internal object ExcelDateFormatter {
-    private val BUILTIN_DATE_FORMAT_IDS = setOf(
-        14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 30, 36, 45, 46, 47, 50, 57
-    )
-    private val BUILTIN_TIME_ONLY_IDS = setOf(18, 19, 20, 21, 45, 46, 47)
-    private val BUILTIN_PERCENT_IDS = setOf(9, 10)
-
-    fun isDateFormatCode(formatIdx: Int, customFormatString: String?): Boolean {
-        if (formatIdx in BUILTIN_DATE_FORMAT_IDS) return true
-        if (customFormatString.isNullOrBlank()) return false
-        val cleaned = customFormatString
-            .replace(Regex("\"[^\"]*\""), "")
-            .replace(Regex("\\[[^]]*]"), "")
-            .replace(Regex("\\\\."), "")
-            .lowercase(Locale.ROOT)
-        if (cleaned.any { it in setOf('y', 'd', 'h', 's') }) return true
-        return cleaned.contains("mm")
-    }
-
-    fun isPercentFormatCode(formatIdx: Int, customFormatString: String?): Boolean {
-        if (formatIdx in BUILTIN_PERCENT_IDS) return true
-        if (customFormatString.isNullOrBlank()) return false
-        return customFormatString.contains('%')
-    }
-
-    fun formatExcelSerialDate(
-        serial: Double,
-        use1904Windowing: Boolean,
-        formatIdx: Int = 14,
-        customFormatString: String? = null
-    ): String {
-        if (!serial.isFinite() || serial < 0.0 || serial > 2958465.0) {
-            val asLong = serial.toLong()
-            return if (serial == asLong.toDouble()) asLong.toString() else serial.toString()
-        }
-        var wholeDays = serial.toInt()
-        val fractionOfDay = (serial - wholeDays).coerceIn(0.0, 0.9999999)
-        val totalSeconds = (fractionOfDay * 86400.0).roundToLong().toInt().coerceIn(0, 86399)
-        val hours = totalSeconds / 3600
-        val minutes = (totalSeconds % 3600) / 60
-        val seconds = totalSeconds % 60
-
-        val isTimeOnlyFormat = formatIdx in BUILTIN_TIME_ONLY_IDS ||
-                (wholeDays == 0 && totalSeconds > 0) ||
-                (customFormatString != null && !customFormatString.lowercase(Locale.ROOT).any { it == 'y' || it == 'd' } &&
-                        customFormatString.lowercase(Locale.ROOT).any { it == 'h' || it == 's' })
-
-        if (isTimeOnlyFormat && wholeDays == 0) {
-            return if (seconds > 0 || formatIdx in setOf(19, 21, 46, 47)) {
-                String.format(Locale.US, "%02d:%02d:%02d", hours, minutes, seconds)
-            } else {
-                String.format(Locale.US, "%02d:%02d", hours, minutes)
-            }
-        }
-
-        val cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"), Locale.ROOT)
-        if (use1904Windowing) {
-            cal.set(1904, Calendar.JANUARY, 1, 0, 0, 0)
-            cal.set(Calendar.MILLISECOND, 0)
-            cal.add(Calendar.DAY_OF_YEAR, wholeDays)
-        } else {
-            if (wholeDays >= 60) wholeDays -= 1
-            cal.set(1899, Calendar.DECEMBER, 31, 0, 0, 0)
-            cal.set(Calendar.MILLISECOND, 0)
-            cal.add(Calendar.DAY_OF_YEAR, wholeDays)
-        }
-
-        cal.add(Calendar.SECOND, totalSeconds)
-
-        val year = cal.get(Calendar.YEAR)
-        val month = cal.get(Calendar.MONTH) + 1
-        val day = cal.get(Calendar.DAY_OF_MONTH)
-        val hour = cal.get(Calendar.HOUR_OF_DAY)
-        val minute = cal.get(Calendar.MINUTE)
-
-        return if (totalSeconds >= 60) {
-            String.format(Locale.US, "%04d-%02d-%02d %02d:%02d", year, month, day, hour, minute)
-        } else {
-            String.format(Locale.US, "%04d-%02d-%02d", year, month, day)
-        }
-    }
-}
 
 object EmbeddedImageScanner {
     fun scanBinaryForImages(data: ByteArray, maxImages: Int = 16): List<Bitmap> {
@@ -294,14 +204,17 @@ object EmbeddedImageScanner {
 
         val slice = if (offset == 0 && len == data.size) data else data.copyOfRange(offset, offset + len)
 
+        if (CleanRoomMetafile.isWmf(slice) || CleanRoomMetafile.isEmf(slice)) {
+            CleanRoomMetafile.decode(slice)?.rasterize(2048)?.let { return it }
+        }
+
         // 2. Check if the payload contains an embedded PNG or JPEG stream
         val embeddedList = scanBinaryForImages(slice, 1)
         if (embeddedList.isNotEmpty()) return embeddedList[0]
 
         // 3. Check if the payload is an SVG XML graphic
-        val headStr = String(slice, 0, minOf(slice.size, 512), StandardCharsets.UTF_8).trimStart()
-        if (headStr.startsWith("<svg", ignoreCase = true) || headStr.startsWith("<?xml", ignoreCase = true)) {
-            decodeSimpleSvgBytes(slice)?.let { return it }
+        if (com.omnireader.core.engine.svg.SvgDocumentSession.looksLikeSvg(slice)) {
+            com.omnireader.core.engine.svg.SvgDocumentSession.rasterize(slice, 1536)?.let { return it }
         }
 
         // 4. Reassemble split WMFC escape records (if present in \wmetafile8) before DIB extraction
@@ -517,70 +430,21 @@ object EmbeddedImageScanner {
             null
         }
     }
-
-    private fun decodeSimpleSvgBytes(svgBytes: ByteArray): Bitmap? {
-        return try {
-            val parser = EbookTextSession.createSafeXmlParser()
-            parser.setInput(InputStreamReader(ByteArrayInputStream(svgBytes), StandardCharsets.UTF_8))
-            var ev = parser.eventType
-            var vbW = 256f
-            var vbH = 256f
-            val pathsAndColors = ArrayList<Pair<Path, Int>>()
-
-            while (ev != XmlPullParser.END_DOCUMENT && pathsAndColors.size < 2048) {
-                if (ev == XmlPullParser.START_TAG) {
-                    val name = parser.name?.substringAfterLast(':')?.lowercase(Locale.ROOT) ?: ""
-                    if (name == "svg") {
-                        val vb = parser.getAttributeValue(null, "viewBox") ?: parser.getAttributeValue(null, "viewbox")
-                        if (!vb.isNullOrBlank()) {
-                            val nums = vb.trim().split(Regex("[\\s,]+")).mapNotNull { it.toFloatOrNull() }
-                            if (nums.size >= 4 && nums[2] > 0f && nums[3] > 0f) {
-                                vbW = nums[2]
-                                vbH = nums[3]
-                            }
-                        }
-                    } else if (name == "path") {
-                        val d = parser.getAttributeValue(null, "d")
-                        if (!d.isNullOrBlank() && d.length <= 65536) {
-                            val p = try { PathParser.createPathFromPathData(d) } catch (_: Throwable) { null }
-                            if (p != null) {
-                                val fillStr = parser.getAttributeValue(null, "fill")
-                                val col = if (!fillStr.isNullOrBlank() && fillStr.startsWith("#")) {
-                                    try { Color.parseColor(fillStr) } catch (_: Throwable) { Color.DKGRAY }
-                                } else Color.DKGRAY
-                                pathsAndColors.add(p to col)
-                            }
-                        }
-                    }
-                }
-                ev = parser.next()
-            }
-            if (pathsAndColors.isEmpty()) return null
-            val targetW = 512
-            val targetH = ((512f * vbH / vbW.coerceAtLeast(1f)).roundToInt()).coerceIn(64, 1024)
-            val bmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            val c = Canvas(bmp)
-            c.scale(targetW / vbW.coerceAtLeast(1f), targetH / vbH.coerceAtLeast(1f))
-            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-            for ((p, col) in pathsAndColors) {
-                paint.color = col
-                c.drawPath(p, paint)
-            }
-            bmp
-        } catch (_: Throwable) {
-            null
-        }
-    }
 }
 
 object CleanRoomLegacyAndIsoEngine {
 
-    fun createSession(fd: FileDescriptor, format: DetectedFormat, extension: String): DocumentSession {
+    fun createSession(
+        fd: FileDescriptor,
+        format: DetectedFormat,
+        extension: String,
+        password: String? = null
+    ): DocumentSession {
         val ext = extension.lowercase(Locale.ROOT).trim()
         val pfd = ParcelFileDescriptor.dup(fd)
         return when {
             format in setOf(DetectedFormat.SVG, DetectedFormat.SVGZ) || ext in setOf("svg", "svgz") ->
-                CleanRoomSvgVectorSession(pfd)
+                com.omnireader.core.engine.svg.SvgDocumentSession(pfd)
             format in setOf(
                 DetectedFormat.STL, DetectedFormat.OBJ, DetectedFormat.DXF, DetectedFormat.DWG,
                 DetectedFormat.GLTF, DetectedFormat.GLB, DetectedFormat.BLEND, DetectedFormat.USDZ
@@ -588,7 +452,7 @@ object CleanRoomLegacyAndIsoEngine {
                 "stl", "obj", "dxf", "dwg", "ply", "off", "3ds",
                 "gltf", "glb", "blend", "usdz", "usd", "usda", "usdc", "fbx",
                 "3mf", "dae", "step", "stp", "iges", "igs"
-            ) -> CleanRoomBuiltIn3dSession(pfd, ext)
+            ) -> CleanRoomBuiltIn3dSession(pfd, ext, password)
             format in setOf(
                 DetectedFormat.ISO, DetectedFormat.ZIP, DetectedFormat.SEVEN_ZIP,
                 DetectedFormat.RAR_V4, DetectedFormat.RAR_V5, DetectedFormat.TAR,
@@ -601,297 +465,12 @@ object CleanRoomLegacyAndIsoEngine {
             format == DetectedFormat.RTF || ext == "rtf" -> CleanRoomRtfSession(pfd)
             format in setOf(DetectedFormat.XLS, DetectedFormat.XLSX, DetectedFormat.ODS) ||
                     ext in setOf("xls", "xlt", "xlsx", "xlsm", "xlsb", "xltx", "xltm", "ods", "ots", "csv", "tsv") ->
-                CleanRoomBiff8XlsSession(pfd)
+                CleanRoomBiff8XlsSession(pfd, password)
             format in setOf(DetectedFormat.PPT, DetectedFormat.PPTX, DetectedFormat.ODP) ||
                     ext in setOf("ppt", "pps", "pot", "pptx", "pptm", "ppsx", "ppsm", "potx", "potm", "odp", "otp") ->
-                CleanRoomPptSession(pfd)
-            else -> CleanRoomDocSession(pfd)
+                CleanRoomPptSession(pfd, password)
+            else -> CleanRoomDocSession(pfd, password)
         }
-    }
-}
-
-/**
- * Built-in Clean-Room SVG & SVGZ Vector Graphics Session for Standalone APK builds.
- */
-class CleanRoomSvgVectorSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
-    @Volatile private var isClosed = false
-    @Volatile private var lastErrorMsg: String? = null
-    override val pageCount: Int = 1
-
-    private data class SvgDrawOp(
-        val path: Path,
-        val fillColor: Int?,
-        val strokeColor: Int?,
-        val strokeWidth: Float
-    )
-
-    private data class SvgTextOp(
-        val text: String,
-        val x: Float,
-        val y: Float,
-        val fontSize: Float,
-        val color: Int
-    )
-
-    private val drawOps = ArrayList<SvgDrawOp>()
-    private val textOps = ArrayList<SvgTextOp>()
-    private var viewBoxMinX = 0f
-    private var viewBoxMinY = 0f
-    private var viewBoxWidth = 512f
-    private var viewBoxHeight = 512f
-
-    init {
-        parseSvgOrSvgz()
-    }
-
-    private fun parseSvgOrSvgz() {
-        try {
-            val src = ZeroCacheReadableSource(pfd.fileDescriptor)
-            val maxLen = minOf(src.size, 32L * 1024L * 1024L).toInt()
-            if (maxLen <= 4) {
-                lastErrorMsg = "SVG file is empty."
-                return
-            }
-            val buf = ByteBuffer.allocateDirect(maxLen)
-            val got = src.readAt(0L, buf)
-            if (got <= 4) {
-                lastErrorMsg = "Unable to read SVG stream."
-                return
-            }
-            buf.flip()
-            var bytes = ByteArray(got)
-            buf.get(bytes)
-
-            if ((bytes[0].toInt() and 0xFF) == 0x1F && (bytes[1].toInt() and 0xFF) == 0x8B) {
-                val compressedSize = bytes.size.coerceAtLeast(1)
-                bytes = GZIPInputStream(ByteArrayInputStream(bytes)).use { gis ->
-                    val bos = ByteArrayOutputStream()
-                    val chunk = ByteArray(16384)
-                    var total = 0
-                    while (total < 32 * 1024 * 1024) {
-                        val r = gis.read(chunk)
-                        if (r <= 0) break
-                        total += r
-                        if (total > 16 * 1024 * 1024 && (total / compressedSize) > 150) {
-                            throw SecurityException("Превышен безопасный лимит распаковки SVGZ (защита от Zip-бомб).")
-                        }
-                        bos.write(chunk, 0, r)
-                    }
-                    bos.toByteArray()
-                }
-            }
-
-            val xmlStr = EbookTextSession.decodeAndPreprocessXml(bytes)
-            val parser = EbookTextSession.createSafeXmlParser()
-            parser.setInput(StringReader(xmlStr))
-            var ev = parser.eventType
-            var inText = false
-            var textX = 0f
-            var textY = 0f
-            var textFontSize = 18f
-            var textColor = Color.BLACK
-            val textSb = StringBuilder()
-
-            fun parseSvgColor(raw: String?): Int? {
-                if (raw.isNullOrBlank() || raw.equals("none", true) || raw.equals("transparent", true)) return null
-                val clean = raw.trim()
-                if (clean.startsWith("rgb(", true) && clean.endsWith(")")) {
-                    val nums = clean.substringAfter('(').substringBefore(')').split(',').mapNotNull { it.trim().toIntOrNull() }
-                    if (nums.size >= 3) return Color.rgb(nums[0].coerceIn(0, 255), nums[1].coerceIn(0, 255), nums[2].coerceIn(0, 255))
-                }
-                return try { Color.parseColor(clean) } catch (_: Throwable) { Color.DKGRAY }
-            }
-
-            while (ev != XmlPullParser.END_DOCUMENT && drawOps.size < 10_000) {
-                val local = parser.name?.substringAfterLast(':')?.lowercase(Locale.ROOT) ?: ""
-                when (ev) {
-                    XmlPullParser.START_TAG -> {
-                        val styleAttr = parser.getAttributeValue(null, "style") ?: ""
-                        fun resolveProp(name: String): String? {
-                            parser.getAttributeValue(null, name)?.let { return it }
-                            val m = Regex("""(?:^|;)\s*$name\s*:\s*([^;]+)""", RegexOption.IGNORE_CASE).find(styleAttr)
-                            return m?.groupValues?.get(1)?.trim()
-                        }
-
-                        val fillStr = resolveProp("fill")
-                        val strokeStr = resolveProp("stroke")
-                        val fillCol = if (fillStr == null) Color.rgb(45, 55, 72) else parseSvgColor(fillStr)
-                        val strokeCol = parseSvgColor(strokeStr)
-                        val strokeW = resolveProp("stroke-width")?.removeSuffix("px")?.toFloatOrNull() ?: 1.5f
-
-                        when (local) {
-                            "svg" -> {
-                                val vb = parser.getAttributeValue(null, "viewBox") ?: parser.getAttributeValue(null, "viewbox")
-                                if (!vb.isNullOrBlank()) {
-                                    val nums = vb.trim().split(Regex("[\\s,]+")).mapNotNull { it.toFloatOrNull() }
-                                    if (nums.size >= 4 && nums[2] > 0f && nums[3] > 0f) {
-                                        viewBoxMinX = nums[0]
-                                        viewBoxMinY = nums[1]
-                                        viewBoxWidth = nums[2]
-                                        viewBoxHeight = nums[3]
-                                    }
-                                } else {
-                                    parser.getAttributeValue(null, "width")?.filter { it.isDigit() || it == '.' }?.toFloatOrNull()?.let { if (it > 0f) viewBoxWidth = it }
-                                    parser.getAttributeValue(null, "height")?.filter { it.isDigit() || it == '.' }?.toFloatOrNull()?.let { if (it > 0f) viewBoxHeight = it }
-                                }
-                            }
-                            "path" -> {
-                                val d = parser.getAttributeValue(null, "d")
-                                if (!d.isNullOrBlank() && d.length <= 65536) {
-                                    try {
-                                        PathParser.createPathFromPathData(d)?.let { p ->
-                                            drawOps.add(SvgDrawOp(p, fillCol, strokeCol, strokeW))
-                                        }
-                                    } catch (_: Throwable) {}
-                                }
-                            }
-                            "rect" -> {
-                                val x = parser.getAttributeValue(null, "x")?.toFloatOrNull() ?: 0f
-                                val y = parser.getAttributeValue(null, "y")?.toFloatOrNull() ?: 0f
-                                val w = parser.getAttributeValue(null, "width")?.toFloatOrNull() ?: 0f
-                                val h = parser.getAttributeValue(null, "height")?.toFloatOrNull() ?: 0f
-                                if (w > 0f && h > 0f) {
-                                    val p = Path().apply { addRect(x, y, x + w, y + h, Path.Direction.CW) }
-                                    drawOps.add(SvgDrawOp(p, fillCol, strokeCol, strokeW))
-                                }
-                            }
-                            "circle" -> {
-                                val cx = parser.getAttributeValue(null, "cx")?.toFloatOrNull() ?: 0f
-                                val cy = parser.getAttributeValue(null, "cy")?.toFloatOrNull() ?: 0f
-                                val r = parser.getAttributeValue(null, "r")?.toFloatOrNull() ?: 0f
-                                if (r > 0f) {
-                                    val p = Path().apply { addCircle(cx, cy, r, Path.Direction.CW) }
-                                    drawOps.add(SvgDrawOp(p, fillCol, strokeCol, strokeW))
-                                }
-                            }
-                            "ellipse" -> {
-                                val cx = parser.getAttributeValue(null, "cx")?.toFloatOrNull() ?: 0f
-                                val cy = parser.getAttributeValue(null, "cy")?.toFloatOrNull() ?: 0f
-                                val rx = parser.getAttributeValue(null, "rx")?.toFloatOrNull() ?: 0f
-                                val ry = parser.getAttributeValue(null, "ry")?.toFloatOrNull() ?: 0f
-                                if (rx > 0f && ry > 0f) {
-                                    val p = Path().apply { addOval(RectF(cx - rx, cy - ry, cx + rx, cy + ry), Path.Direction.CW) }
-                                    drawOps.add(SvgDrawOp(p, fillCol, strokeCol, strokeW))
-                                }
-                            }
-                            "line" -> {
-                                val x1 = parser.getAttributeValue(null, "x1")?.toFloatOrNull() ?: 0f
-                                val y1 = parser.getAttributeValue(null, "y1")?.toFloatOrNull() ?: 0f
-                                val x2 = parser.getAttributeValue(null, "x2")?.toFloatOrNull() ?: 0f
-                                val y2 = parser.getAttributeValue(null, "y2")?.toFloatOrNull() ?: 0f
-                                val p = Path().apply { moveTo(x1, y1); lineTo(x2, y2) }
-                                drawOps.add(SvgDrawOp(p, null, strokeCol ?: fillCol ?: Color.BLACK, strokeW))
-                            }
-                            "polygon", "polyline" -> {
-                                val ptsStr = parser.getAttributeValue(null, "points") ?: ""
-                                if (ptsStr.length <= 65536) {
-                                    val nums = ptsStr.trim().split(Regex("[\\s,]+")).mapNotNull { it.toFloatOrNull() }
-                                    if (nums.size >= 4) {
-                                        val p = Path()
-                                        p.moveTo(nums[0], nums[1])
-                                        var i = 2
-                                        while (i + 1 < nums.size) {
-                                            p.lineTo(nums[i], nums[i + 1])
-                                            i += 2
-                                        }
-                                        if (local == "polygon") p.close()
-                                        drawOps.add(SvgDrawOp(p, if (local == "polygon") fillCol else null, strokeCol, strokeW))
-                                    }
-                                }
-                            }
-                            "text" -> {
-                                inText = true
-                                textSb.setLength(0)
-                                textX = parser.getAttributeValue(null, "x")?.toFloatOrNull() ?: 0f
-                                textY = parser.getAttributeValue(null, "y")?.toFloatOrNull() ?: 0f
-                                textFontSize = resolveProp("font-size")?.filter { it.isDigit() || it == '.' }?.toFloatOrNull() ?: 18f
-                                textColor = fillCol ?: Color.BLACK
-                            }
-                        }
-                    }
-                    XmlPullParser.TEXT -> if (inText && textSb.length < 4096) textSb.append(parser.text ?: "")
-                    XmlPullParser.END_TAG -> if (local == "text" && inText) {
-                        val t = textSb.toString().trim()
-                        if (t.isNotEmpty() && textOps.size < 2048) {
-                            textOps.add(SvgTextOp(t, textX, textY, textFontSize, textColor))
-                        }
-                        inText = false
-                    }
-                }
-                ev = parser.next()
-            }
-            if (drawOps.isEmpty() && textOps.isEmpty()) {
-                lastErrorMsg = "SVG document contains no vector paths or text elements."
-            }
-        } catch (sec: SecurityException) {
-            lastErrorMsg = sec.message
-        } catch (e: Exception) {
-            lastErrorMsg = "SVG parse error: ${e.localizedMessage}"
-        }
-    }
-
-    override fun getLastError(): String? = lastErrorMsg
-    override fun getDocumentWidth(): Float = viewBoxWidth
-    override fun getDocumentHeight(): Float = viewBoxHeight
-    override fun getPageText(pageIndex: Int): String = textOps.joinToString("\n") { it.text }
-
-    @Synchronized
-    override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
-        if (isClosed) return
-        val isLight = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0
-        val canvas = Canvas(bitmap)
-        canvas.drawColor(if (isLight) Color.WHITE else Color.rgb(0x18, 0x1A, 0x22))
-
-        val zoom = (zoomPermille / 1000f).coerceIn(0.2f, 10f)
-        val baseScale = minOf(
-            (bitmap.width - 48f) / viewBoxWidth.coerceAtLeast(1f),
-            (bitmap.height - 48f) / viewBoxHeight.coerceAtLeast(1f)
-        ).coerceAtLeast(0.05f)
-        val totalScale = baseScale * zoom
-        val dstW = viewBoxWidth * totalScale
-        val dstH = viewBoxHeight * totalScale
-        val dx = (bitmap.width - dstW) / 2f - tileX.toFloat()
-        val dy = (bitmap.height - dstH) / 2f - tileY.toFloat()
-
-        val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.WHITE
-            style = Paint.Style.FILL
-        }
-        canvas.drawRoundRect(RectF(dx, dy, dx + dstW, dy + dstH), 8f, 8f, cardPaint)
-
-        canvas.save()
-        canvas.translate(dx, dy)
-        canvas.scale(totalScale, totalScale)
-        canvas.translate(-viewBoxMinX, -viewBoxMinY)
-
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        for (op in drawOps) {
-            if (op.fillColor != null) {
-                paint.style = Paint.Style.FILL
-                paint.color = op.fillColor
-                canvas.drawPath(op.path, paint)
-            }
-            if (op.strokeColor != null && op.strokeWidth > 0f) {
-                paint.style = Paint.Style.STROKE
-                paint.strokeWidth = op.strokeWidth
-                paint.color = op.strokeColor
-                canvas.drawPath(op.path, paint)
-            }
-        }
-        val tp = TextPaint(Paint.ANTI_ALIAS_FLAG)
-        for (tOp in textOps) {
-            tp.color = tOp.color
-            tp.textSize = tOp.fontSize
-            canvas.drawText(tOp.text, tOp.x, tOp.y, tp)
-        }
-        canvas.restore()
-    }
-
-    @Synchronized
-    override fun close() {
-        if (isClosed) return
-        isClosed = true
-        try { pfd.close() } catch (_: Exception) {}
     }
 }
 
@@ -903,8 +482,9 @@ class CleanRoomSvgVectorSession(private val pfd: ParcelFileDescriptor) : Documen
  */
 class CleanRoomBuiltIn3dSession(
     private val pfd: ParcelFileDescriptor,
-    private val originalExtension: String
-) : DocumentSession {
+    private val originalExtension: String,
+    private val password: String? = null
+) : DocumentSession, com.omnireader.core.engine.MeshSceneSource {
     @Volatile private var isClosed = false
     @Volatile private var lastErrorMsg: String? = null
     @Volatile private var isGeometryTruncated = false
@@ -928,6 +508,7 @@ class CleanRoomBuiltIn3dSession(
     private var polyColors = IntArray(3_500)
     private var vertexCount = 0
     private var previewBitmap: Bitmap? = null
+    private val meshLabels = ArrayList<com.omnireader.core.engine.MeshLabel>()
 
     private var minX = Float.MAX_VALUE
     private var maxX = -Float.MAX_VALUE
@@ -956,6 +537,8 @@ class CleanRoomBuiltIn3dSession(
             0x9D.toByte(), 0x57.toByte(), 0xCA.toByte(), 0x3F.toByte(),
             0x9D.toByte(), 0x44.toByte(), 0x10.toByte(), 0x2B.toByte()
         )
+
+        private fun dwgColor(c: Int): Int = if (c < 0) (0xFF shl 24) or (c and 0xFFFFFF) else aciToColor(c)
 
         private fun aciToColor(aci: Int): Int {
             return when (abs(aci)) {
@@ -1113,7 +696,7 @@ class CleanRoomBuiltIn3dSession(
                 }
                 isDwg -> {
                     modelType = "DWG"
-                    parseDwgBytes(readHeaderOrFullBytes(32 * 1024 * 1024))
+                    parseDwgBytes(readHeaderOrFullBytes(128 * 1024 * 1024))
                 }
                 is3ds -> {
                     modelType = "3DS"
@@ -2086,94 +1669,41 @@ class CleanRoomBuiltIn3dSession(
     private fun parse3mfStream() {
         val fileSize = readableSource.size.coerceAtLeast(1L)
         try {
+            val models = LinkedHashMap<String, ByteArray>()
+            var rels: ByteArray? = null
             openSafeStream { raw ->
                 ZipInputStream(raw).use { zis ->
                     var totalUnpacked = 0L
                     val buf = ByteArray(16384)
-                    while (!isGeometryTruncated) {
+                    while (true) {
                         val entry = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
                         val name = entry.name.replace('\\', '/').lowercase(Locale.ROOT)
-                        if (!entry.isDirectory && (name.endsWith(".model") || (name.startsWith("3d/") && name.endsWith(".xml")))) {
-                            modelType = "3MF 3D Model"
+                        val isModel = name.endsWith(".model") || (name.startsWith("3d/") && name.endsWith(".xml"))
+                        val isRels = name == "_rels/.rels"
+                        if (!entry.isDirectory && (isModel || isRels)) {
                             val bos = ByteArrayOutputStream()
                             var entryRead = 0
                             while (entryRead < 48 * 1024 * 1024) {
                                 val r = zis.read(buf)
                                 if (r <= 0) break
                                 bos.write(buf, 0, r)
-                                entryRead += r; totalUnpacked += r
+                                entryRead += r
+                                totalUnpacked += r
                                 if (totalUnpacked > 48 * 1024 * 1024L && totalUnpacked / fileSize > 150L) {
                                     throw SecurityException("Превышен безопасный коэффициент сжатия 3MF.")
                                 }
                             }
-                            val xml = EbookTextSession.decodeAndPreprocessXml(bos.toByteArray())
-                            val parser = EbookTextSession.createSafeXmlParser()
-                            parser.setInput(StringReader(xml))
-                            var vertCoords = FloatArray(30_000)
-                            var vertCount = 0
-                            val colorGroups = HashMap<String, MutableList<Int>>()
-                            var activeGroupId = ""
-                            var defaultObjColor = 0
-                            fun parseHexCol(hex: String?): Int {
-                                if (hex.isNullOrBlank() || !hex.startsWith("#")) return 0
-                                val rgb = hex.removePrefix("#").trim().take(6).toIntOrNull(16) ?: return 0
-                                return (0xFF shl 24) or rgb
-                            }
-                            var ev = parser.eventType
-                            while (ev != XmlPullParser.END_DOCUMENT && !isGeometryTruncated) {
-                                if (ev == XmlPullParser.START_TAG) {
-                                    when (parser.name?.substringAfterLast(':')?.lowercase(Locale.ROOT) ?: "") {
-                                        "basematerials", "colorgroup" -> {
-                                            activeGroupId = parser.getAttributeValue(null, "id") ?: ""
-                                            if (activeGroupId.isNotEmpty()) colorGroups[activeGroupId] = ArrayList()
-                                        }
-                                        "base", "color" -> {
-                                            val cStr = parser.getAttributeValue(null, "displaycolor") ?: parser.getAttributeValue(null, "color")
-                                            val col = parseHexCol(cStr)
-                                            if (activeGroupId.isNotEmpty() && col != 0) colorGroups[activeGroupId]?.add(col)
-                                        }
-                                        "object" -> {
-                                            val pid = parser.getAttributeValue(null, "pid") ?: ""
-                                            val pindex = parser.getAttributeValue(null, "pindex")?.toIntOrNull() ?: 0
-                                            defaultObjColor = colorGroups[pid]?.getOrNull(pindex) ?: 0
-                                        }
-                                        "mesh" -> vertCount = 0
-                                        "vertex" -> {
-                                            val x = parser.getAttributeValue(null, "x")?.toFloatOrNull() ?: 0f
-                                            val y = parser.getAttributeValue(null, "y")?.toFloatOrNull() ?: 0f
-                                            val z = parser.getAttributeValue(null, "z")?.toFloatOrNull() ?: 0f
-                                            if ((vertCount + 1) * 3 > vertCoords.size && vertCoords.size < 9_000_000) {
-                                                vertCoords = vertCoords.copyOf(vertCoords.size * 2)
-                                            }
-                                            if ((vertCount + 1) * 3 <= vertCoords.size) {
-                                                val b = vertCount * 3
-                                                vertCoords[b] = x; vertCoords[b + 1] = y; vertCoords[b + 2] = z
-                                                vertCount++
-                                            }
-                                        }
-                                        "triangle" -> {
-                                            val v1 = parser.getAttributeValue(null, "v1")?.toIntOrNull() ?: -1
-                                            val v2 = parser.getAttributeValue(null, "v2")?.toIntOrNull() ?: -1
-                                            val v3 = parser.getAttributeValue(null, "v3")?.toIntOrNull() ?: -1
-                                            val pid = parser.getAttributeValue(null, "pid")
-                                            val p1 = parser.getAttributeValue(null, "p1")?.toIntOrNull()
-                                            val triCol = if (p1 != null) {
-                                                val grp = if (pid != null) colorGroups[pid] else colorGroups.values.firstOrNull()
-                                                grp?.getOrNull(p1) ?: defaultObjColor
-                                            } else defaultObjColor
-                                            if (v1 in 0 until vertCount && v2 in 0 until vertCount && v3 in 0 until vertCount) {
-                                                val b1 = v1 * 3; val b2 = v2 * 3; val b3 = v3 * 3
-                                                addTriangle(vertCoords[b1], vertCoords[b1 + 1], vertCoords[b1 + 2], vertCoords[b2], vertCoords[b2 + 1], vertCoords[b2 + 2], vertCoords[b3], vertCoords[b3 + 1], vertCoords[b3 + 2], triCol)
-                                            }
-                                        }
-                                    }
-                                }
-                                ev = parser.next()
-                            }
+                            if (isRels) rels = bos.toByteArray() else models[entry.name] = bos.toByteArray()
                         }
                         try { zis.closeEntry() } catch (_: Throwable) {}
                     }
                 }
+            }
+            if (models.isEmpty()) return
+            modelType = "3MF 3D Model"
+            CleanRoomSceneFormats.parse3mf(models, CleanRoomSceneFormats.find3mfRootModel(rels)) { x1, y1, z1, x2, y2, z2, x3, y3, z3, color ->
+                addTriangle(x1, y1, z1, x2, y2, z2, x3, y3, z3, color)
+                !isGeometryTruncated
             }
         } catch (_: Throwable) {}
     }
@@ -2181,99 +1711,11 @@ class CleanRoomBuiltIn3dSession(
     private fun parseColladaBytes(bytes: ByteArray) {
         if (bytes.isEmpty()) return
         try {
-            val xml = EbookTextSession.decodeAndPreprocessXml(bytes)
-            val parser = EbookTextSession.createSafeXmlParser()
-            parser.setInput(StringReader(xml))
-            val floatArraysById = HashMap<String, FloatArray>()
-            val sourceToArrayId = HashMap<String, String>()
-            val verticesToSourceId = HashMap<String, String>()
-            var curSourceId = ""
-            var curVerticesId = ""
-            var inPrim = false
-            var primType = ""
-            var vOffset = 0
-            var maxOffset = 0
-            var curVSource = ""
-            val vcountList = ArrayList<Int>()
-            var ev = parser.eventType
-            while (ev != XmlPullParser.END_DOCUMENT && !isGeometryTruncated) {
-                val tag = parser.name?.substringAfterLast(':')?.lowercase(Locale.ROOT) ?: ""
-                when (ev) {
-                    XmlPullParser.START_TAG -> when (tag) {
-                        "source" -> curSourceId = parser.getAttributeValue(null, "id") ?: ""
-                        "float_array" -> {
-                            val fId = parser.getAttributeValue(null, "id") ?: ""
-                            if (curSourceId.isNotEmpty() && fId.isNotEmpty()) sourceToArrayId[curSourceId] = fId
-                            val floats = parser.nextText().trim().split(Regex("\\s+")).mapNotNull { it.toFloatOrNull() }.toFloatArray()
-                            if (fId.isNotEmpty()) floatArraysById[fId] = floats
-                            if (curSourceId.isNotEmpty()) floatArraysById[curSourceId] = floats
-                        }
-                        "vertices" -> curVerticesId = parser.getAttributeValue(null, "id") ?: ""
-                        "triangles", "polylist", "polygons" -> {
-                            inPrim = true; primType = tag; vOffset = 0; maxOffset = 0; vcountList.clear()
-                        }
-                        "input" -> {
-                            val sem = parser.getAttributeValue(null, "semantic")?.uppercase(Locale.ROOT) ?: ""
-                            val src = (parser.getAttributeValue(null, "source") ?: "").removePrefix("#")
-                            val off = parser.getAttributeValue(null, "offset")?.toIntOrNull() ?: 0
-                            if (inPrim) {
-                                if (off > maxOffset) maxOffset = off
-                                if (sem == "VERTEX" || sem == "POSITION") {
-                                    vOffset = off
-                                    curVSource = verticesToSourceId[src] ?: src
-                                }
-                            } else if (curVerticesId.isNotEmpty() && sem == "POSITION") {
-                                verticesToSourceId[curVerticesId] = src
-                            }
-                        }
-                        "vcount" -> parser.nextText().trim().split(Regex("\\s+")).mapNotNullTo(vcountList) { it.toIntOrNull() }
-                        "p" -> if (inPrim) {
-                            val ints = parser.nextText().trim().split(Regex("\\s+")).mapNotNull { it.toIntOrNull() }.toIntArray()
-                            val coords = floatArraysById[curVSource] ?: floatArraysById[sourceToArrayId[curVSource]] ?: floatArraysById.values.firstOrNull()
-                            if (coords != null && coords.size >= 9) {
-                                val stride = (maxOffset + 1).coerceAtLeast(1)
-                                val vCount = coords.size / 3
-                                if (primType == "polylist" && vcountList.isNotEmpty()) {
-                                    var cur = 0
-                                    for (vc in vcountList) {
-                                        if (isGeometryTruncated) break
-                                        if (vc >= 3 && (cur + vc) * stride <= ints.size) {
-                                            val i0 = ints[cur * stride + vOffset]
-                                            if (i0 in 0 until vCount) {
-                                                val b0 = i0 * 3
-                                                for (k in 1 until vc - 1) {
-                                                    val i1 = ints[(cur + k) * stride + vOffset]
-                                                    val i2 = ints[(cur + k + 1) * stride + vOffset]
-                                                    if (i1 in 0 until vCount && i2 in 0 until vCount) {
-                                                        val b1 = i1 * 3; val b2 = i2 * 3
-                                                        addTriangle(coords[b0], coords[b0 + 1], coords[b0 + 2], coords[b1], coords[b1 + 1], coords[b1 + 2], coords[b2], coords[b2 + 1], coords[b2 + 2])
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        cur += vc.coerceAtLeast(1)
-                                    }
-                                } else {
-                                    val totalRefs = ints.size / stride
-                                    var t = 0
-                                    while (t + 2 < totalRefs && !isGeometryTruncated) {
-                                        val i0 = ints[t * stride + vOffset]
-                                        val i1 = ints[(t + 1) * stride + vOffset]
-                                        val i2 = ints[(t + 2) * stride + vOffset]
-                                        if (i0 in 0 until vCount && i1 in 0 until vCount && i2 in 0 until vCount) {
-                                            val b0 = i0 * 3; val b1 = i1 * 3; val b2 = i2 * 3
-                                            addTriangle(coords[b0], coords[b0 + 1], coords[b0 + 2], coords[b1], coords[b1 + 1], coords[b1 + 2], coords[b2], coords[b2 + 1], coords[b2 + 2])
-                                        }
-                                        t += 3
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    XmlPullParser.END_TAG -> if (tag in setOf("triangles", "polylist", "polygons")) inPrim = false
-                }
-                ev = parser.next()
+            val result = CleanRoomSceneFormats.parseCollada(bytes) { x1, y1, z1, x2, y2, z2, x3, y3, z3, color ->
+                addTriangle(x1, y1, z1, x2, y2, z2, x3, y3, z3, color)
+                !isGeometryTruncated
             }
+            colladaYUp = result.isYUp
         } catch (_: Throwable) {}
     }
 
@@ -2396,6 +1838,33 @@ class CleanRoomBuiltIn3dSession(
 
     private fun parseDwgBytes(bytes: ByteArray) {
         if (bytes.size < 32) return
+        try {
+            val bridge = GplCoreEngineBridgeLoader.get()
+            if (bridge != null) {
+                val verCode = bridge.renderDwg(bytes, password, object : DwgGeometrySink {
+                    override val isFull: Boolean get() = isGeometryTruncated
+                    override fun line(x1: Double, y1: Double, z1: Double, x2: Double, y2: Double, z2: Double, color: Int) {
+                        addLineSegment(x1.toFloat(), y1.toFloat(), z1.toFloat(), x2.toFloat(), y2.toFloat(), z2.toFloat(), dwgColor(color))
+                    }
+                    override fun triangle(x1: Double, y1: Double, z1: Double, x2: Double, y2: Double, z2: Double, x3: Double, y3: Double, z3: Double, color: Int) {
+                        addTriangle(x1.toFloat(), y1.toFloat(), z1.toFloat(), x2.toFloat(), y2.toFloat(), z2.toFloat(), x3.toFloat(), y3.toFloat(), z3.toFloat(), dwgColor(color))
+                    }
+                    override fun textWidth(value: String, height: Double): Double = com.omnireader.core.engine.MeshSceneRenderer.measureLabelWidth(value, height)
+                    override fun text(value: String, x: Double, y: Double, z: Double, height: Double, rotationDeg: Double, color: Int) {
+                        if (meshLabels.size >= 20_000 || !x.isFinite() || !y.isFinite() || !z.isFinite()) return
+                        meshLabels.add(com.omnireader.core.engine.MeshLabel(value, x.toFloat(), y.toFloat(), z.toFloat(), height.toFloat(), rotationDeg.toFloat(), dwgColor(color)))
+                        updateBounds(x.toFloat(), y.toFloat(), z.toFloat())
+                    }
+                })
+                modelType = "DWG ($verCode)"
+                if (vertexCount > 0 || meshLabels.isNotEmpty()) return
+            }
+        } catch (e: DwgFormatException) {
+            lastErrorMsg = if (e.message?.startsWith("PASSWORD_REQUIRED") == true) e.message else "DWG: ${e.message}"
+            if (lastErrorMsg?.startsWith("PASSWORD_REQUIRED") == true) return
+        } catch (e: OutOfMemoryError) {
+            lastErrorMsg = "DWG is too large to load."
+        }
         val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         val previewAddr = bb.getInt(0x0D)
         var sentinelPos = -1
@@ -2427,29 +1896,7 @@ class CleanRoomBuiltIn3dSession(
                 }
             }
         }
-        val scanEnd = minOf(bytes.size - 48, 1024 * 1024)
-        var i = minOf(0x100, bytes.size)
-        var segs = 0
-        fun okDouble(v: Double) = v.isFinite() && (v == 0.0 || abs(v) in 0.01..50_000.0)
-        while (i <= scanEnd && segs < 4000) {
-            val x1 = bb.getDouble(i); val y1 = bb.getDouble(i + 8); val z1 = bb.getDouble(i + 16)
-            val x2 = bb.getDouble(i + 24); val y2 = bb.getDouble(i + 32); val z2 = bb.getDouble(i + 40)
-            if (okDouble(x1) && okDouble(y1) && okDouble(z1) && okDouble(x2) && okDouble(y2) && okDouble(z2)) {
-                val dx = (x2 - x1).toFloat(); val dy = (y2 - y1).toFloat(); val dz = (z2 - z1).toFloat()
-                if (dx * dx + dy * dy + dz * dz in 0.25f..1_000_000f) {
-                    addLineSegment(x1.toFloat(), y1.toFloat(), z1.toFloat(), x2.toFloat(), y2.toFloat(), z2.toFloat(), aciToColor((segs % 5) + 1))
-                    segs++; i += 48; continue
-                }
-            }
-            i += 8
-        }
-        if (vertexCount == 0 && previewBitmap == null) {
-            val w = 160f; val h = 110f
-            addLineSegment(-w, -h, 0f, w, -h, 0f, aciToColor(4))
-            addLineSegment(w, -h, 0f, w, h, 0f, aciToColor(4))
-            addLineSegment(w, h, 0f, -w, h, 0f, aciToColor(4))
-            addLineSegment(-w, h, 0f, -w, -h, 0f, aciToColor(4))
-        }
+        if (previewBitmap != null) lastErrorMsg = null
     }
 
     private fun parse3dsStreaming(fileSize: Long) {
@@ -2969,138 +2416,45 @@ class CleanRoomBuiltIn3dSession(
         }
     }
 
-    @Volatile private var glesContext: Gles30OffscreenContext? = null
-    @Volatile private var glesRenderer: Gles30MeshRenderer? = null
+    private var colladaYUp: Boolean? = null
 
-    override fun getLastError(): String? = lastErrorMsg
+    private val sceneRenderer = com.omnireader.core.engine.MeshSceneRenderer()
+
+    override fun exportMeshScene(): com.omnireader.core.engine.MeshScene {
+        val extLower = originalExtension.lowercase(Locale.ROOT)
+        val isYUp = colladaYUp ?: (extLower in setOf("obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx") ||
+                modelType.contains("glTF", ignoreCase = true) ||
+                modelType.contains("USD", ignoreCase = true) ||
+                modelType.contains("FBX", ignoreCase = true))
+        return com.omnireader.core.engine.MeshScene(
+            vertices = rawVertices,
+            vertexCount = vertexCount,
+            polyColors = polyColors,
+            minX = minX, maxX = maxX,
+            minY = minY, maxY = maxY,
+            minZ = minZ, maxZ = maxZ,
+            isYUp = isYUp,
+            modelType = modelType,
+            isTruncated = isGeometryTruncated,
+            maxPolygons = maxPolygonsLimit,
+            labels = meshLabels.toList(),
+            preview = previewBitmap?.takeIf { !it.isRecycled }
+        )
+    }
+
     override fun getPageText(pageIndex: Int): String = modelType
 
     @Synchronized
     override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
         if (isClosed) return
-        val isLight = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0 || (pageIndex and 0xFF) == 1
-        val langOrdinal = (pageIndex ushr LANG_ORDINAL_SHIFT) and 0xF
-
-        val extLowerForOrientation = originalExtension.lowercase(Locale.ROOT)
-        // Strictly Y-Up formats: glTF/GLB, Wavefront OBJ, Pixar USD/USDZ, FBX, and COLLADA when <up_axis> == Y_UP.
-        // Engineering & 3D-printing formats (STL, 3MF, STEP, IGES, 3DS, BLEND, DXF, DWG, Z_UP COLLADA) are Z-Up!
-        val isYUp = extLowerForOrientation in setOf(
-            "obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx"
-        ) || modelType.contains("glTF", ignoreCase = true) ||
-                modelType.contains("USD", ignoreCase = true) ||
-                modelType.contains("FBX", ignoreCase = true)
-
-        if (vertexCount > 0) {
-            try {
-                var glesCtx = glesContext
-                if (glesCtx != null && (glesCtx.width != bitmap.width || glesCtx.height != bitmap.height)) {
-                    glesCtx.destroy()
-                    glesContext = null
-                    glesCtx = null
-                }
-                if (glesCtx == null && bitmap.width > 0 && bitmap.height > 0) {
-                    glesCtx = Gles30OffscreenContext(bitmap.width, bitmap.height)
-                    if (glesCtx.isInitialized) {
-                        glesContext = glesCtx
-                        glesCtx.makeCurrent()
-                        glesRenderer = Gles30MeshRenderer()
-                    } else {
-                        glesCtx.destroy()
-                        glesCtx = null
-                    }
-                }
-
-                val renderer = glesRenderer
-                if (glesCtx != null && glesCtx.isInitialized && renderer != null && renderer.isCompiled) {
-                    glesCtx.makeCurrent()
-                    val zoom = (zoomPermille / 1000f).coerceAtLeast(0.1f)
-                    renderer.renderMesh(
-                        vertices = rawVertices,
-                        polyColors = polyColors,
-                        vertexCount = vertexCount,
-                        width = bitmap.width,
-                        height = bitmap.height,
-                        yawDeg = tileX.toFloat(),
-                        pitchDeg = tileY.toFloat(),
-                        scale = zoom,
-                        isYUp = isYUp,
-                        isLightTheme = isLight,
-                        minX = minX, maxX = maxX,
-                        minY = minY, maxY = maxY,
-                        minZ = minZ, maxZ = maxZ
-                    )
-                    glesCtx.readPixelsToBitmap(bitmap)
-
-                    val hudCanvas = Canvas(bitmap)
-                    val polyCount = vertexCount / 9
-                    val polygonsWord = when (langOrdinal) {
-                        1 -> "Полигоны"
-                        2 -> "Polygone"
-                        3 -> "Polígonos"
-                        4 -> "Polygones"
-                        5 -> "Wielokąty"
-                        6 -> "Полігони"
-                        7 -> "多边形"
-                        else -> "Polygons"
-                    }
-                    paint.color = if (isLight) Color.rgb(0x1A, 0x1C, 0x24) else Color.WHITE
-                    paint.textSize = 26f
-                    hudCanvas.drawText("3D/CAD: $modelType | $polygonsWord: $polyCount", 30f, bitmap.height - 32f, paint)
-                    return
-                }
-            } catch (_: Throwable) {}
-        }
-
-        val canvas = Canvas(bitmap)
-        canvas.drawColor(if (isLight) Color.rgb(0xF5, 0xF7, 0xFA) else Color.rgb(0x12, 0x12, 0x12))
-
-        val prev = previewBitmap
-        if (prev != null && !prev.isRecycled && vertexCount == 0) {
-            val width = bitmap.width.toFloat()
-            val height = bitmap.height.toFloat()
-            val zoom = (zoomPermille / 1000f).coerceAtLeast(0.1f)
-            val aspect = prev.width.toFloat() / prev.height.toFloat().coerceAtLeast(1f)
-            val availW = (width - 80f) * zoom
-            val availH = (height - 120f) * zoom
-            val dstW: Float; val dstH: Float
-            if (availW / availH.coerceAtLeast(1f) > aspect) {
-                dstH = availH; dstW = dstH * aspect
-            } else {
-                dstW = availW; dstH = dstW / aspect
-            }
-            // Direct 1:1 pan tracking for DWG preview (dragging right moves drawing right, dragging down moves drawing down)
-            val panX = (tileX - 25) * 4f
-            val panY = (tileY - 20) * 4f
-            val left = (width - dstW) / 2f + panX
-            val top = (height - dstH) / 2f + panY
-            canvas.drawBitmap(prev, null, RectF(left, top, left + dstW, top + dstH), bitmapPaint)
-        }
-        if (vertexCount > 0) {
-            val polyCount = vertexCount / 9
-            val polygonsWord = when (langOrdinal) {
-                1 -> "Полигоны"
-                2 -> "Polygone"
-                3 -> "Polígonos"
-                4 -> "Polygones"
-                5 -> "Wielokąty"
-                6 -> "Полігони"
-                7 -> "多边形"
-                else -> "Polygons"
-            }
-            paint.color = if (isLight) Color.rgb(0x1A, 0x1C, 0x24) else Color.WHITE
-            paint.textSize = 26f
-            canvas.drawText("3D/CAD: $modelType | $polygonsWord: $polyCount", 30f, bitmap.height - 32f, paint)
-        }
+        sceneRenderer.render(exportMeshScene(), pageIndex, tileX, tileY, zoomPermille, bitmap)
     }
 
     @Synchronized
     override fun close() {
         if (isClosed) return
         isClosed = true
-        glesRenderer?.destroy()
-        glesRenderer = null
-        glesContext?.destroy()
-        glesContext = null
+        sceneRenderer.release()
         readableSource.close()
         previewBitmap?.recycle()
         previewBitmap = null
@@ -3112,6 +2466,34 @@ class CleanRoomBuiltIn3dSession(
  * Clean-Room parser for Microsoft OneNote (`.one`) revision store files based on the open
  * `[MS-ONE]` and `[MS-ONESTORE]` specifications published under the Microsoft Open Specifications Promise (OSP).
  */
+object OneNoteEncryptionDetector {
+    private val ENCRYPTION_KEY_ROOT_GUID = byteArrayOf(
+        0xF8.toByte(), 0x17, 0x37, 0x4A, 0x14, 0x1C, 0xE7.toByte(), 0x49,
+        0x95.toByte(), 0x26, 0x81.toByte(), 0xD9.toByte(), 0x42, 0xDE.toByte(), 0x17, 0x41
+    )
+
+    fun isEncrypted(bytes: ByteArray): Boolean {
+        if (bytes.size < ENCRYPTION_KEY_ROOT_GUID.size) return false
+        val limit = bytes.size - ENCRYPTION_KEY_ROOT_GUID.size
+        val first = ENCRYPTION_KEY_ROOT_GUID[0]
+        var i = 0
+        while (i <= limit) {
+            if (bytes[i] == first) {
+                var ok = true
+                for (k in 1 until ENCRYPTION_KEY_ROOT_GUID.size) {
+                    if (bytes[i + k] != ENCRYPTION_KEY_ROOT_GUID[k]) {
+                        ok = false
+                        break
+                    }
+                }
+                if (ok) return true
+            }
+            i++
+        }
+        return false
+    }
+}
+
 class CleanRoomOneNoteSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
     @Volatile private var isClosed = false
     @Volatile private var lastErrorMsg: String? = null
@@ -3139,8 +2521,12 @@ class CleanRoomOneNoteSession(private val pfd: ParcelFileDescriptor) : DocumentS
                     buf.flip()
                     buf.get(bytes)
                 }
-                embeddedImages.addAll(EmbeddedImageScanner.scanBinaryForImages(bytes, 16))
-                fullText = extractOneNoteStructuredContent(bytes, embeddedImages.size)
+                if (OneNoteEncryptionDetector.isEncrypted(bytes)) {
+                    lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted OneNote (.one) sections is not supported in this version."
+                } else {
+                    embeddedImages.addAll(EmbeddedImageScanner.scanBinaryForImages(bytes, 16))
+                    fullText = extractOneNoteStructuredContent(bytes, embeddedImages.size)
+                }
             }
         } catch (e: Exception) {
             lastErrorMsg = "OneNote read error: ${e.localizedMessage}"
@@ -3482,7 +2868,8 @@ internal class Ole2CfbContainer(private val data: ByteArray) {
         val name: String,
         val objectType: Int,
         val startSector: Int,
-        val size: Long
+        val size: Long,
+        val depth: Int = 0
     )
 
     private val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
@@ -3567,6 +2954,24 @@ internal class Ole2CfbContainer(private val data: ByteArray) {
             val dirBytes = readChain(firstDirSector, 4 * 1024 * 1024L)
             val entryCount = dirBytes.size / 128
             val dirBb = ByteBuffer.wrap(dirBytes).order(ByteOrder.LITTLE_ENDIAN)
+            val depthOf = IntArray(entryCount) { -1 }
+            if (entryCount > 0) {
+                depthOf[0] = 0
+                val stack = ArrayDeque<Pair<Int, Int>>()
+                val rootChild = dirBb.getInt(76)
+                if (rootChild in 1 until entryCount) stack.addLast(rootChild to 1)
+                var guard = 0
+                while (stack.isNotEmpty() && guard++ < entryCount * 4) {
+                    val (idx, d) = stack.removeLast()
+                    if (idx !in 0 until entryCount || depthOf[idx] >= 0) continue
+                    depthOf[idx] = d
+                    val b = idx * 128
+                    val left = dirBb.getInt(b + 68); val right = dirBb.getInt(b + 72); val child = dirBb.getInt(b + 76)
+                    if (left in 0 until entryCount) stack.addLast(left to d)
+                    if (right in 0 until entryCount) stack.addLast(right to d)
+                    if (child in 0 until entryCount) stack.addLast(child to d + 1)
+                }
+            }
 
             for (i in 0 until entryCount) {
                 val base = i * 128
@@ -3580,7 +2985,7 @@ internal class Ole2CfbContainer(private val data: ByteArray) {
                 } else {
                     dirBb.getLong(base + 120)
                 }
-                entries.add(DirEntry(name, objType, startSec, streamSize))
+                entries.add(DirEntry(name, objType, startSec, streamSize, if (objType == 5) 0 else depthOf[i].let { if (it < 0) Int.MAX_VALUE else it }))
             }
 
             val rootEntry = entries.firstOrNull { it.objectType == 5 }
@@ -3595,7 +3000,7 @@ internal class Ole2CfbContainer(private val data: ByteArray) {
     fun listStreams(): List<DirEntry> = entries
 
     fun readStream(name: String): ByteArray? {
-        val entry = entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: return null
+        val entry = entries.filter { it.name.equals(name, ignoreCase = true) && it.objectType != 1 }.minByOrNull { it.depth } ?: return null
         val safeLen = entry.size.coerceIn(0L, MAX_STREAM_BYTES.toLong())
         if (safeLen == 0L) return ByteArray(0)
         return if (entry.objectType != 5 && safeLen < miniStreamCutoffSize && rootMiniStream.isNotEmpty()) {
@@ -3642,9 +3047,13 @@ internal class Ole2CfbContainer(private val data: ByteArray) {
     }
 }
 
-class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
+class CleanRoomDocSession(
+    private val pfd: ParcelFileDescriptor,
+    private val password: String? = null
+) : DocumentSession {
     @Volatile private var isClosed = false
     @Volatile private var lastErrorMsg: String? = null
+    private var paged: com.omnireader.core.engine.word.WordPagedDocument? = null
     private val pages = mutableListOf<String>()
     private val embeddedImages = mutableListOf<Bitmap>()
     private var fullText = ""
@@ -3673,18 +3082,29 @@ class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
                 if (bytes.size >= 5 && String(bytes, 0, 5, StandardCharsets.US_ASCII) == "{\\rtf") {
                     fullText = CleanRoomRtfSession.parseRtfBytes(bytes, embeddedImages)
                 } else if (bytes.size >= 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
-                    val dup = ParcelFileDescriptor.dup(pfd.fileDescriptor)
-                    val ebookSession = EbookTextSession(dup, DetectedFormat.DOCX, "docx")
-                    try {
-                        fullText = ebookSession.getPageText(-1)
-                        lastErrorMsg = ebookSession.getLastError()
-                        for (i in 0 until ebookSession.getEmbeddedImagesCount()) {
-                            ebookSession.getEmbeddedImage(i)?.let { bmp ->
-                                bmp.config?.let { cfg -> embeddedImages.add(bmp.copy(cfg, false)) }
+                    paged = try {
+                        com.omnireader.core.engine.word.WordPagedDocument.openDocx(bytes)
+                    } catch (_: OutOfMemoryError) {
+                        null
+                    } catch (_: Throwable) {
+                        null
+                    }
+                    if (paged != null) {
+                        fullText = paged?.fullText() ?: ""
+                    } else {
+                        val dup = ParcelFileDescriptor.dup(pfd.fileDescriptor)
+                        val ebookSession = EbookTextSession(dup, DetectedFormat.DOCX, "docx")
+                        try {
+                            fullText = ebookSession.getPageText(-1)
+                            lastErrorMsg = ebookSession.getLastError()
+                            for (i in 0 until ebookSession.getEmbeddedImagesCount()) {
+                                ebookSession.getEmbeddedImage(i)?.let { bmp ->
+                                    bmp.config?.let { cfg -> embeddedImages.add(bmp.copy(cfg, false)) }
+                                }
                             }
+                        } finally {
+                            ebookSession.close()
                         }
-                    } finally {
-                        ebookSession.close()
                     }
                 } else {
                     val cfb = Ole2CfbContainer(bytes)
@@ -3695,10 +3115,34 @@ class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
                         } else {
                             lastErrorMsg = "File is not a valid MS-DOC container (OLE2 CFB)."
                         }
+                    } else if (CleanRoomOfficeCrypto.isOfficeIrmProtected(cfb)) {
+                        lastErrorMsg = CleanRoomOfficeCrypto.OFFICE_IRM_DRM_ERROR
                     } else {
                         if (cfb.readStream("EncryptedPackage") != null || cfb.readStream("EncryptionInfo") != null) {
-                            lastErrorMsg = "PASSWORD_REQUIRED: Document is encrypted or password protected."
-                        } else {
+                            val decryptedZip = if (!password.isNullOrEmpty()) CleanRoomOfficeCrypto.decryptOoxml(cfb, password) else null
+                            if (decryptedZip != null) {
+                                paged = try {
+                                    com.omnireader.core.engine.word.WordPagedDocument.openDocx(decryptedZip)
+                                } catch (_: OutOfMemoryError) {
+                                    null
+                                } catch (_: Throwable) {
+                                    null
+                                }
+                                if (paged != null) {
+                                    fullText = paged?.fullText() ?: ""
+                                } else {
+                                    fullText = extractZipDocxTextFallback(decryptedZip)
+                                }
+                            } else {
+                                lastErrorMsg = if (password.isNullOrEmpty()) {
+                                    "PASSWORD_REQUIRED: Document is encrypted or password protected."
+                                } else {
+                                    "PASSWORD_REQUIRED: Incorrect password for encrypted document."
+                                }
+                            }
+                        } else if (openPaged(cfb)) {
+                            fullText = paged?.fullText() ?: ""
+                        } else if (lastErrorMsg == null) {
                             cfb.readStream("Data")?.let { dataStream ->
                                 embeddedImages.addAll(EmbeddedImageScanner.scanBinaryForImages(dataStream, 16))
                                 if (embeddedImages.isEmpty()) {
@@ -3723,14 +3167,85 @@ class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
                     }
                 }
             }
+        } catch (sec: SecurityException) {
+            lastErrorMsg = sec.message
         } catch (e: Exception) {
             lastErrorMsg = "DOC read error: ${e.localizedMessage}"
         }
 
-        if (fullText.isBlank() && embeddedImages.isEmpty() && lastErrorMsg == null) {
-            lastErrorMsg = "DOC document contains no readable text or is encrypted."
+        if (paged == null) {
+            if (fullText.isBlank() && embeddedImages.isEmpty() && lastErrorMsg == null) {
+                lastErrorMsg = "DOC document contains no readable text or is encrypted."
+            }
+            EbookTextSession.paginateRichText(fullText, embeddedImages.size, pages)
         }
-        EbookTextSession.paginateRichText(fullText, embeddedImages.size, pages)
+    }
+
+    private fun extractZipDocxTextFallback(zipBytes: ByteArray): String {
+        val sb = StringBuilder()
+        try {
+            ZipInputStream(ByteArrayInputStream(zipBytes)).use { zis ->
+                val buf = ByteArray(16384)
+                while (true) {
+                    val entry = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
+                    val norm = entry.name.replace('\\', '/').trimStart('/').lowercase(Locale.ROOT)
+                    if (!entry.isDirectory && norm == "word/document.xml") {
+                        val bos = ByteArrayOutputStream()
+                        var r: Int
+                        while (zis.read(buf).also { r = it } > 0) {
+                            if (bos.size() + r > 32 * 1024 * 1024) break
+                            bos.write(buf, 0, r)
+                        }
+                        EbookTextSession.extractXmlBytesWithCharset(bos.toByteArray(), sb)
+                    }
+                    try { zis.closeEntry() } catch (_: Throwable) {}
+                }
+            }
+        } catch (_: Throwable) {}
+        return sb.toString().trim()
+    }
+
+    private fun openPaged(cfb: Ole2CfbContainer): Boolean {
+        val rawWord = cfb.readStream("WordDocument") ?: return false
+        val tblName = com.omnireader.core.engine.word.WordPagedDocument.tableStreamName(rawWord)
+        val rawTbl = cfb.readStream(tblName)
+        val rawData = cfb.readStream("Data")
+        val word: ByteArray
+        val tbl: ByteArray?
+        val data: ByteArray?
+        if (CleanRoomOfficeCrypto.isEncryptedDoc(rawWord)) {
+            if (password.isNullOrEmpty()) {
+                lastErrorMsg = "PASSWORD_REQUIRED: MS Word document (.doc) is password protected."
+                return false
+            }
+            val dec = CleanRoomOfficeCrypto.decryptDoc(rawWord, rawTbl, rawData, password)
+            if (dec == null) {
+                lastErrorMsg = "PASSWORD_REQUIRED: Incorrect password for MS Word document (.doc)."
+                return false
+            }
+            word = dec.wordDocument
+            tbl = dec.tableStream
+            data = dec.dataStream
+        } else {
+            word = rawWord
+            tbl = rawTbl
+            data = rawData
+        }
+        return try {
+            paged = com.omnireader.core.engine.word.WordPagedDocument.open(word, tbl, data)
+            paged != null
+        } catch (e: OutOfMemoryError) {
+            paged = null
+            false
+        } catch (sec: SecurityException) {
+            paged = null
+            lastErrorMsg = sec.message
+            false
+        } catch (e: Exception) {
+            paged = null
+            if (e.message?.startsWith("PASSWORD_REQUIRED") == true) lastErrorMsg = e.message
+            false
+        }
     }
 
     private fun tryExtractNonOleDocText(bytes: ByteArray): String {
@@ -3979,12 +3494,21 @@ class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
         }
     }
 
-    override val pageCount: Int get() = pages.size.coerceAtLeast(1)
+    override val pageCount: Int get() = paged?.pageCount ?: pages.size.coerceAtLeast(1)
     override fun getLastError(): String? = lastErrorMsg
+
+    override fun getDocumentWidth(): Float = paged?.pageWidth(0) ?: 0f
+    override fun getDocumentHeight(): Float = paged?.pageHeight(0) ?: 0f
+
+    override fun getPageAspectRatio(pageIndex: Int): Float {
+        val p = paged ?: return super.getPageAspectRatio(pageIndex)
+        return p.aspectRatio((pageIndex and PAGE_INDEX_MASK).coerceIn(0, (p.pageCount - 1).coerceAtLeast(0)))
+    }
 
     @Synchronized
     override fun getPageText(pageIndex: Int): String {
         if (pageIndex == -1) return fullText
+        paged?.let { p -> return p.pageText((pageIndex and PAGE_INDEX_MASK).coerceIn(0, (p.pageCount - 1).coerceAtLeast(0))) }
         val cleanIdx = (pageIndex and PAGE_INDEX_MASK).coerceIn(0, (pages.size - 1).coerceAtLeast(0))
         return pages.getOrElse(cleanIdx) { "" }
     }
@@ -3992,6 +3516,14 @@ class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
     @Synchronized
     override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
         if (isClosed) return
+        paged?.let { p ->
+            try {
+                p.render((pageIndex and PAGE_INDEX_MASK).coerceIn(0, (p.pageCount - 1).coerceAtLeast(0)), tileX, tileY, zoomPermille, bitmap)
+            } catch (e: OutOfMemoryError) {
+                p.release()
+            }
+            return
+        }
         val isLightTheme = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0
         if (lastErrorMsg != null) {
             bitmap.eraseColor(if (isLightTheme) Color.rgb(250, 248, 242) else Color.rgb(0x14, 0x15, 0x1C))
@@ -4029,6 +3561,7 @@ class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
     @Synchronized
     override fun search(query: String, startPage: Int): Long {
         if (query.isBlank() || isClosed) return -1L
+        paged?.let { p -> return p.search(query, startPage).toLong() }
         val start = startPage.coerceIn(0, (pages.size - 1).coerceAtLeast(0))
         for (i in start until pages.size) if (pages[i].contains(query, true)) return i.toLong()
         for (i in 0 until start) if (pages[i].contains(query, true)) return i.toLong()
@@ -4039,42 +3572,72 @@ class CleanRoomDocSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
     override fun close() {
         if (isClosed) return
         isClosed = true
+        paged?.release()
+        paged = null
         embeddedImages.forEach { if (!it.isRecycled) it.recycle() }
         embeddedImages.clear()
         try { pfd.close() } catch (_: Exception) {}
     }
 }
 
-class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
-    @Volatile private var isClosed = false
-    @Volatile private var lastErrorMsg: String? = null
-    @Volatile private var activeSheetIdx = 0
-
-    data class MergedCellRegion(
-        val firstRow: Int,
-        val lastRow: Int,
-        val firstCol: Int,
-        val lastCol: Int
-    )
-
-    data class BiffCellStyle(
-        val fillColor: Int? = null,
-        val textColor: Int? = null,
-        val isBold: Boolean = false,
-        val isItalic: Boolean = false
-    )
+class CleanRoomBiff8XlsSession(
+    private val pfd: ParcelFileDescriptor,
+    private val password: String? = null
+) : SpreadsheetGridSession() {
 
     data class SheetGrid(
         val name: String,
         val cells: Map<Long, String>,
-        val cellStyles: Map<Long, BiffCellStyle>,
+        val cellStyles: Map<Long, SheetCellStyle>,
         val colWidthsPx: FloatArray?,
         val maxRow: Int,
         val maxCol: Int,
-        val mergedRegions: List<MergedCellRegion> = emptyList()
+        val mergedRegions: List<MergedCellRegion> = emptyList(),
+        val charts: List<BiffChartRef> = emptyList(),
+        val isChartSheet: Boolean = false,
+        val sourceIndex: Int = -1,
+        val rowHeightsPx: Map<Int, Float> = emptyMap(),
+        val flags: Map<Long, Int> = emptyMap(),
+        val formatColors: Map<Long, Int> = emptyMap(),
+        val fills: Map<Long, Int> = emptyMap(),
+        val rowStyles: Map<Int, SheetCellStyle> = emptyMap(),
+        val colStyles: Map<Int, SheetCellStyle> = emptyMap(),
+        val showGridLines: Boolean = true,
+        val defaultRowHeightPx: Float = SpreadsheetCoordinateUtils.BASE_CELL_HEIGHT,
+        val defaultColWidthPx: Float = SpreadsheetCoordinateUtils.BASE_CELL_WIDTH,
+        val defaultFontName: String? = null,
+        val defaultFontSize: Float = 11f,
+        val conditional: List<CfBlock> = emptyList()
     )
 
-    private val sheets = mutableListOf<SheetGrid>()
+    private class XlsSheetExtra(val charts: List<BiffChartRef>, val sourceIndex: Int)
+
+    private val grids = mutableListOf<SheetGrid>()
+    private val rawNumbers = ArrayList<Map<Long, Double>>()
+    private val rawTexts = ArrayList<Map<Long, String>>()
+    private var chartXti: List<IntArray> = emptyList()
+    private var chartPalette: Map<Int, Int> = emptyMap()
+    private var chartTheme: DmlTheme? = null
+    private var chartFontSizes: List<Float> = emptyList()
+    private val chartModels = HashMap<BiffChartRef, ChartModel?>()
+
+    private val cellSource = object : BiffCellSource {
+        override fun number(sheet: Int, row: Int, col: Int): Double? = rawNumbers.getOrNull(sheet)?.get(packCellCoord(row, col))
+        override fun text(sheet: Int, row: Int, col: Int): String? = rawTexts.getOrNull(sheet)?.get(packCellCoord(row, col))
+    }
+
+    private fun chartModel(ref: BiffChartRef, sheetIndex: Int): ChartModel? = synchronized(chartModels) {
+        chartModels.getOrPut(ref) {
+            try {
+                BiffChartParser.parse(ref, cellSource, chartXti, chartPalette, { idx ->
+                    val k = if (idx >= 5) idx - 1 else idx
+                    chartFontSizes.getOrNull(k)
+                }, sheetIndex, chartTheme)
+            } catch (_: Exception) {
+                null
+            }
+        }
+    }
 
     companion object {
         private const val MAX_BIFF_ROWS = 20_000
@@ -4149,13 +3712,37 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         if (!tryParseTextOrXmlSpreadsheetFallback(bytes)) {
                             lastErrorMsg = "File is not a valid MS-XLS container (OLE2 CFB)."
                         }
+                    } else if (CleanRoomOfficeCrypto.isOfficeIrmProtected(cfb)) {
+                        lastErrorMsg = CleanRoomOfficeCrypto.OFFICE_IRM_DRM_ERROR
                     } else {
                         if (cfb.readStream("EncryptedPackage") != null || cfb.readStream("EncryptionInfo") != null) {
-                            lastErrorMsg = "PASSWORD_REQUIRED: Microsoft Excel spreadsheet is encrypted."
+                            val decZip = CleanRoomOfficeCrypto.decryptOoxmlBytes(bytes, password, tryDefaultExcelPassword = true)
+                            if (decZip != null) {
+                                if (!tryParseZipSpreadsheetFallback(decZip)) {
+                                    lastErrorMsg = "No data sheets found in spreadsheet container."
+                                }
+                            } else {
+                                lastErrorMsg = if (password.isNullOrEmpty()) {
+                                    "PASSWORD_REQUIRED: Microsoft Excel spreadsheet is encrypted."
+                                } else {
+                                    "PASSWORD_REQUIRED: Incorrect password for Microsoft Excel spreadsheet."
+                                }
+                            }
                         } else {
                             val wbStream = cfb.readStream("Workbook") ?: cfb.readStream("Book")
                             if (wbStream == null || wbStream.size < 16) {
                                 lastErrorMsg = "Missing Workbook/Book stream in XLS container."
+                            } else if (CleanRoomOfficeCrypto.isEncryptedXls(wbStream)) {
+                                val decWb = CleanRoomOfficeCrypto.decryptXlsWithDefaultFallback(wbStream, password)
+                                if (decWb != null) {
+                                    parseBiff8Workbook(decWb)
+                                } else {
+                                    lastErrorMsg = if (password.isNullOrEmpty()) {
+                                        "PASSWORD_REQUIRED: Microsoft Excel spreadsheet (.xls) is password protected."
+                                    } else {
+                                        "PASSWORD_REQUIRED: Incorrect password for Microsoft Excel spreadsheet (.xls)."
+                                    }
+                                }
                             } else {
                                 parseBiff8Workbook(wbStream)
                             }
@@ -4168,6 +3755,70 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
         } catch (e: Exception) {
             lastErrorMsg = "XLS read error: ${e.localizedMessage}"
         }
+        for (gr in grids) sheets.add(toModel(gr))
+        grids.clear()
+    }
+
+    private fun toModel(gr: SheetGrid): SheetModel {
+        val rowCount = if (gr.maxRow >= 0) gr.maxRow + 1 else 0
+        val rowLists = ArrayList<ArrayList<String>>(rowCount)
+        for (r in 0 until rowCount) rowLists.add(ArrayList())
+        for ((key, v) in gr.cells) {
+            val r = (key ushr 32).toInt()
+            val c = (key and 0xFFFFFFFFL).toInt()
+            if (r !in 0 until rowCount || c < 0) continue
+            val row = rowLists[r]
+            while (row.size <= c) row.add("")
+            row[c] = v
+        }
+        if (rowCount > 0 && gr.maxCol >= 0) {
+            val first = rowLists[0]
+            while (first.size <= gr.maxCol) first.add("")
+        }
+        val flagRows = HashMap<Int, ByteArray>()
+        for ((key, f) in gr.flags) rowFlags(flagRows, (key ushr 32).toInt(), (key and 0xFFFFFFFFL).toInt(), f)
+        val colCount = gr.maxCol + 1
+        val widths = if (colCount > 0) FloatArray(colCount) { c -> gr.colWidthsPx?.getOrNull(c) ?: gr.defaultColWidthPx } else null
+        val heights = if (rowCount > 0) FloatArray(rowCount) { r -> gr.rowHeightsPx[r] ?: gr.defaultRowHeightPx } else null
+        val model = SheetModel(
+            name = gr.name,
+            rows = rowLists,
+            styles = gr.cellStyles,
+            colWidthsPx = widths,
+            mergedRegions = gr.mergedRegions,
+            chartSheet = gr.isChartSheet && gr.charts.isNotEmpty(),
+            rowHeightsPx = heights,
+            flags = flagRows,
+            formatColors = gr.formatColors,
+            fills = gr.fills,
+            rowStyles = gr.rowStyles,
+            colStyles = gr.colStyles,
+            showGridLines = gr.showGridLines,
+            defaultFontName = gr.defaultFontName,
+            defaultFontSize = gr.defaultFontSize,
+            defaultRowHeightPx = gr.defaultRowHeightPx,
+            defaultColWidthPx = gr.defaultColWidthPx,
+            extra = XlsSheetExtra(gr.charts, gr.sourceIndex)
+        )
+        if (gr.conditional.isNotEmpty()) {
+            val nums = rawNumbers.getOrNull(gr.sourceIndex).orEmpty()
+            val cells = object : CfCells {
+                override fun value(row: Int, col: Int, sheet: String?): Any? {
+                    if (sheet != null && !sheet.equals(gr.name, true)) return null
+                    nums[packCellCoord(row, col)]?.let { return it }
+                    val t = model.text(row, col)
+                    if (t.isEmpty()) return null
+                    if ((model.flags(row, col) and SheetCellFlags.BOOL) != 0) return t.equals("TRUE", true)
+                    return t
+                }
+            }
+            try {
+                SheetConditionalFormats.apply(gr.conditional, model.rowCount, model.colCount, cells, { r, c -> model.baseStyle(r, c) }, false, model.conditional) { v, code, _, _ ->
+                    ExcelNumberFormat.formatCode(v, code).text
+                }
+            } catch (_: Exception) {}
+        }
+        return model
     }
 
     private fun readBiff12RecordHeader(bytes: ByteArray, startPos: Int): Triple<Int, Int, Int>? {
@@ -4196,13 +3847,20 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
     }
 
     private fun tryParseZipSpreadsheetFallback(zipBytes: ByteArray): Boolean {
-        val entries = TreeMap<String, ByteArray>(String.CASE_INSENSITIVE_ORDER)
+        val rawEntries = TreeMap<String, ByteArray>(String.CASE_INSENSITIVE_ORDER)
         val compContainerLen = zipBytes.size.coerceAtLeast(1)
         ZipInputStream(ByteArrayInputStream(zipBytes)).use { zis ->
             val buf = ByteArray(16384)
             var total = 0L
             while (total < 64L * 1024L * 1024L) {
-                val entry = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
+                val entry = try {
+                    zis.nextEntry
+                } catch (ze: java.util.zip.ZipException) {
+                    if (ze.message?.contains("encrypted", ignoreCase = true) == true) {
+                        throw SecurityException("UNSUPPORTED_ENCRYPTION: ZIP-container password encryption is not supported.")
+                    }
+                    null
+                } catch (_: Throwable) { null } ?: break
                 if (!entry.isDirectory && (
                             entry.name.endsWith(".xml", true) ||
                                     entry.name.endsWith(".rels", true) ||
@@ -4219,10 +3877,19 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         if (total > 64L * 1024L * 1024L) break
                         bos.write(buf, 0, r)
                     }
-                    entries[entry.name.replace('\\', '/').trimStart('/')] = bos.toByteArray()
+                    rawEntries[entry.name.replace('\\', '/').trimStart('/')] = bos.toByteArray()
                 }
                 try { zis.closeEntry() } catch (_: Throwable) {}
             }
+        }
+        val entries: Map<String, ByteArray> = if (CleanRoomOfficeCrypto.isEncryptedOdfManifest(rawEntries["META-INF/manifest.xml"])) {
+            if (password.isNullOrEmpty()) {
+                throw SecurityException("PASSWORD_REQUIRED: ODF spreadsheet (.ods) is encrypted or password protected.")
+            }
+            CleanRoomOfficeCrypto.decryptOdfEntries(rawEntries, password)
+                ?: throw SecurityException("PASSWORD_REQUIRED: Incorrect password for ODF spreadsheet (.ods).")
+        } else {
+            rawEntries
         }
 
         // Check if this is an XLSB binary workbook
@@ -4247,7 +3914,7 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
             }
             val sheetBinKeys = entries.keys.filter {
                 val l = it.lowercase(Locale.ROOT)
-                l.startsWith("xl/worksheets/") && l.endsWith(".bin")
+                l.startsWith("xl/worksheets/sheet") && l.endsWith(".bin")
             }.sortedWith(compareBy({ it.filter { ch -> ch.isDigit() }.toIntOrNull() ?: Int.MAX_VALUE }, { it }))
 
             for ((idx, key) in sheetBinKeys.withIndex()) {
@@ -4313,10 +3980,10 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                     pos = dataStart + recLen
                 }
                 if (maxR >= 0 && maxC >= 0) {
-                    sheets.add(SheetGrid("Sheet ${idx + 1}", map, emptyMap(), null, maxR, maxC, merges))
+                    grids.add(SheetGrid("Sheet ${idx + 1}", map, emptyMap(), null, maxR, maxC, merges))
                 }
             }
-            if (sheets.isNotEmpty()) return true
+            if (grids.isNotEmpty()) return true
         }
 
         val sharedStrings = ArrayList<String>()
@@ -4433,10 +4100,10 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                 val widthsArr = if (colWidths.isNotEmpty()) {
                     FloatArray(maxC + 1) { c -> colWidths[c] ?: SpreadsheetCoordinateUtils.BASE_CELL_WIDTH }
                 } else null
-                sheets.add(SheetGrid("Sheet ${idx + 1}", map, emptyMap(), widthsArr, maxR, maxC, merges))
+                grids.add(SheetGrid("Sheet ${idx + 1}", map, emptyMap(), widthsArr, maxR, maxC, merges))
             }
         }
-        return sheets.isNotEmpty()
+        return grids.isNotEmpty()
     }
 
     private fun tryParseTextOrXmlSpreadsheetFallback(bytes: ByteArray): Boolean {
@@ -4467,7 +4134,7 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                 }
             }
             if (maxR >= 0 && maxC >= 0) {
-                sheets.add(SheetGrid("Sheet 1", map, emptyMap(), null, maxR, maxC))
+                grids.add(SheetGrid("Sheet 1", map, emptyMap(), null, maxR, maxC))
                 true
             } else {
                 false
@@ -4480,14 +4147,29 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
     private data class BiffFontInfo(
         val colorIndex: Int,
         val isBold: Boolean,
-        val isItalic: Boolean
+        val isItalic: Boolean,
+        val heightTwips: Int = 200,
+        val name: String? = null,
+        val underline: Int = 0,
+        val strike: Boolean = false,
+        val script: Int = 0
     )
 
     private data class BiffXfInfo(
         val fontIndex: Int,
         val numFmtIndex: Int,
         val fillPattern: Int,
-        val fillFgColorIndex: Int
+        val fillFgColorIndex: Int,
+        val fillBgColorIndex: Int = 0x41,
+        val hAlign: Int = 0,
+        val vAlign: Int = 2,
+        val wrap: Boolean = false,
+        val rotation: Int = 0,
+        val indent: Int = 0,
+        val shrink: Boolean = false,
+        val borderStyles: Int = 0,
+        val borderColorsLR: Int = 0,
+        val borderColorsTB: Int = 0
     )
 
     private fun parseBiff8Workbook(wb: ByteArray) {
@@ -4496,8 +4178,19 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
         val sst = mutableListOf<String>()
         val formatMap = HashMap<Int, String>()
         val paletteMap = HashMap<Int, Int>(DEFAULT_BIFF8_PALETTE)
+        paletteMap[0x00] = Color.BLACK
+        paletteMap[0x01] = Color.WHITE
+        paletteMap[0x02] = Color.rgb(255, 0, 0)
+        paletteMap[0x03] = Color.rgb(0, 255, 0)
+        paletteMap[0x04] = Color.rgb(0, 0, 255)
+        paletteMap[0x05] = Color.rgb(255, 255, 0)
+        paletteMap[0x06] = Color.rgb(255, 0, 255)
+        paletteMap[0x07] = Color.rgb(0, 255, 255)
         val fonts = ArrayList<BiffFontInfo>()
         val xfRecords = ArrayList<BiffXfInfo>()
+        val xfStyleCache = HashMap<Int, SheetCellStyle?>()
+        val xfExt = HashMap<Int, HashMap<Int, IntArray>>()
+        var themeColors: IntArray? = null
         var use1904DateSystem = false
 
         var pos = 0
@@ -4507,14 +4200,37 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
         var lastFormulaCol = -1
         var lastFormulaXf = -1
         val sheetMaps = mutableListOf<MutableMap<Long, String>>()
-        val sheetStyleMaps = mutableListOf<MutableMap<Long, BiffCellStyle>>()
+        val sheetStyleMaps = mutableListOf<MutableMap<Long, SheetCellStyle>>()
         val sheetColWidths = mutableListOf<MutableMap<Int, Float>>()
         val sheetMaxRows = mutableListOf<Int>()
         val sheetMaxCols = mutableListOf<Int>()
         val sheetMergedRegions = mutableListOf<MutableList<MergedCellRegion>>()
+        val sheetNumbers = mutableListOf<MutableMap<Long, Double>>()
+        val sheetCharts = mutableListOf<MutableList<BiffChartRef>>()
+        val sheetRowHeights = mutableListOf<MutableMap<Int, Float>>()
+        val sheetFlags = mutableListOf<MutableMap<Long, Int>>()
+        val sheetFmtColors = mutableListOf<MutableMap<Long, Int>>()
+        val sheetFills = mutableListOf<MutableMap<Long, Int>>()
+        val sheetRowStyles = mutableListOf<MutableMap<Int, SheetCellStyle>>()
+        val sheetColStyles = mutableListOf<MutableMap<Int, SheetCellStyle>>()
+        val sheetGridLines = mutableListOf<Boolean>()
+        val sheetDefaultRow = mutableListOf<Float>()
+        val sheetDefaultCol = mutableListOf<Float>()
+        val sheetCf = mutableListOf<MutableList<Pair<List<IntArray>, MutableList<CfRule>>>>()
+        val sheetCfIds = mutableListOf<HashMap<Int, Int>>()
+        var cfTop = 0
+        var cfLeft = 0
+        val chartSheetFlags = HashSet<Int>()
+        val xtiList = ArrayList<IntArray>()
+        var chartStart = -1
+        var chartDepth = -1
+        var chartOwner = -1
+        var lastDrawStart = -1
+        var lastDrawEnd = -1
 
         fun ensureSheetLists(targetIdx: Int) {
             if (targetIdx > 64) return
+            while (sheetNumbers.size <= targetIdx) { sheetNumbers.add(HashMap()); sheetCharts.add(ArrayList()) }
             while (sheetMaps.size <= targetIdx) {
                 sheetMaps.add(HashMap())
                 sheetStyleMaps.add(HashMap())
@@ -4522,64 +4238,192 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                 sheetMaxRows.add(-1)
                 sheetMaxCols.add(-1)
                 sheetMergedRegions.add(ArrayList())
+                sheetRowHeights.add(HashMap())
+                sheetFlags.add(HashMap())
+                sheetFmtColors.add(HashMap())
+                sheetFills.add(HashMap())
+                sheetRowStyles.add(HashMap())
+                sheetColStyles.add(HashMap())
+                sheetGridLines.add(true)
+                sheetDefaultRow.add(-1f)
+                sheetDefaultCol.add(-1f)
+                sheetCf.add(ArrayList())
+                sheetCfIds.add(HashMap())
             }
         }
 
-        fun resolveBiffStyle(xfIdx: Int): BiffCellStyle? {
-            val xf = xfRecords.getOrNull(xfIdx) ?: return null
-            val adjFontIdx = if (xf.fontIndex >= 4) xf.fontIndex - 1 else xf.fontIndex
-            val font = fonts.getOrNull(adjFontIdx)
-            val fillCol = if (xf.fillPattern > 0 && xf.fillFgColorIndex in 0x08..0x3F && xf.fillFgColorIndex != 0x09) {
-                paletteMap[xf.fillFgColorIndex]
-            } else null
-            val txtCol = if (font != null && font.colorIndex in 0x08..0x3F && font.colorIndex != 0x08) {
-                paletteMap[font.colorIndex]
-            } else null
-            val bold = font?.isBold == true
-            val italic = font?.isItalic == true
-            return if (fillCol != null || txtCol != null || bold || italic) {
-                BiffCellStyle(fillCol, txtCol, bold, italic)
-            } else null
+        fun color(idx: Int): Int? = if (idx in 0..0x3F) paletteMap[idx] else null
+
+        val supBookNames = ArrayList<ArrayList<String>>()
+
+        fun externName(ixti: Int, iname: Int): String? {
+            val sb = xtiList.getOrNull(ixti)?.get(0) ?: return null
+            return supBookNames.getOrNull(sb)?.getOrNull(iname - 1)
         }
 
-        fun putCell(row: Int, col: Int, value: String, xfIdx: Int = -1) {
+        val themeBufRef = java.io.ByteArrayOutputStream()
+        var themeVersionRef = -1
+
+        fun fullColor(e: IntArray): Int? {
+            val base = when (e[0]) {
+                1 -> color(e[2])
+                2 -> Color.rgb(e[2] and 0xFF, (e[2] ushr 8) and 0xFF, (e[2] ushr 16) and 0xFF)
+                3 -> {
+                    val tc = themeColors ?: run {
+                        val t = BiffChartParser.theme(themeVersionRef, themeBufRef.toByteArray()) ?: BiffChartParser.theme(124226, ByteArray(0))
+                        val keys = listOf("lt1", "dk1", "lt2", "dk2", "accent1", "accent2", "accent3", "accent4", "accent5", "accent6", "hlink", "folHlink")
+                        IntArray(keys.size) { t?.colors?.get(keys[it]) ?: Color.BLACK }.also { themeColors = it }
+                    }
+                    tc.getOrNull(e[2])
+                }
+                else -> null
+            } ?: return null
+            val tint = e[1] / 32767.0
+            if (abs(tint) < 1e-4) return base
+            val hsl = DmlColors.rgbToHsl(base)
+            val l = if (tint < 0) hsl[2] * (1.0 + tint) else hsl[2] * (1.0 - tint) + tint
+            return DmlColors.hslToRgb(hsl[0], hsl[1], l.toFloat())
+        }
+
+        fun extColor(xf: Int, type: Int): Int? = xfExt[xf]?.get(type)?.let { fullColor(it) }
+
+        fun border(styleCode: Int, colorIdx: Int, ext: Int? = null): SheetBorder? {
+            if (styleCode == 0) return null
+            return SheetBorder(styleCode.coerceIn(1, 13), ext ?: color(colorIdx))
+        }
+
+        fun fontFor(idx: Int): BiffFontInfo? = fonts.getOrNull(if (idx >= 4) idx - 1 else idx)
+
+        fun resolveBiffStyle(xfIdx: Int): SheetCellStyle? = xfStyleCache.getOrPut(xfIdx) {
+            val xf = xfRecords.getOrNull(xfIdx) ?: return@getOrPut null
+            val font = fontFor(xf.fontIndex)
+            val base = fonts.firstOrNull()
+            val fill = SheetCellStyle.biffPattern(xf.fillPattern, extColor(xfIdx, 4) ?: color(xf.fillFgColorIndex), extColor(xfIdx, 5) ?: color(xf.fillBgColorIndex))
+            val txtCol = extColor(xfIdx, 13) ?: if (font != null && font.colorIndex in 0..0x3F) color(font.colorIndex) else null
+            val bs = xf.borderStyles
+            val diagFlags = (xf.borderColorsLR ushr 14) and 0x3
+            val diagStyle = (xf.borderColorsTB ushr 21) and 0xF
+            val diagColor = (xf.borderColorsTB ushr 14) and 0x7F
+            val st = SheetCellStyle(
+                fill = fill?.bg,
+                pattern = fill?.pattern ?: 0,
+                patternColor = fill?.fg,
+                textColor = txtCol,
+                bold = font?.isBold == true,
+                italic = font?.isItalic == true,
+                underline = font?.underline ?: 0,
+                strike = font?.strike == true,
+                fontSize = font?.let { it.heightTwips / 20f } ?: 0f,
+                fontName = font?.name ?: base?.name,
+                script = font?.script ?: 0,
+                hAlign = when (xf.hAlign) {
+                    1 -> SheetCellStyle.H_LEFT
+                    2 -> SheetCellStyle.H_CENTER
+                    3 -> SheetCellStyle.H_RIGHT
+                    4 -> SheetCellStyle.H_FILL
+                    5 -> SheetCellStyle.H_JUSTIFY
+                    6 -> SheetCellStyle.H_CENTER_CONTINUOUS
+                    7 -> SheetCellStyle.H_DISTRIBUTED
+                    else -> SheetCellStyle.H_GENERAL
+                },
+                vAlign = when (xf.vAlign) {
+                    0 -> SheetCellStyle.V_TOP
+                    1 -> SheetCellStyle.V_CENTER
+                    3 -> SheetCellStyle.V_JUSTIFY
+                    4 -> SheetCellStyle.V_DISTRIBUTED
+                    else -> SheetCellStyle.V_BOTTOM
+                },
+                wrap = xf.wrap,
+                indent = xf.indent,
+                rotation = xf.rotation,
+                shrink = xf.shrink,
+                left = border(bs and 0xF, xf.borderColorsLR and 0x7F, extColor(xfIdx, 9)),
+                right = border((bs ushr 4) and 0xF, (xf.borderColorsLR ushr 7) and 0x7F, extColor(xfIdx, 10)),
+                top = border((bs ushr 8) and 0xF, xf.borderColorsTB and 0x7F, extColor(xfIdx, 7)),
+                bottom = border((bs ushr 12) and 0xF, (xf.borderColorsTB ushr 7) and 0x7F, extColor(xfIdx, 8)),
+                diagonalDown = if ((diagFlags and 1) != 0) border(diagStyle, diagColor, extColor(xfIdx, 11)) else null,
+                diagonalUp = if ((diagFlags and 2) != 0) border(diagStyle, diagColor, extColor(xfIdx, 11)) else null
+            )
+            if (st == SheetCellStyle(fontSize = st.fontSize, fontName = st.fontName) && st.fontSize == (base?.heightTwips ?: 200) / 20f && st.fontName == base?.name) null else st
+        }
+
+        fun putCell(row: Int, col: Int, value: String, xfIdx: Int = -1, kind: Int = 0, fmtColor: Int? = null, fill: Int = -1) {
             if (bofDepth > 1) return
-            val trimmed = value.trim()
             if (row !in 0 until MAX_BIFF_ROWS || col !in 0 until MAX_BIFF_COLS) return
             val targetIdx = currentSheetIdx.coerceIn(0, 64)
             ensureSheetLists(targetIdx)
             val key = packCellCoord(row, col)
-            if (trimmed.isNotEmpty() && sheetMaps[targetIdx].size < 500_000) {
-                sheetMaps[targetIdx][key] = trimmed
+            if (value.isNotBlank() && sheetMaps[targetIdx].size < 500_000) {
+                sheetMaps[targetIdx][key] = value.trimEnd('\r', '\n')
                 if (row > sheetMaxRows[targetIdx]) sheetMaxRows[targetIdx] = row
                 if (col > sheetMaxCols[targetIdx]) sheetMaxCols[targetIdx] = col
+                if (kind != 0) sheetFlags[targetIdx][key] = kind
+                if (fmtColor != null) sheetFmtColors[targetIdx][key] = fmtColor
+                if (fill >= 0) sheetFills[targetIdx][key] = fill
             }
             if (xfIdx >= 0 && sheetStyleMaps[targetIdx].size < 250_000) {
                 resolveBiffStyle(xfIdx)?.let { style ->
                     sheetStyleMaps[targetIdx][key] = style
+                    if (style.fill != null || style.hasBorders || value.isNotBlank()) {
+                        if (row > sheetMaxRows[targetIdx]) sheetMaxRows[targetIdx] = row
+                        if (col > sheetMaxCols[targetIdx]) sheetMaxCols[targetIdx] = col
+                    }
+                }
+            }
+        }
+
+        fun putNumber(row: Int, col: Int, d: Double) {
+            if (bofDepth > 1 || !d.isFinite()) return
+            if (row !in 0 until MAX_BIFF_ROWS || col !in 0 until MAX_BIFF_COLS) return
+            val targetIdx = currentSheetIdx.coerceIn(0, 64)
+            ensureSheetLists(targetIdx)
+            if (sheetNumbers[targetIdx].size < 500_000) sheetNumbers[targetIdx][packCellCoord(row, col)] = d
+        }
+
+        fun putNumericCell(row: Int, col: Int, d: Double, xfIdx: Int) {
+            putNumber(row, col, d)
+            val fmtIdx = xfRecords.getOrNull(xfIdx)?.numFmtIndex ?: 0
+            val res = ExcelNumberFormat.format(d, fmtIdx, formatMap[fmtIdx], use1904DateSystem)
+            val kind = SheetCellFlags.NUMBER or (if (res.general) SheetCellFlags.GENERAL else 0)
+            putCell(row, col, res.text, xfIdx, kind, res.color, if (res.fillAt >= 0) (res.fillAt shl 16) or res.fillChar.code else -1)
+            if (res.text.isBlank()) {
+                val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                if (bofDepth <= 1 && targetIdx < sheetMaxRows.size) {
                     if (row > sheetMaxRows[targetIdx]) sheetMaxRows[targetIdx] = row
                     if (col > sheetMaxCols[targetIdx]) sheetMaxCols[targetIdx] = col
                 }
             }
         }
 
-        fun formatNumericCell(d: Double, xfIdx: Int): String {
-            if (!d.isFinite()) return ""
+        fun putTextCell(row: Int, col: Int, text: String, xfIdx: Int) {
             val fmtIdx = xfRecords.getOrNull(xfIdx)?.numFmtIndex ?: 0
-            val fmtStr = formatMap[fmtIdx]
-            if (ExcelDateFormatter.isDateFormatCode(fmtIdx, fmtStr)) {
-                return ExcelDateFormatter.formatExcelSerialDate(d, use1904DateSystem, fmtIdx, fmtStr)
+            val code = formatMap[fmtIdx]
+            if (code != null && (code.contains('@') || code.count { it == ';' } >= 3)) {
+                val res = ExcelNumberFormat.formatText(text, fmtIdx, code)
+                putCell(row, col, res.text, xfIdx, 0, res.color, if (res.fillAt >= 0) (res.fillAt shl 16) or res.fillChar.code else -1)
+            } else {
+                putCell(row, col, text, xfIdx)
             }
-            if (ExcelDateFormatter.isPercentFormatCode(fmtIdx, fmtStr)) {
-                val pct = d * 100.0
-                val rounded = pct.roundToLong()
-                return if (abs(pct - rounded) < 1e-4) "${rounded}%" else String.format(Locale.US, "%.2f%%", pct)
-            }
-            return formatNumber(d)
         }
 
+        fun errorText(code: Int): String = when (code) {
+            0x00 -> "#NULL!"
+            0x07 -> "#DIV/0!"
+            0x0F -> "#VALUE!"
+            0x17 -> "#REF!"
+            0x1D -> "#NAME?"
+            0x24 -> "#NUM!"
+            0x2A -> "#N/A"
+            0x2B -> "#GETTING_DATA"
+            else -> "#ERR!"
+        }
+
+        val themeBuf = java.io.ByteArrayOutputStream()
+        var themeVersion = -1
+        var themeOpen = false
         while (pos + 4 <= wb.size) {
             val recId = bb.getShort(pos).toInt() and 0xFFFF
+            if (recId != 0x087F && recId != 0x0896) themeOpen = false
             val recLen = bb.getShort(pos + 2).toInt() and 0xFFFF
             val dataStart = pos + 4
             if (dataStart + recLen > wb.size) break
@@ -4599,11 +4443,27 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val grbit = bb.getShort(dataStart + 2).toInt() and 0xFFFF
                         val icv = bb.getShort(dataStart + 4).toInt() and 0xFFFF
                         val bls = bb.getShort(dataStart + 6).toInt() and 0xFFFF
+                        val sss = bb.getShort(dataStart + 8).toInt() and 0xFFFF
+                        val uls = wb[dataStart + 10].toInt() and 0xFF
+                        var fontName: String? = null
+                        if (recLen >= 16) {
+                            val cch = wb[dataStart + 14].toInt() and 0xFF
+                            val hi = (wb[dataStart + 15].toInt() and 0x01) != 0
+                            val start = dataStart + 16
+                            fontName = if (hi && start + cch * 2 <= dataStart + recLen) String(wb, start, cch * 2, StandardCharsets.UTF_16LE)
+                            else if (!hi && start + cch <= dataStart + recLen) String(wb, start, cch, StandardCharsets.ISO_8859_1)
+                            else null
+                        }
                         fonts.add(
                             BiffFontInfo(
                                 colorIndex = icv,
                                 isBold = bls >= 0x02BC || (grbit and 0x01) != 0,
-                                isItalic = (grbit and 0x02) != 0
+                                isItalic = (grbit and 0x02) != 0,
+                                heightTwips = bb.getShort(dataStart).toInt() and 0xFFFF,
+                                name = fontName?.takeIf { it.isNotBlank() },
+                                underline = when (uls) { 0x01, 0x21 -> 1; 0x02, 0x22 -> 2; else -> 0 },
+                                strike = (grbit and 0x08) != 0,
+                                script = if (sss in 1..2) sss else 0
                             )
                         )
                     }
@@ -4636,13 +4496,38 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val fmtIdx = bb.getShort(dataStart + 2).toInt() and 0xFFFF
                         var fillPat = 0
                         var fillFgIcv = 0x40
+                        var fillBgIcv = 0x41
+                        var align = 0
+                        var align2 = 0
+                        var borders = 0
+                        var colorsLR = 0
+                        var colorsTB = 0
                         if (recLen >= 20) {
+                            align = bb.getShort(dataStart + 6).toInt() and 0xFFFF
+                            align2 = bb.getShort(dataStart + 8).toInt() and 0xFFFF
+                            borders = bb.getShort(dataStart + 10).toInt() and 0xFFFF
+                            colorsLR = bb.getShort(dataStart + 12).toInt() and 0xFFFF
                             val borderAndPattern = bb.getInt(dataStart + 14)
+                            colorsTB = borderAndPattern
                             fillPat = (borderAndPattern ushr 26) and 0x3F
                             val icvCombined = bb.getShort(dataStart + 18).toInt() and 0xFFFF
                             fillFgIcv = icvCombined and 0x7F
+                            fillBgIcv = (icvCombined ushr 7) and 0x7F
                         }
-                        xfRecords.add(BiffXfInfo(fontIdx, fmtIdx, fillPat, fillFgIcv))
+                        xfRecords.add(
+                            BiffXfInfo(
+                                fontIdx, fmtIdx, fillPat, fillFgIcv, fillBgIcv,
+                                hAlign = align and 0x7,
+                                vAlign = (align ushr 4) and 0x7,
+                                wrap = (align and 0x8) != 0,
+                                rotation = (align ushr 8) and 0xFF,
+                                indent = align2 and 0xF,
+                                shrink = (align2 and 0x10) != 0,
+                                borderStyles = borders,
+                                borderColorsLR = colorsLR,
+                                borderColorsTB = colorsTB
+                            )
+                        )
                     }
                 }
                 0x007D -> {
@@ -4652,11 +4537,13 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val colFirst = (bb.getShort(dataStart).toInt() and 0xFFFF).coerceIn(0, MAX_BIFF_COLS - 1)
                         val colLast = (bb.getShort(dataStart + 2).toInt() and 0xFFFF).coerceIn(colFirst, MAX_BIFF_COLS - 1)
                         val colUnits256 = bb.getShort(dataStart + 4).toInt() and 0xFFFF
-                        if (colUnits256 > 0) {
-                            val pxWidth = SpreadsheetCoordinateUtils.excelCharWidthToPixels(colUnits256 / 256f)
-                            for (c in colFirst..minOf(colLast, colFirst + 128)) {
-                                sheetColWidths[targetIdx][c] = pxWidth
-                            }
+                        val colXf = if (recLen >= 8) bb.getShort(dataStart + 6).toInt() and 0xFFFF else -1
+                        val hidden = recLen >= 10 && (bb.getShort(dataStart + 8).toInt() and 0x0001) != 0
+                        val pxWidth = if (hidden) 0f else SpreadsheetCoordinateUtils.excelCharWidthToPixels(colUnits256 / 256f)
+                        val colStyle = if (colXf > 15) resolveBiffStyle(colXf) else null
+                        for (c in colFirst..minOf(colLast, colFirst + 255)) {
+                            sheetColWidths[targetIdx][c] = pxWidth
+                            if (colStyle != null) sheetColStyles[targetIdx][c] = colStyle
                         }
                     }
                 }
@@ -4668,6 +4555,13 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                                 currentSheetIdx++
                                 ensureSheetLists(currentSheetIdx)
                             }
+                            if (substreamType == 0x0020 && chartStart < 0) {
+                                chartStart = pos
+                                chartDepth = bofDepth
+                                chartOwner = currentSheetIdx.coerceIn(0, 64)
+                                if (bofDepth == 0) chartSheetFlags.add(chartOwner)
+                            }
+                            if (bofDepth == 0) { lastDrawStart = -1; lastDrawEnd = -1 }
                             bofDepth++
                         }
                     }
@@ -4675,6 +4569,67 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                 0x000A -> {
                     if (bofDepth > 0) {
                         bofDepth--
+                        if (chartStart >= 0 && bofDepth == chartDepth) {
+                            ensureSheetLists(chartOwner)
+                            val anchor = if (chartDepth == 1 && lastDrawStart >= 0) BiffChartParser.anchorFromDrawing(wb, lastDrawStart, lastDrawEnd) else null
+                            if (sheetCharts[chartOwner].size < 256) sheetCharts[chartOwner].add(BiffChartRef(wb.copyOfRange(chartStart, dataStart + recLen), anchor, chartDepth == 0))
+                            if (anchor != null) {
+                                if (anchor.rwB > sheetMaxRows[chartOwner]) sheetMaxRows[chartOwner] = anchor.rwB.coerceAtMost(MAX_BIFF_ROWS - 1)
+                                if (anchor.colR > sheetMaxCols[chartOwner]) sheetMaxCols[chartOwner] = anchor.colR.coerceAtMost(MAX_BIFF_COLS - 1)
+                            }
+                            chartStart = -1
+                            chartDepth = -1
+                        }
+                    }
+                }
+                0x00EC -> if (bofDepth == 1) {
+                    lastDrawStart = dataStart
+                    lastDrawEnd = dataStart + recLen
+                }
+                0x0896 -> if (bofDepth == 0 && recLen >= 16) {
+                    themeVersion = bb.getInt(dataStart + 12)
+                    themeVersionRef = themeVersion
+                    if (recLen > 16) { themeBuf.write(wb, dataStart + 16, recLen - 16); themeBufRef.write(wb, dataStart + 16, recLen - 16) }
+                    themeOpen = true
+                    themeColors = null
+                }
+                0x087F -> if (themeOpen && recLen > 12 && themeBuf.size() < 8 * 1024 * 1024) {
+                    themeBuf.write(wb, dataStart + 12, recLen - 12)
+                    themeBufRef.write(wb, dataStart + 12, recLen - 12)
+                    themeColors = null
+                }
+                0x087D -> if (bofDepth == 0 && recLen >= 20) {
+                    val ixfe = bb.getShort(dataStart + 14).toInt() and 0xFFFF
+                    val cexts = bb.getShort(dataStart + 18).toInt() and 0xFFFF
+                    var q = dataStart + 20
+                    val map = xfExt.getOrPut(ixfe) { HashMap() }
+                    for (k in 0 until cexts.coerceAtMost(32)) {
+                        if (q + 4 > dataStart + recLen) break
+                        val type = bb.getShort(q).toInt() and 0xFFFF
+                        val cb = bb.getShort(q + 2).toInt() and 0xFFFF
+                        if (cb < 4 || q + cb > dataStart + recLen) break
+                        if (type in setOf(4, 5, 7, 8, 9, 10, 11, 13) && cb >= 12) {
+                            map[type] = intArrayOf(bb.getShort(q + 4).toInt() and 0xFFFF, bb.getShort(q + 6).toInt(), bb.getInt(q + 8))
+                        }
+                        q += cb
+                    }
+                    xfStyleCache.remove(ixfe)
+                }
+                0x01AE -> if (bofDepth == 0) supBookNames.add(ArrayList())
+                0x0023 -> if (bofDepth == 0 && recLen >= 8 && supBookNames.isNotEmpty()) {
+                    val cch = wb[dataStart + 6].toInt() and 0xFF
+                    val hi = (wb[dataStart + 7].toInt() and 1) != 0
+                    val st = dataStart + 8
+                    val nm = if (hi && st + cch * 2 <= dataStart + recLen) String(wb, st, cch * 2, StandardCharsets.UTF_16LE)
+                    else if (!hi && st + cch <= dataStart + recLen) String(wb, st, cch, StandardCharsets.ISO_8859_1) else ""
+                    supBookNames.last().add(nm)
+                }
+                0x0017 -> if (bofDepth == 0 && recLen >= 2) {
+                    val n = bb.getShort(dataStart).toInt() and 0xFFFF
+                    for (k in 0 until n) {
+                        val q = dataStart + 2 + k * 6
+                        if (q + 6 > dataStart + recLen || xtiList.size > 4096) break
+                        xtiList.add(intArrayOf(bb.getShort(q).toInt() and 0xFFFF, bb.getShort(q + 2).toInt() and 0xFFFF, bb.getShort(q + 4).toInt() and 0xFFFF))
                     }
                 }
                 0x0085 -> {
@@ -4702,6 +4657,169 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         putCell(row, col, "", xfIdx)
                     }
                 }
+                0x00BE -> {
+                    if (recLen >= 6) {
+                        val row = bb.getShort(dataStart).toInt() and 0xFFFF
+                        val firstCol = bb.getShort(dataStart + 2).toInt() and 0xFFFF
+                        val lastCol = bb.getShort(dataStart + recLen - 2).toInt() and 0xFFFF
+                        var off = dataStart + 4
+                        var c = firstCol
+                        while (c <= lastCol && off + 2 <= dataStart + recLen - 2) {
+                            putCell(row, c, "", bb.getShort(off).toInt() and 0xFFFF)
+                            off += 2
+                            c++
+                        }
+                    }
+                }
+                0x0208 -> {
+                    if (recLen >= 16 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val row = bb.getShort(dataStart).toInt() and 0xFFFF
+                        val miyRw = bb.getShort(dataStart + 6).toInt() and 0xFFFF
+                        val grbit = bb.getShort(dataStart + 12).toInt() and 0xFFFF
+                        val ixfe = bb.getShort(dataStart + 14).toInt() and 0x0FFF
+                        if (row < MAX_BIFF_ROWS) {
+                            if ((grbit and 0x20) != 0) sheetRowHeights[targetIdx][row] = 0f
+                            else if ((miyRw and 0x8000) == 0 && (miyRw and 0x7FFF) > 0) sheetRowHeights[targetIdx][row] = (miyRw and 0x7FFF) / 20f * PX_PER_PT
+                            if ((grbit and 0x80) != 0) resolveBiffStyle(ixfe)?.let { sheetRowStyles[targetIdx][row] = it }
+                        }
+                    }
+                }
+                0x0225 -> {
+                    if (recLen >= 4 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val miyRw = bb.getShort(dataStart + 2).toInt() and 0x7FFF
+                        if (miyRw > 0) sheetDefaultRow[targetIdx] = miyRw / 20f * PX_PER_PT
+                    }
+                }
+                0x0055 -> {
+                    if (recLen >= 2 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val chars = bb.getShort(dataStart).toInt() and 0xFFFF
+                        if (chars in 1..255) sheetDefaultCol[targetIdx] = defaultExcelColumnWidthPx(chars.toFloat())
+                    }
+                }
+                0x01B0 -> {
+                    if (recLen >= 14 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val cref = bb.getShort(dataStart + 12).toInt() and 0xFFFF
+                        val ranges = ArrayList<IntArray>()
+                        var q = dataStart + 14
+                        for (k in 0 until cref.coerceAtMost(512)) {
+                            if (q + 8 > dataStart + recLen) break
+                            ranges.add(intArrayOf(bb.getShort(q).toInt() and 0xFFFF, bb.getShort(q + 2).toInt() and 0xFFFF, bb.getShort(q + 4).toInt() and 0xFFFF, bb.getShort(q + 6).toInt() and 0xFFFF))
+                            q += 8
+                        }
+                        cfTop = bb.getShort(dataStart + 4).toInt() and 0xFFFF
+                        cfLeft = bb.getShort(dataStart + 8).toInt() and 0xFFFF
+                        if (ranges.isNotEmpty() && sheetCf[targetIdx].size < 1024) {
+                            sheetCfIds[targetIdx][(bb.getShort(dataStart + 2).toInt() and 0xFFFF) ushr 1] = sheetCf[targetIdx].size
+                            sheetCf[targetIdx].add(ranges to ArrayList())
+                        }
+                    }
+                }
+                0x01B1 -> {
+                    if (recLen >= 12 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val block = sheetCf[targetIdx].lastOrNull()
+                        if (block != null && block.second.size < 64) {
+                            val ct = wb[dataStart].toInt() and 0xFF
+                            val cp = wb[dataStart + 1].toInt() and 0xFF
+                            val cce1 = bb.getShort(dataStart + 2).toInt() and 0xFFFF
+                            val cce2 = bb.getShort(dataStart + 4).toInt() and 0xFFFF
+                            val dx = BiffCf.dxfn(wb, dataStart + 6, dataStart + recLen, ::color, formatMap)
+                            if (dx != null) {
+                                val f1Start = dx.second
+                                val f1 = BiffCf.formula(wb, f1Start, f1Start + cce1, cfTop, cfLeft, ::externName)
+                                val f2 = if (cce2 > 0) BiffCf.formula(wb, f1Start + cce1, f1Start + cce1 + cce2, cfTop, cfLeft, ::externName) else null
+                                val prio = block.second.size + sheetCf[targetIdx].sumOf { it.second.size }
+                                if (f1 != null && (cce2 == 0 || f2 != null)) {
+                                    val rule = if (ct == 2) CfRule("expression", prio, formulas = listOf(f1), style = dx.first)
+                                    else CfRule(
+                                        "cellIs", prio,
+                                        operator = when (cp) {
+                                            1 -> "between"; 2 -> "notBetween"; 3 -> "equal"; 4 -> "notEqual"
+                                            5 -> "greaterThan"; 6 -> "lessThan"; 7 -> "greaterThanOrEqual"; else -> "lessThanOrEqual"
+                                        },
+                                        formulas = listOfNotNull(f1, f2), style = dx.first
+                                    )
+                                    block.second.add(rule)
+                                }
+                            }
+                        }
+                    }
+                }
+                0x0879 -> {
+                    if (recLen >= 26 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val base = dataStart + 12
+                        val cref = bb.getShort(base + 12).toInt() and 0xFFFF
+                        val ranges = ArrayList<IntArray>()
+                        var q = base + 14
+                        for (k in 0 until cref.coerceAtMost(512)) {
+                            if (q + 8 > dataStart + recLen) break
+                            ranges.add(intArrayOf(bb.getShort(q).toInt() and 0xFFFF, bb.getShort(q + 2).toInt() and 0xFFFF, bb.getShort(q + 4).toInt() and 0xFFFF, bb.getShort(q + 6).toInt() and 0xFFFF))
+                            q += 8
+                        }
+                        cfTop = bb.getShort(base + 4).toInt() and 0xFFFF
+                        cfLeft = bb.getShort(base + 8).toInt() and 0xFFFF
+                        if (ranges.isNotEmpty() && sheetCf[targetIdx].size < 1024) {
+                            sheetCfIds[targetIdx][(bb.getShort(base + 2).toInt() and 0xFFFF) ushr 1] = sheetCf[targetIdx].size
+                            sheetCf[targetIdx].add(ranges to ArrayList())
+                        }
+                    }
+                }
+                0x087A -> {
+                    if (recLen >= 24 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val block = sheetCf[targetIdx].lastOrNull()
+                        if (block != null && block.second.size < 64) {
+                            BiffCf.cf12(wb, dataStart + 12, dataStart + recLen, cfTop, cfLeft, ::color, ::fullColor, formatMap, ::externName)?.let { block.second.add(it) }
+                        }
+                    }
+                }
+                0x087B -> {
+                    if (recLen >= 26 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val isCf12 = bb.getInt(dataStart + 12) != 0
+                        val nId = bb.getShort(dataStart + 16).toInt() and 0xFFFF
+                        val blockIdx = sheetCfIds[targetIdx][nId]
+                        if (!isCf12 && blockIdx != null) {
+                            val rules = sheetCf[targetIdx][blockIdx].second
+                            val icf = bb.getShort(dataStart + 18).toInt() and 0xFFFF
+                            val prio = bb.getShort(dataStart + 22).toInt() and 0xFFFF
+                            val flags = wb[dataStart + 24].toInt() and 0xFF
+                            val hasDxf = recLen >= 30 && wb[dataStart + 25].toInt() != 0
+                            rules.getOrNull(icf)?.let { r ->
+                                var style = r.style
+                                if (hasDxf) {
+                                    val cb = bb.getInt(dataStart + 26)
+                                    val dxEnd = (dataStart + 30 + cb).coerceAtMost(dataStart + recLen)
+                                    BiffCf.dxfn(wb, dataStart + 30, dxEnd, ::color, formatMap)?.let { (st, after) ->
+                                        style = BiffCf.withExt(st, BiffCf.extProps(wb, after, dxEnd), ::fullColor)
+                                    }
+                                }
+                                rules[icf] = r.copy(priority = prio, stopIfTrue = (flags and 0x0002) != 0, style = style)
+                            }
+                        }
+                    }
+                }
+                0x023E -> {
+                    if (recLen >= 2 && bofDepth == 1 && chartStart < 0) {
+                        val targetIdx = currentSheetIdx.coerceIn(0, 64)
+                        ensureSheetLists(targetIdx)
+                        val grbit = bb.getShort(dataStart).toInt() and 0xFFFF
+                        sheetGridLines[targetIdx] = (grbit and 0x0002) != 0
+                    }
+                }
                 0x00FD -> {
                     if (recLen >= 10) {
                         val row = bb.getShort(dataStart).toInt() and 0xFFFF
@@ -4709,7 +4827,9 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val xfIdx = bb.getShort(dataStart + 4).toInt() and 0xFFFF
                         val sstIdx = bb.getInt(dataStart + 6)
                         if (sstIdx in sst.indices) {
-                            putCell(row, col, sst[sstIdx], xfIdx)
+                            putTextCell(row, col, sst[sstIdx], xfIdx)
+                        } else {
+                            putCell(row, col, "", xfIdx)
                         }
                     }
                 }
@@ -4719,7 +4839,7 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val col = bb.getShort(dataStart + 2).toInt() and 0xFFFF
                         val xfIdx = bb.getShort(dataStart + 4).toInt() and 0xFFFF
                         val str = readBiff8UnicodeString(wb, dataStart + 6, dataStart + recLen)
-                        putCell(row, col, str, xfIdx)
+                        putTextCell(row, col, str, xfIdx)
                     }
                 }
                 0x0203 -> {
@@ -4728,7 +4848,7 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val col = bb.getShort(dataStart + 2).toInt() and 0xFFFF
                         val xfIdx = bb.getShort(dataStart + 4).toInt() and 0xFFFF
                         val d = Double.fromBits(bb.getLong(dataStart + 6))
-                        putCell(row, col, formatNumericCell(d, xfIdx), xfIdx)
+                        putNumericCell(row, col, d, xfIdx)
                     }
                 }
                 0x027E -> {
@@ -4737,7 +4857,7 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val col = bb.getShort(dataStart + 2).toInt() and 0xFFFF
                         val xfIdx = bb.getShort(dataStart + 4).toInt() and 0xFFFF
                         val rkVal = decodeRkValue(bb.getInt(dataStart + 6))
-                        putCell(row, col, formatNumericCell(rkVal, xfIdx), xfIdx)
+                        putNumericCell(row, col, rkVal, xfIdx)
                     }
                 }
                 0x00BD -> {
@@ -4750,7 +4870,7 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         while (c <= lastCol && offset + 6 <= dataStart + recLen - 2) {
                             val xfIdx = bb.getShort(offset).toInt() and 0xFFFF
                             val rkVal = decodeRkValue(bb.getInt(offset + 2))
-                            putCell(row, c, formatNumericCell(rkVal, xfIdx), xfIdx)
+                            putNumericCell(row, c, rkVal, xfIdx)
                             offset += 6
                             c++
                         }
@@ -4763,7 +4883,7 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         val xfIdx = bb.getShort(dataStart + 4).toInt() and 0xFFFF
                         val valByte = wb[dataStart + 6].toInt() and 0xFF
                         val isError = (wb[dataStart + 7].toInt() and 0xFF) == 1
-                        putCell(row, col, if (isError) "#ERR($valByte)" else if (valByte != 0) "TRUE" else "FALSE", xfIdx)
+                        putCell(row, col, if (isError) errorText(valByte) else if (valByte != 0) "TRUE" else "FALSE", xfIdx, if (isError) SheetCellFlags.ERROR else SheetCellFlags.BOOL)
                     }
                 }
                 0x0006 -> {
@@ -4779,18 +4899,24 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
                         if (expr6 == 0xFF && expr7 == 0xFF) {
                             val kind = wb[dataStart + 6].toInt() and 0xFF
                             if (kind == 1 && dataStart + 8 < wb.size) {
-                                putCell(row, col, if (wb[dataStart + 8].toInt() != 0) "TRUE" else "FALSE", xfIdx)
+                                putCell(row, col, if (wb[dataStart + 8].toInt() != 0) "TRUE" else "FALSE", xfIdx, SheetCellFlags.BOOL)
+                            } else if (kind == 2 && dataStart + 8 < wb.size) {
+                                putCell(row, col, errorText(wb[dataStart + 8].toInt() and 0xFF), xfIdx, SheetCellFlags.ERROR)
+                            } else if (kind == 3) {
+                                putCell(row, col, "", xfIdx)
                             }
                         } else {
                             val d = Double.fromBits(bb.getLong(dataStart + 6))
-                            if (d.isFinite()) putCell(row, col, formatNumericCell(d, xfIdx), xfIdx)
+                            if (d.isFinite()) {
+                                putNumericCell(row, col, d, xfIdx)
+                            }
                         }
                     }
                 }
                 0x0207 -> {
                     if (lastFormulaRow >= 0 && lastFormulaCol >= 0 && recLen >= 3) {
                         val formulaStr = readBiff8UnicodeString(wb, dataStart, dataStart + recLen)
-                        putCell(lastFormulaRow, lastFormulaCol, formulaStr, lastFormulaXf)
+                        putTextCell(lastFormulaRow, lastFormulaCol, formulaStr, lastFormulaXf)
                         lastFormulaRow = -1
                         lastFormulaCol = -1
                         lastFormulaXf = -1
@@ -4829,17 +4955,47 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
             val mr = sheetMaxRows.getOrElse(i) { -1 }
             val mc = sheetMaxCols.getOrElse(i) { -1 }
             val merges = sheetMergedRegions.getOrElse(i) { emptyList() }
-            val colWidthsMap = sheetColWidths.getOrNull(i)
-            val colWidthsArr = if (mc >= 0 && !colWidthsMap.isNullOrEmpty()) {
-                FloatArray((mc + 1).coerceAtMost(MAX_BIFF_COLS)) { c ->
-                    colWidthsMap[c] ?: SpreadsheetCoordinateUtils.BASE_CELL_WIDTH
-                }
+            val baseFont = fonts.firstOrNull()
+            val baseSizePt = (baseFont?.heightTwips ?: 200) / 20f
+            val defRow = sheetDefaultRow.getOrNull(i)?.takeIf { it > 0f } ?: (Math.round(baseSizePt * 1.275f * 4f) / 4f * PX_PER_PT)
+            val defCol = sheetDefaultCol.getOrNull(i)?.takeIf { it > 0f } ?: defaultExcelColumnWidthPx()
+            val colWidthsMap = sheetColWidths.getOrNull(i).orEmpty()
+            val colWidthsArr = if (mc >= 0) {
+                FloatArray((mc + 1).coerceAtMost(MAX_BIFF_COLS)) { c -> colWidthsMap[c] ?: defCol }
             } else null
-            if (mr >= 0 || mc >= 0 || count == 1 || i < sheetNames.size) {
-                sheets.add(SheetGrid(name, map, styles, colWidthsArr, mr, mc, merges))
+            val charts = sheetCharts.getOrNull(i).orEmpty()
+            val isChartSheet = i in chartSheetFlags
+            if (mr >= 0 || mc >= 0 || count == 1 || i < sheetNames.size || charts.isNotEmpty()) {
+                grids.add(
+                    SheetGrid(
+                        name, map, styles, colWidthsArr, mr, mc, merges, charts, isChartSheet, i,
+                        rowHeightsPx = sheetRowHeights.getOrNull(i).orEmpty(),
+                        flags = sheetFlags.getOrNull(i).orEmpty(),
+                        formatColors = sheetFmtColors.getOrNull(i).orEmpty(),
+                        fills = sheetFills.getOrNull(i).orEmpty(),
+                        rowStyles = sheetRowStyles.getOrNull(i).orEmpty(),
+                        colStyles = sheetColStyles.getOrNull(i).orEmpty(),
+                        showGridLines = sheetGridLines.getOrElse(i) { true },
+                        defaultRowHeightPx = defRow,
+                        defaultColWidthPx = defCol,
+                        defaultFontName = baseFont?.name,
+                        defaultFontSize = baseSizePt,
+                        conditional = sheetCf.getOrNull(i).orEmpty().map { CfBlock(it.first, it.second) }.filter { it.rules.isNotEmpty() }
+                    )
+                )
             }
         }
-        if (sheets.isEmpty()) {
+        rawNumbers.clear()
+        rawTexts.clear()
+        for (i in 0 until count) {
+            rawNumbers.add(sheetNumbers.getOrElse(i) { HashMap() })
+            rawTexts.add(sheetMaps.getOrElse(i) { HashMap() })
+        }
+        chartXti = xtiList
+        chartPalette = HashMap(paletteMap)
+        chartTheme = BiffChartParser.theme(themeVersion, themeBuf.toByteArray())
+        chartFontSizes = fonts.map { it.heightTwips / 20f }
+        if (grids.isEmpty()) {
             lastErrorMsg = "No data sheets found in XLS file."
         }
     }
@@ -4974,326 +5130,31 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
     }
 
     override val pageCount: Int = 1
-    override fun getLastError(): String? = lastErrorMsg
+    override fun chartSheetSize(sheet: SheetModel): Pair<Float, Float> = 1600f to 1100f
 
-    @Synchronized
-    override fun getSheetNames(): List<String> = sheets.map { it.name }
-
-    @Synchronized
-    override fun getActiveSheetIndex(): Int = activeSheetIdx
-
-    @Synchronized
-    override fun setActiveSheetIndex(index: Int) {
-        if (index in sheets.indices) activeSheetIdx = index
+    override fun renderChartSheet(sheet: SheetModel, canvas: Canvas, tileX: Int, tileY: Int, zoom: Float, bitmap: Bitmap) {
+        val extra = sheet.extra as? XlsSheetExtra ?: return
+        val ref = extra.charts.firstOrNull() ?: return
+        val model = chartModel(ref, extra.sourceIndex) ?: return
+        canvas.save()
+        canvas.translate(-tileX.toFloat(), -tileY.toFloat())
+        CleanRoomCharts.draw(canvas, model, RectF(0f, 0f, 1600f * zoom, 1100f * zoom), zoom * 2.2f)
+        canvas.restore()
     }
 
-    @Synchronized
-    override fun getColumnWidths(): FloatArray {
-        val sheet = sheets.getOrNull(activeSheetIdx) ?: return FloatArray(0)
-        val widths = sheet.colWidthsPx ?: return FloatArray(0)
-        val colCount = (sheet.maxCol + 1).coerceAtLeast(widths.size)
-        return if (widths.size == colCount) {
-            widths.clone()
-        } else {
-            FloatArray(colCount) { c ->
-                if (c < widths.size && widths[c] > 0f) widths[c] else SpreadsheetCoordinateUtils.BASE_CELL_WIDTH
-            }
+    override fun drawSheetOverlays(sheet: SheetModel, canvas: Canvas, g: SheetGridGeometry) {
+        val extra = sheet.extra as? XlsSheetExtra ?: return
+        if (extra.charts.isEmpty()) return
+        fun xAt(col: Int, dx: Int): Float = g.screenX(g.colLeft(col) + g.colWidth(col) * (dx.coerceIn(0, 1024) / 1024f))
+        fun yAt(row: Int, dy: Int): Float = g.screenY(g.rowTop(row) + g.rowHeight(row) * (dy.coerceIn(0, 256) / 256f))
+        for (ref in extra.charts) {
+            val a = ref.anchor ?: continue
+            val rect = RectF(xAt(a.colL, a.dxL), yAt(a.rwT, a.dyT), xAt(a.colR, a.dxR), yAt(a.rwB, a.dyB))
+            if (rect.right < g.headerWidth || rect.bottom < g.headerHeight || rect.left > g.viewWidth || rect.top > g.viewHeight) continue
+            if (rect.width() < 4f || rect.height() < 4f) continue
+            val model = chartModel(ref, extra.sourceIndex) ?: continue
+            CleanRoomCharts.draw(canvas, model, rect, SpreadsheetCoordinateUtils.BASE_CELL_HEIGHT * g.zoom / 15f)
         }
-    }
-
-    @Synchronized
-    override fun getCellText(row: Int, col: Int): String {
-        val sheet = sheets.getOrNull(activeSheetIdx) ?: return ""
-        return sheet.cells[packCellCoord(row, col)] ?: ""
-    }
-
-    @Synchronized
-    override fun getSelectedRangeText(startRow: Int, startCol: Int, endRow: Int, endCol: Int): String {
-        val sheet = sheets.getOrNull(activeSheetIdx) ?: return ""
-        if (sheet.maxRow < 0 || sheet.maxCol < 0) return ""
-        val rMin = minOf(startRow, endRow).coerceAtLeast(0)
-        val rMax = minOf(maxOf(startRow, endRow), sheet.maxRow)
-        val cMin = minOf(startCol, endCol).coerceAtLeast(0)
-        val cMax = minOf(maxOf(startCol, endCol), sheet.maxCol)
-        if (rMin > rMax || cMin > cMax) return ""
-
-        val sb = StringBuilder()
-        for (r in rMin..rMax) {
-            for (c in cMin..cMax) {
-                sb.append(sheet.cells[packCellCoord(r, c)] ?: "")
-                if (c < cMax) sb.append('\t')
-            }
-            if (r < rMax) sb.append('\n')
-        }
-        return sb.toString()
-    }
-
-    @Synchronized
-    override fun getPageText(pageIndex: Int): String {
-        val cleanIdx = pageIndex and PAGE_INDEX_MASK
-        val targetIdx = if (cleanIdx in sheets.indices) cleanIdx else activeSheetIdx
-        val sheet = sheets.getOrNull(targetIdx) ?: return ""
-        if (sheet.maxRow < 0 || sheet.maxCol < 0) return ""
-        val maxScanRow = minOf(sheet.maxRow, 10_000)
-        val maxScanCol = minOf(sheet.maxCol, 256)
-        val sb = StringBuilder()
-        for (r in 0..maxScanRow) {
-            for (c in 0..maxScanCol) {
-                if (c > 0) sb.append('\t')
-                sb.append(sheet.cells[packCellCoord(r, c)] ?: "")
-            }
-            if (r < maxScanRow) sb.append('\n')
-        }
-        return sb.toString()
-    }
-
-    @Synchronized
-    override fun search(query: String, startPage: Int): Long {
-        if (query.isBlank() || isClosed) return -1L
-        for (i in startPage.coerceAtLeast(0) until sheets.size) {
-            if (sheets[i].cells.values.any { it.contains(query, ignoreCase = true) }) {
-                return i.toLong()
-            }
-        }
-        return -1L
-    }
-
-    @Synchronized
-    override fun getDocumentWidth(): Float {
-        val sheet = sheets.getOrNull(activeSheetIdx) ?: return 0f
-        if (sheet.maxCol < 0) return 0f
-        val colCount = sheet.maxCol + 1
-        val widths = sheet.colWidthsPx
-        val contentW = if (widths != null && widths.isNotEmpty()) {
-            var sum = 0f
-            for (c in 0 until colCount) {
-                val w = if (c < widths.size && widths[c] > 0f) widths[c] else SpreadsheetCoordinateUtils.BASE_CELL_WIDTH
-                sum += w.coerceIn(60f, 680f)
-            }
-            sum
-        } else {
-            colCount * SpreadsheetCoordinateUtils.BASE_CELL_WIDTH
-        }
-        return SpreadsheetCoordinateUtils.BASE_HEADER_WIDTH + contentW
-    }
-
-    @Synchronized
-    override fun getDocumentHeight(): Float {
-        val sheet = sheets.getOrNull(activeSheetIdx) ?: return 0f
-        if (sheet.maxRow < 0) return 0f
-        return SpreadsheetCoordinateUtils.BASE_HEADER_HEIGHT + (sheet.maxRow + 1) * SpreadsheetCoordinateUtils.BASE_CELL_HEIGHT
-    }
-
-    @Synchronized
-    override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
-        if (isClosed) return
-        val isLightTheme = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0
-
-        val canvas = Canvas(bitmap)
-        canvas.drawColor(if (isLightTheme) LIGHT_SHEET_BG_COLOR else DARK_SHEET_BG_COLOR)
-        val sheet = sheets.getOrNull(activeSheetIdx) ?: return
-        if (sheet.maxRow < 0 || sheet.maxCol < 0) return
-
-        val zoom = (zoomPermille / 1000f).coerceIn(0.5f, 4f)
-        val headerHeight = SpreadsheetCoordinateUtils.BASE_HEADER_HEIGHT * zoom
-        val headerWidth = SpreadsheetCoordinateUtils.BASE_HEADER_WIDTH * zoom
-        val dataColCount = sheet.maxCol + 1
-        val dataRowCount = sheet.maxRow + 1
-        val cellHeight = SpreadsheetCoordinateUtils.BASE_CELL_HEIGHT * zoom
-
-        val colOffsets = SpreadsheetCoordinateUtils.computeScaledColumnOffsets(
-            colCount = dataColCount,
-            customColWidthsPx = sheet.colWidthsPx,
-            viewportWidth = bitmap.width.toFloat(),
-            zoom = zoom
-        )
-
-        val totalTableW = headerWidth + colOffsets[dataColCount]
-        val totalTableH = headerHeight + dataRowCount * cellHeight
-        val maxEffX = (totalTableW - bitmap.width.toFloat()).coerceAtLeast(0f)
-        val maxEffY = (totalTableH - bitmap.height.toFloat()).coerceAtLeast(0f)
-        val effX = tileX.toFloat().coerceIn(0f, maxEffX)
-        val effY = tileY.toFloat().coerceIn(0f, maxEffY)
-
-        val defaultCellBgColor = if (isLightTheme) LIGHT_SHEET_CELL_BG_COLOR else DARK_SHEET_CELL_BG_COLOR
-        val defaultTextColor = if (isLightTheme) LIGHT_SHEET_TEXT_COLOR else DARK_SHEET_TEXT_COLOR
-
-        val paintCellBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = defaultCellBgColor
-            style = Paint.Style.FILL
-        }
-        val paintCustomFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            style = Paint.Style.FILL
-        }
-        val paintText = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = defaultTextColor
-            textSize = 26f * zoom
-        }
-        val paintHeader = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (isLightTheme) LIGHT_SHEET_HEADER_TEXT_COLOR else DARK_SHEET_HEADER_TEXT_COLOR
-            textSize = 26f * zoom
-            isFakeBoldText = true
-        }
-        val paintHeaderBg = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (isLightTheme) LIGHT_SHEET_HEADER_BG_COLOR else DARK_SHEET_HEADER_BG_COLOR
-            style = Paint.Style.FILL
-        }
-        val paintGrid = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (isLightTheme) LIGHT_SHEET_GRID_COLOR else DARK_SHEET_GRID_COLOR
-            strokeWidth = 2f
-        }
-
-        val maxColIdx = sheet.maxCol
-        val maxRowIdx = sheet.maxRow
-        val startCol = SpreadsheetCoordinateUtils.findColumnAtContentX(colOffsets, effX)
-        val endCol = SpreadsheetCoordinateUtils.findColumnAtContentX(colOffsets, effX + bitmap.width).coerceIn(startCol, maxColIdx)
-        val startRow = (effY / cellHeight).toInt().coerceAtLeast(0)
-        val endRow = (startRow + (bitmap.height / cellHeight).toInt() + 2).coerceAtMost(maxRowIdx)
-        val subY = effY % cellHeight
-
-        if (startRow > endRow || startCol > endCol) return
-
-        val tableRightX = (headerWidth + colOffsets[endCol + 1] - effX).coerceIn(headerWidth, bitmap.width.toFloat())
-        val tableBottomY = (headerHeight + (endRow - startRow + 1) * cellHeight - subY).coerceIn(headerHeight, bitmap.height.toFloat())
-
-        canvas.drawRect(headerWidth, headerHeight, tableRightX, tableBottomY, paintCellBg)
-
-        fun findMergeForCell(r: Int, c: Int): MergedCellRegion? {
-            return sheet.mergedRegions.firstOrNull { r in it.firstRow..it.lastRow && c in it.firstCol..it.lastCol }
-        }
-
-        for (r in startRow..endRow) {
-            val rowY = headerHeight + (r - startRow) * cellHeight - subY
-            if (rowY + cellHeight >= headerHeight && rowY <= bitmap.height) {
-                for (c in startCol..endCol) {
-                    val colX = headerWidth + colOffsets[c] - effX
-                    val colW = colOffsets[c + 1] - colOffsets[c]
-                    if (colX + colW >= headerWidth && colX <= bitmap.width) {
-                        val activeMerge = findMergeForCell(r, c)
-                        if (activeMerge == null) {
-                            val key = packCellCoord(r, c)
-                            val cellStyle = sheet.cellStyles[key]
-                            if (cellStyle?.fillColor != null) {
-                                paintCustomFill.color = cellStyle.fillColor
-                                canvas.drawRect(
-                                    maxOf(headerWidth, colX),
-                                    maxOf(headerHeight, rowY),
-                                    colX + colW,
-                                    rowY + cellHeight,
-                                    paintCustomFill
-                                )
-                            }
-                            val txt = sheet.cells[key] ?: ""
-                            if (txt.isNotEmpty()) {
-                                paintText.color = cellStyle?.textColor ?: defaultTextColor
-                                paintText.isFakeBoldText = cellStyle?.isBold == true
-                                paintText.textSkewX = if (cellStyle?.isItalic == true) -0.2f else 0f
-                                val clipped = TextUtils.ellipsize(
-                                    txt,
-                                    paintText,
-                                    (colW - 16f * zoom).coerceAtLeast(10f),
-                                    TextUtils.TruncateAt.END
-                                ).toString()
-                                canvas.save()
-                                canvas.clipRect(
-                                    maxOf(headerWidth, colX + 2f),
-                                    maxOf(headerHeight, rowY + 2f),
-                                    colX + colW - 2f,
-                                    rowY + cellHeight - 2f
-                                )
-                                canvas.drawText(clipped, colX + 10f * zoom, rowY + 33f * zoom, paintText)
-                                canvas.restore()
-                            }
-                        }
-
-                        val suppressRightLine = activeMerge != null && c < activeMerge.lastCol
-                        if (!suppressRightLine) {
-                            canvas.drawLine(colX + colW, maxOf(headerHeight, rowY), colX + colW, rowY + cellHeight, paintGrid)
-                        }
-                        val suppressBottomLine = activeMerge != null && r < activeMerge.lastRow
-                        if (!suppressBottomLine) {
-                            canvas.drawLine(maxOf(headerWidth, colX), rowY + cellHeight, colX + colW, rowY + cellHeight, paintGrid)
-                        }
-                    }
-                }
-            }
-        }
-
-        for (merge in sheet.mergedRegions) {
-            if (merge.lastRow < startRow || merge.firstRow > endRow ||
-                merge.lastCol < startCol || merge.firstCol > endCol
-            ) continue
-            val c0 = merge.firstCol.coerceIn(0, maxColIdx)
-            val c1 = merge.lastCol.coerceIn(c0, maxColIdx)
-            val mLeft = headerWidth + colOffsets[c0] - effX
-            val mRight = headerWidth + colOffsets[c1 + 1] - effX
-            val mTop = headerHeight + (merge.firstRow - startRow) * cellHeight - subY
-            val mBot = headerHeight + (merge.lastRow - startRow + 1) * cellHeight - subY
-
-            val key = packCellCoord(merge.firstRow, merge.firstCol)
-            val style = sheet.cellStyles[key]
-            paintCustomFill.color = style?.fillColor ?: defaultCellBgColor
-            canvas.save()
-            canvas.clipRect(headerWidth, headerHeight, bitmap.width.toFloat(), bitmap.height.toFloat())
-            canvas.drawRect(mLeft + 1f, mTop + 1f, mRight - 1f, mBot - 1f, paintCustomFill)
-            canvas.drawRect(mLeft, mTop, mRight, mBot, paintGrid)
-
-            val txt = sheet.cells[key] ?: ""
-            if (txt.isNotEmpty()) {
-                paintText.color = style?.textColor ?: defaultTextColor
-                paintText.isFakeBoldText = style?.isBold == true
-                paintText.textSkewX = if (style?.isItalic == true) -0.2f else 0f
-                val availW = (mRight - mLeft - 16f * zoom).toInt().coerceAtLeast(20)
-                val layout = StaticLayout.Builder.obtain(txt, 0, txt.length, paintText, availW)
-                    .setAlignment(Layout.Alignment.ALIGN_NORMAL)
-                    .setIncludePad(false)
-                    .build()
-                canvas.clipRect(mLeft + 2f, mTop + 2f, mRight - 2f, mBot - 2f)
-                val textY = mTop + ((mBot - mTop - layout.height) / 2f).coerceAtLeast(6f * zoom)
-                canvas.translate(mLeft + 8f * zoom, textY)
-                layout.draw(canvas)
-            }
-            canvas.restore()
-        }
-
-        paintText.isFakeBoldText = false
-        paintText.textSkewX = 0f
-
-        canvas.drawRect(0f, 0f, tableRightX, headerHeight, paintHeaderBg)
-        for (c in startCol..endCol) {
-            val colX = headerWidth + colOffsets[c] - effX
-            val colW = colOffsets[c + 1] - colOffsets[c]
-            if (colX + colW >= headerWidth && colX <= bitmap.width) {
-                val colLabel = buildColumnLabel(c)
-                canvas.drawText(colLabel, colX + 14f * zoom, 36f * zoom, paintHeader)
-                canvas.drawLine(colX + colW, 0f, colX + colW, headerHeight, paintGrid)
-            }
-        }
-        canvas.drawLine(0f, headerHeight, tableRightX, headerHeight, paintGrid)
-
-        for (r in startRow..endRow) {
-            val rowY = headerHeight + (r - startRow) * cellHeight - subY
-            if (rowY + cellHeight >= headerHeight && rowY <= bitmap.height) {
-                val clampedTop = maxOf(headerHeight, rowY)
-                canvas.drawRect(0f, clampedTop, headerWidth, rowY + cellHeight, paintHeaderBg)
-                canvas.drawText("${r + 1}", 14f * zoom, rowY + 33f * zoom, paintHeader)
-                canvas.drawLine(0f, rowY + cellHeight, headerWidth, rowY + cellHeight, paintGrid)
-                canvas.drawLine(headerWidth, clampedTop, headerWidth, rowY + cellHeight, paintGrid)
-            }
-        }
-        canvas.drawRect(0f, 0f, headerWidth, headerHeight, paintHeaderBg)
-        canvas.drawLine(headerWidth, 0f, headerWidth, tableBottomY, paintGrid)
-        canvas.drawLine(0f, headerHeight, headerWidth, headerHeight, paintGrid)
-    }
-
-    private fun buildColumnLabel(colIndex: Int): String {
-        var n = colIndex
-        val sb = StringBuilder()
-        while (n >= 0) {
-            sb.insert(0, ('A'.code + (n % 26)).toChar())
-            n = n / 26 - 1
-        }
-        return sb.toString()
     }
 
     @Synchronized
@@ -5304,7 +5165,10 @@ class CleanRoomBiff8XlsSession(private val pfd: ParcelFileDescriptor) : Document
     }
 }
 
-class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSession {
+class CleanRoomPptSession(
+    private val pfd: ParcelFileDescriptor,
+    private val password: String? = null
+) : DocumentSession {
     @Volatile private var isClosed = false
     @Volatile private var lastErrorMsg: String? = null
     override val isPresentationContent: Boolean = true
@@ -5317,30 +5181,20 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
 
     private val slides = mutableListOf<PptSlideData>()
     private val pictures = mutableListOf<Bitmap>()
+    private var presentation: PptPresentation? = null
+    private var renderer: PptSlideRenderer? = null
+    private var picturesStream: ByteArray? = null
+    private val blipCache = object : android.util.LruCache<Int, PptImage>(48 * 1024 * 1024) {
+        override fun sizeOf(key: Int, value: PptImage): Int = value.byteSize.coerceAtLeast(1)
+    }
+    private val failedBlips = HashSet<Int>()
     @Volatile private var lastCanvasWidth = 1920f
     @Volatile private var lastCanvasHeight = 1080f
-
-    companion object {
-        private const val MAX_PPT_RECORD_DEPTH = 32
-        private val MASTER_BOILERPLATE_PHRASES = listOf(
-            "click to edit master",
-            "образец заголовка",
-            "образец текста",
-            "четвертый уровень",
-            "пятый уровень"
-        )
-
-        private fun isBoilerplateMasterText(text: String): Boolean {
-            val lower = text.lowercase(Locale.ROOT).trim()
-            if (lower == "*") return true
-            return MASTER_BOILERPLATE_PHRASES.any { lower.contains(it) }
-        }
-    }
 
     init {
         try {
             val source = ZeroCacheReadableSource(pfd.fileDescriptor)
-            val size = minOf(source.size, 32 * 1024 * 1024L).toInt()
+            val size = minOf(source.size, 128 * 1024 * 1024L).toInt()
             if (size <= 0) {
                 lastErrorMsg = "PPT file is empty."
             } else {
@@ -5355,126 +5209,116 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
                     tryParseZipPresentationFallback(bytes)
                 } else {
                     val cfb = Ole2CfbContainer(bytes)
-                    if (cfb.isValid && (cfb.readStream("EncryptedPackage") != null || cfb.readStream("EncryptionInfo") != null)) {
-                        lastErrorMsg = "PASSWORD_REQUIRED: Microsoft PowerPoint presentation is encrypted."
-                    } else {
-                        cfb.readStream("Pictures")?.let { picStream ->
-                            parseOfficeArtPicturesStream(picStream)
-                        }
-                        val pptStream = if (cfb.isValid) cfb.readStream("PowerPoint Document") else null
-                        if (pptStream == null || pptStream.size < 16) {
-                            lastErrorMsg = "Missing PowerPoint Document stream in PPT container."
+                    if (cfb.isValid && CleanRoomOfficeCrypto.isOfficeIrmProtected(cfb)) {
+                        lastErrorMsg = CleanRoomOfficeCrypto.OFFICE_IRM_DRM_ERROR
+                    } else if (cfb.isValid && (cfb.readStream("EncryptedPackage") != null || cfb.readStream("EncryptionInfo") != null)) {
+                        val decZip = CleanRoomOfficeCrypto.decryptOoxmlBytes(bytes, password)
+                        if (decZip != null) {
+                            tryParseZipPresentationFallback(decZip)
                         } else {
-                            if (pictures.isEmpty()) {
-                                pictures.addAll(EmbeddedImageScanner.scanBinaryForImages(pptStream, 16))
+                            lastErrorMsg = if (password.isNullOrEmpty()) {
+                                "PASSWORD_REQUIRED: Microsoft PowerPoint presentation is encrypted."
+                            } else {
+                                "PASSWORD_REQUIRED: Incorrect password for Microsoft PowerPoint presentation."
                             }
-                            parsePptRecordTree(pptStream)
+                        }
+                    } else {
+                        val rawPptStream = if (cfb.isValid) cfb.readStream("PowerPoint Document") else null
+                        if (rawPptStream == null || rawPptStream.size < 16) {
+                            lastErrorMsg = if (cfb.isValid && cfb.listStreams().any { it.name.startsWith("PP40") || it.name == "PP97_DUALSTORAGE" }) {
+                                "PowerPoint 95 and earlier presentations are not supported."
+                            } else {
+                                "Missing PowerPoint Document stream in PPT container."
+                            }
+                        } else {
+                            var pptStream = rawPptStream
+                            var currentUser = cfb.readStream("Current User")
+                            picturesStream = cfb.readStream("Pictures")
+                            if (CleanRoomOfficeCrypto.isEncryptedPpt(pptStream, currentUser)) {
+                                if (password.isNullOrEmpty()) {
+                                    throw PptEncryptedException()
+                                }
+                                val dec = CleanRoomOfficeCrypto.decryptPpt(pptStream, currentUser, picturesStream, password)
+                                    ?: throw SecurityException("PASSWORD_REQUIRED: Incorrect password for Microsoft PowerPoint presentation (.ppt).")
+                                pptStream = dec.powerPointDocument
+                                currentUser = dec.currentUser
+                                picturesStream = dec.picturesStream
+                            }
+                            val legacyText = cfb.readStream("Text_Content")
+                            if (legacyText != null && (currentUser == null || currentUser.size < 20)) {
+                                val lines = String(legacyText, CleanRoomMetafile.charsetFor(0))
+                                    .split('\r').map { it.replace('\u000B', ' ').trim() }
+                                var block = ArrayList<String>()
+                                for (line in lines) {
+                                    if (line.isEmpty() && block.isNotEmpty() && block.size >= 10) {
+                                        slides.add(PptSlideData(block, emptyList(), null))
+                                        block = ArrayList()
+                                    } else if (line.isNotEmpty()) {
+                                        block.add(line)
+                                    }
+                                }
+                                if (block.isNotEmpty()) slides.add(PptSlideData(block, emptyList(), null))
+                                throw PptFormatException("legacy")
+                            }
+                            val pres = PptPresentation.parse(pptStream, currentUser)
+                            presentation = pres
+                            renderer = PptSlideRenderer(pres) { pib -> loadBlip(pib) }
+                            if (pres.slides.isEmpty()) lastErrorMsg = "PPT presentation contains no slides."
                         }
                     }
                 }
             }
+        } catch (_: PptEncryptedException) {
+            lastErrorMsg = "PASSWORD_REQUIRED: Microsoft PowerPoint presentation (.ppt) is password protected."
+        } catch (e: PptFormatException) {
+            if (slides.isEmpty()) lastErrorMsg = "PPT presentation read error: ${e.localizedMessage}"
         } catch (sec: SecurityException) {
             lastErrorMsg = sec.message
         } catch (e: Exception) {
             lastErrorMsg = "PPT presentation read error: ${e.localizedMessage}"
         }
-        if (slides.isEmpty() && lastErrorMsg == null) {
+        if (presentation == null && slides.isEmpty() && lastErrorMsg == null) {
             lastErrorMsg = "PPT presentation contains no slides or is encrypted."
         }
     }
 
-    /**
-     * Parses MS-ODRAW OfficeArt BLIP records (`0xF01A` EMF, `0xF01B` WMF, `0xF01C` PICT,
-     * `0xF01D` JPEG, `0xF01E` PNG, `0xF01F` DIB, `0xF029` TIFF) from the PPT `Pictures` stream.
-     */
-    private fun parseOfficeArtPicturesStream(picStream: ByteArray) {
-        val bb = ByteBuffer.wrap(picStream).order(ByteOrder.LITTLE_ENDIAN)
-        var pos = 0
-        while (pos + 8 <= picStream.size && pictures.size < 24) {
-            val verAndInst = bb.getShort(pos).toInt() and 0xFFFF
-            val recInstance = verAndInst ushr 4
-            val recType = bb.getShort(pos + 2).toInt() and 0xFFFF
-            val recLen = bb.getInt(pos + 4)
-            if (recLen <= 0 || pos + 8L + recLen > picStream.size) break
-            val dataStart = pos + 8
-            val dataEnd = dataStart + recLen
-
-            when (recType) {
-                0xF01D, 0xF01E, 0xF01F, 0xF029 -> {
-                    val hasTwoUid = (recInstance xor when (recType) {
-                        0xF01D -> 0x46A
-                        0xF01E -> 0x6E0
-                        0xF01F -> 0x7A8
-                        else -> 0x6E4
-                    }) == 1
-                    val headerSkip = if (hasTwoUid) 33 else 17
-                    if (recLen > headerSkip) {
-                        EmbeddedImageScanner.decodeMetafileOrSvgBitmap(
-                            picStream,
-                            dataStart + headerSkip,
-                            recLen - headerSkip
-                        )?.let { pictures.add(it) }
-                    }
-                }
-                0xF01A, 0xF01B, 0xF01C -> {
-                    val hasTwoUid = (recInstance and 1) == 1
-                    val headerSkip = (if (hasTwoUid) 32 else 16) + 34
-                    if (recLen > headerSkip) {
-                        val compFlag = picStream[dataStart + headerSkip - 2].toInt() and 0xFF
-                        val payloadStart = dataStart + headerSkip
-                        val payloadLen = recLen - headerSkip
-                        val rawMetaBytes = if (compFlag == 0) {
-                            val inf = Inflater(false)
-                            try {
-                                inf.setInput(picStream, payloadStart, payloadLen)
-                                val bos = ByteArrayOutputStream(minOf(payloadLen * 4, 8 * 1024 * 1024))
-                                val tmp = ByteArray(16384)
-                                var total = 0
-                                while (!inf.finished() && total < 16 * 1024 * 1024) {
-                                    val r = inf.inflate(tmp)
-                                    if (r <= 0) break
-                                    bos.write(tmp, 0, r)
-                                    total += r
-                                }
-                                bos.toByteArray()
-                            } catch (_: Throwable) {
-                                null
-                            } finally {
-                                inf.end()
-                            }
-                        } else {
-                            picStream.copyOfRange(payloadStart, payloadStart + payloadLen)
-                        }
-                        if (rawMetaBytes != null && rawMetaBytes.isNotEmpty()) {
-                            EmbeddedImageScanner.decodeMetafileOrSvgBitmap(rawMetaBytes)?.let { pictures.add(it) }
-                        }
-                    }
-                }
-            }
-            pos = dataEnd
+    private fun loadBlip(pib: Int): PptImage? {
+        synchronized(blipCache) {
+            blipCache.get(pib)?.let { return it }
+            if (pib in failedBlips) return null
         }
-
-        if (pictures.isEmpty()) {
-            pictures.addAll(EmbeddedImageScanner.scanBinaryForImages(picStream, 16))
-            if (pictures.isEmpty()) {
-                EmbeddedImageScanner.decodeMetafileOrSvgBitmap(picStream)?.let { pictures.add(it) }
-            }
+        val ref = presentation?.blips?.getOrNull(pib - 1)
+        val bmp = ref?.let {
+            val data = it.embedded ?: picturesStream
+            if (data == null) null else PptBlipDecoder.decodeImage(data, if (it.embedded != null) 0 else it.offset, 2048)
         }
+        synchronized(blipCache) {
+            if (bmp != null) blipCache.put(pib, bmp) else failedBlips.add(pib)
+        }
+        return bmp
     }
 
     private fun tryParseZipPresentationFallback(zipBytes: ByteArray) {
-        val slideEntries = TreeMap<String, ByteArray>(String.CASE_INSENSITIVE_ORDER)
+        val rawSlideEntries = TreeMap<String, ByteArray>(String.CASE_INSENSITIVE_ORDER)
         val compContainerLen = zipBytes.size.coerceAtLeast(1)
         ZipInputStream(ByteArrayInputStream(zipBytes)).use { zis ->
             val buf = ByteArray(16384)
             var total = 0L
             while (total < 64L * 1024L * 1024L) {
-                val entry = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
+                val entry = try {
+                    zis.nextEntry
+                } catch (ze: java.util.zip.ZipException) {
+                    if (ze.message?.contains("encrypted", ignoreCase = true) == true) {
+                        throw SecurityException("UNSUPPORTED_ENCRYPTION: ZIP-container password encryption is not supported.")
+                    }
+                    null
+                } catch (_: Throwable) { null } ?: break
                 val norm = entry.name.replace('\\', '/').trimStart('/')
                 val lower = norm.lowercase(Locale.ROOT)
                 if (!entry.isDirectory && (
                             (lower.startsWith("ppt/slides/slide") && lower.endsWith(".xml")) ||
                                     lower == "content.xml" ||
+                                    lower == "meta-inf/manifest.xml" ||
                                     lower.startsWith("ppt/media/") ||
                                     lower.startsWith("pictures/")
                             )
@@ -5493,11 +5337,20 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
                     if ((lower.startsWith("ppt/media/") || lower.startsWith("pictures/")) && pictures.size < 24) {
                         EmbeddedImageScanner.decodeMetafileOrSvgBitmap(data)?.let { pictures.add(it) }
                     } else {
-                        slideEntries[norm] = data
+                        rawSlideEntries[norm] = data
                     }
                 }
                 try { zis.closeEntry() } catch (_: Throwable) {}
             }
+        }
+        val slideEntries: Map<String, ByteArray> = if (CleanRoomOfficeCrypto.isEncryptedOdfManifest(rawSlideEntries["META-INF/manifest.xml"])) {
+            if (password.isNullOrEmpty()) {
+                throw SecurityException("PASSWORD_REQUIRED: ODF presentation (.odp) is encrypted or password protected.")
+            }
+            CleanRoomOfficeCrypto.decryptOdfEntries(rawSlideEntries, password)
+                ?: throw SecurityException("PASSWORD_REQUIRED: Incorrect password for ODF presentation (.odp).")
+        } else {
+            rawSlideEntries
         }
 
         val orderedSlides = slideEntries.keys
@@ -5530,123 +5383,6 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
         }
     }
 
-    private fun parsePptRecordTree(stream: ByteArray) {
-        val bb = ByteBuffer.wrap(stream).order(ByteOrder.LITTLE_ENDIAN)
-        val slideContainerList = mutableListOf<PptSlideData>()
-        val listWithTextGroups = mutableListOf<List<String>>()
-
-        var currentTexts = mutableListOf<String>()
-        var currentColors = mutableListOf<Int>()
-        var currentPicIdx: Int? = null
-        var nextAutoPicIdx = 0
-
-        fun flushGroup(toSlideListWithText: Boolean) {
-            val filteredTexts = currentTexts
-                .map { it.trim() }
-                .filter { it.isNotEmpty() && !isBoilerplateMasterText(it) }
-                .distinct()
-            if (toSlideListWithText) {
-                if (filteredTexts.isNotEmpty()) listWithTextGroups.add(filteredTexts)
-            } else if (filteredTexts.isNotEmpty() || currentPicIdx != null) {
-                val assignedPic = currentPicIdx ?: if (nextAutoPicIdx < pictures.size) nextAutoPicIdx++ else null
-                slideContainerList.add(PptSlideData(filteredTexts, currentColors.toList(), assignedPic))
-            }
-            currentTexts = mutableListOf()
-            currentColors = mutableListOf()
-            currentPicIdx = null
-        }
-
-        fun walkRecords(start: Int, limit: Int, mode: Int, depth: Int) {
-            if (depth > MAX_PPT_RECORD_DEPTH || slideContainerList.size >= 2000) return
-            var pos = start
-            while (pos + 8 <= limit) {
-                val verAndInstance = bb.getShort(pos).toInt() and 0xFFFF
-                val recVer = verAndInstance and 0x000F
-                val recInstance = verAndInstance ushr 4
-                val recType = bb.getShort(pos + 2).toInt() and 0xFFFF
-                val recLen = bb.getInt(pos + 4)
-                if (recLen < 0) break
-                val dataStart = pos + 8
-                val dataEnd = (dataStart.toLong() + recLen.toLong()).coerceAtMost(limit.toLong()).toInt()
-                if (dataStart > limit || dataEnd < dataStart) break
-
-                when (recType) {
-                    0x0FF6 -> {
-                        lastErrorMsg = "PASSWORD_REQUIRED: Microsoft PowerPoint presentation (.ppt) is password protected."
-                        return
-                    }
-                    0x03F8, 0x03F0 -> {}
-                    0x03EE -> {
-                        flushGroup(mode == 2)
-                        walkRecords(dataStart, dataEnd, 1, depth + 1)
-                        flushGroup(false)
-                    }
-                    0x0FF0 -> {
-                        if (recInstance == 0) {
-                            flushGroup(mode == 2)
-                            walkRecords(dataStart, dataEnd, 2, depth + 1)
-                            flushGroup(true)
-                        }
-                    }
-                    0x03F3 -> {
-                        if (mode == 2) flushGroup(true)
-                    }
-                    0xF00B -> {
-                        val propCount = recInstance.coerceIn(0, 1024)
-                        var pPos = dataStart
-                        for (p in 0 until propCount) {
-                            if (pPos + 6 > dataEnd) break
-                            val propId = (bb.getShort(pPos).toInt() and 0xFFFF) and 0x3FFF
-                            val propVal = bb.getInt(pPos + 2)
-                            if (propId == 0x0181) {
-                                val r = propVal and 0xFF
-                                val g = (propVal ushr 8) and 0xFF
-                                val b = (propVal ushr 16) and 0xFF
-                                if (r + g + b in 15..730 && currentColors.size < 64) {
-                                    currentColors.add(Color.rgb(r, g, b))
-                                }
-                            } else if (propId == 0x0104 && propVal >= 1 && (propVal - 1) in pictures.indices) {
-                                currentPicIdx = propVal - 1
-                            }
-                            pPos += 6
-                        }
-                    }
-                    0x0FA0 -> {
-                        if (mode != 0 && dataEnd > dataStart && currentTexts.size < 512) {
-                            val txt = String(stream, dataStart, (dataEnd - dataStart) and -2, StandardCharsets.UTF_16LE)
-                                .replace('\r', '\n').replace('\u000B', '\n').trim()
-                            if (txt.isNotEmpty() && !isBoilerplateMasterText(txt)) currentTexts.add(txt)
-                        }
-                    }
-                    0x0FA8 -> {
-                        if (mode != 0 && dataEnd > dataStart && currentTexts.size < 512) {
-                            val txt = String(stream, dataStart, dataEnd - dataStart, PlainTextSession.CP1251)
-                                .replace('\r', '\n').replace('\u000B', '\n').trim()
-                            if (txt.isNotEmpty() && !isBoilerplateMasterText(txt)) currentTexts.add(txt)
-                        }
-                    }
-                    else -> {
-                        if (recVer == 0x0F && dataEnd > dataStart) {
-                            walkRecords(dataStart, dataEnd, mode, depth + 1)
-                        }
-                    }
-                }
-                pos = dataEnd
-            }
-        }
-
-        walkRecords(0, stream.size, 0, 0)
-        val totalSlides = maxOf(slideContainerList.size, listWithTextGroups.size)
-        for (i in 0 until totalSlides) {
-            val sc = slideContainerList.getOrNull(i)
-            val lwt = listWithTextGroups.getOrNull(i).orEmpty()
-            val mergedTexts = (lwt + sc?.texts.orEmpty()).distinct()
-            if (mergedTexts.isNotEmpty() || sc?.pictureIndex != null) {
-                slides.add(PptSlideData(mergedTexts, sc?.fillColors.orEmpty(), sc?.pictureIndex))
-            }
-        }
-    }
-
     private fun computeSlideCardSize(
         canvasWidth: Float = lastCanvasWidth,
         canvasHeight: Float = lastCanvasHeight
@@ -5654,7 +5390,12 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
         val margin = 2f
         val availW = (canvasWidth - margin * 2f).coerceAtLeast(100f)
         val availH = (canvasHeight - margin * 2f).coerceAtLeast(100f)
-        val aspect = 16f / 9f
+        val pres = presentation
+        val aspect = if (pres != null) {
+            (pres.slideWidth.toFloat() / pres.slideHeight.coerceAtLeast(1)).coerceIn(0.2f, 5f)
+        } else {
+            16f / 9f
+        }
         var cardH = availH
         var cardW = cardH * aspect
         if (cardW > availW) {
@@ -5664,16 +5405,29 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
         return cardW to cardH
     }
 
-    override val pageCount: Int get() = slides.size.coerceAtLeast(1)
+    override val pageCount: Int get() = (presentation?.slides?.size ?: slides.size).coerceAtLeast(1)
     override fun getLastError(): String? = lastErrorMsg
     override fun getDocumentWidth(): Float = computeSlideCardSize().first
     override fun getDocumentHeight(): Float = computeSlideCardSize().second
 
     @Synchronized
     override fun getPageText(pageIndex: Int): String {
+        val pres = presentation
+        if (pres != null) {
+            if (pageIndex == -1) return pres.slides.indices.joinToString("\n\n") { pres.slideText(it) }
+            return pres.slideText(pageIndex and PAGE_INDEX_MASK)
+        }
         if (pageIndex == -1) return slides.joinToString("\n\n") { it.texts.joinToString("\n") }
         val cleanIdx = pageIndex and PAGE_INDEX_MASK
         return slides.getOrNull(cleanIdx)?.texts?.joinToString("\n") ?: ""
+    }
+
+    override fun search(query: String, startPage: Int): Long {
+        if (query.isBlank()) return -1L
+        for (i in startPage.coerceAtLeast(0) until pageCount) {
+            if (getPageText(i).contains(query, ignoreCase = true)) return i.toLong()
+        }
+        return -1L
     }
 
     @Synchronized
@@ -5687,8 +5441,6 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
 
         val canvas = Canvas(bitmap)
         canvas.drawColor(if (isLightTheme) LIGHT_PRESENTATION_BG_COLOR else DARK_PRESENTATION_BG_COLOR)
-        val slideData = slides.getOrNull(cleanPageIndex.coerceIn(0, (slides.size - 1).coerceAtLeast(0))) ?: return
-
         val zoom = (zoomPermille / 1000f).coerceIn(0.2f, 10.0f)
         val (cardW, cardH) = computeSlideCardSize(bitmap.width.toFloat(), bitmap.height.toFloat())
         val left = (bitmap.width - cardW) / 2f
@@ -5698,76 +5450,59 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
         canvas.translate(-tileX.toFloat(), -tileY.toFloat())
         canvas.scale(zoom, zoom, bitmap.width / 2f, bitmap.height / 2f)
 
+        val pres = presentation
+        val r = renderer
+        if (pres != null && r != null) {
+            val index = cleanPageIndex.coerceIn(0, (pres.slides.size - 1).coerceAtLeast(0))
+            if (pres.slides.isNotEmpty()) {
+                try {
+                    r.draw(canvas, index, left, top, cardW / pres.slideWidth.coerceAtLeast(1))
+                } catch (e: Exception) {
+                    lastErrorMsg = "PPT slide render error: ${e.localizedMessage}"
+                }
+            }
+            val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = if (isLightTheme) Color.rgb(200, 206, 220) else Color.rgb(70, 75, 95)
+                style = Paint.Style.STROKE
+                strokeWidth = 1f
+            }
+            canvas.drawRect(RectF(left, top, left + cardW, top + cardH), borderPaint)
+            canvas.restore()
+            return
+        }
+
+        val slideData = slides.getOrNull(cleanPageIndex.coerceIn(0, (slides.size - 1).coerceAtLeast(0)))
+        if (slideData == null) {
+            canvas.restore()
+            return
+        }
         val slideRect = RectF(left, top, left + cardW, top + cardH)
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
-        canvas.drawRoundRect(slideRect, 8f, 8f, bgPaint)
-
-        val accentColor = slideData.fillColors.firstOrNull() ?: Color.rgb(35, 65, 130)
-        val headerBandPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = accentColor
-            alpha = 32
-        }
-        canvas.drawRoundRect(RectF(left, top, left + cardW, top + cardH * 0.22f), 8f, 8f, headerBandPaint)
-
-        val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = if (isLightTheme) Color.rgb(200, 206, 220) else Color.rgb(70, 75, 95)
-            style = Paint.Style.STROKE
-            strokeWidth = 2f
-        }
-        canvas.drawRoundRect(slideRect, 8f, 8f, borderPaint)
-
+        canvas.drawRoundRect(slideRect, 8f, 8f, Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE })
         val baseScaleFactor = (cardH / 680f).coerceIn(0.75f, 2.0f)
         val picBmp = slideData.pictureIndex?.let { pictures.getOrNull(it) }
         val textRightMargin = if (picBmp != null && !picBmp.isRecycled) cardW * 0.42f else 80f
         val availWidth = (cardW - textRightMargin).toInt().coerceAtLeast(100)
-        val maxAvailTextH = (cardH - 64f).coerceAtLeast(80f)
-
-        var autofit = 1.0f
-        var layouts: List<StaticLayout> = emptyList()
-        for (attempt in 0..4) {
-            val titlePaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.rgb(25, 35, 60)
-                textSize = 38f * baseScaleFactor * autofit
-                isFakeBoldText = true
-            }
-            val bodyPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
-                color = Color.DKGRAY
-                textSize = 28f * baseScaleFactor * autofit
-            }
-            val candidate = ArrayList<StaticLayout>(slideData.texts.size)
-            var totalH = 0f
-            for ((idx, block) in slideData.texts.withIndex()) {
-                val p = if (idx == 0) titlePaint else bodyPaint
-                val l = StaticLayout.Builder.obtain(block, 0, block.length, p, availWidth)
-                    .setIncludePad(false)
-                    .build()
-                candidate.add(l)
-                totalH += l.height + 18f * autofit
-            }
-            layouts = candidate
-            if (totalH <= maxAvailTextH || autofit <= 0.55f) break
-            autofit *= (maxAvailTextH / totalH).coerceIn(0.68f, 0.88f)
-        }
-
         var curY = top + 32f
         canvas.save()
         canvas.clipRect(left + 16f, top + 16f, left + cardW - 16f, top + cardH - 16f)
-        for (layout in layouts) {
+        for ((idx, block) in slideData.texts.withIndex()) {
+            val p = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = if (idx == 0) Color.rgb(25, 35, 60) else Color.DKGRAY
+                textSize = (if (idx == 0) 38f else 28f) * baseScaleFactor
+                isFakeBoldText = idx == 0
+            }
+            val l = StaticLayout.Builder.obtain(block, 0, block.length, p, availWidth).setIncludePad(false).build()
             canvas.save()
             canvas.translate(left + 40f, curY)
-            layout.draw(canvas)
+            l.draw(canvas)
             canvas.restore()
-            curY += layout.height + 18f * autofit
+            curY += l.height + 18f
         }
-
         if (picBmp != null && !picBmp.isRecycled) {
-            val boxW = cardW * 0.36f
-            val boxH = cardH * 0.62f
             val boxLeft = left + cardW * 0.60f
             val boxTop = top + cardH * 0.26f
-            canvas.drawBitmap(picBmp, null, RectF(boxLeft, boxTop, boxLeft + boxW, boxTop + boxH), Paint(Paint.FILTER_BITMAP_FLAG))
+            canvas.drawBitmap(picBmp, null, RectF(boxLeft, boxTop, boxLeft + cardW * 0.36f, boxTop + cardH * 0.62f), Paint(Paint.FILTER_BITMAP_FLAG))
         }
-
         canvas.restore()
         canvas.restore()
     }
@@ -5778,6 +5513,8 @@ class CleanRoomPptSession(private val pfd: ParcelFileDescriptor) : DocumentSessi
         isClosed = true
         pictures.forEach { if (!it.isRecycled) it.recycle() }
         pictures.clear()
+        synchronized(blipCache) { blipCache.evictAll() }
+        picturesStream = null
         try { pfd.close() } catch (_: Exception) {}
     }
 }
@@ -6395,15 +6132,26 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
                 }
             }
 
-            val chosenRoot = jolietRootRecord ?: pvdRootRecord
-            val isJoliet = jolietRootRecord != null
+            var useRockRidge = false
+            var suspSkip = 0
+            if (pvdRootRecord != null) {
+                val (rrActive, skip) = CleanRoomIsoRockRidge.probePvdRockRidge(pvdRootRecord) { off, len ->
+                    readIsoRange(off, len)
+                }
+                if (rrActive) {
+                    useRockRidge = true
+                    suspSkip = skip
+                }
+            }
+            val chosenRoot = if (useRockRidge) pvdRootRecord else (jolietRootRecord ?: pvdRootRecord)
+            val isJoliet = !useRockRidge && jolietRootRecord != null
 
             if (chosenRoot != null) {
                 val rootBb = ByteBuffer.wrap(chosenRoot).order(ByteOrder.LITTLE_ENDIAN)
                 val rootLba = rootBb.getInt(2).toLong() and 0xFFFFFFFFL
                 val rootLen = rootBb.getInt(10).toLong() and 0xFFFFFFFFL
                 val visitedLbas = HashSet<Long>()
-                traverseIsoDirectory(rootLba, rootLen, "", isJoliet, visitedLbas, 0)
+                traverseIsoDirectory(rootLba, rootLen, "", isJoliet, useRockRidge, suspSkip, visitedLbas, 0)
             }
 
             val isBridgeStubOnly = fileMap.size <= 1 && fileMap.keys.all { it.contains("readme", ignoreCase = true) }
@@ -6510,12 +6258,22 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
         val bytes = ByteArray(got)
         buf.get(bytes)
 
+        if (bytes.size >= 8 && (bytes[6].toInt() and 0x01) != 0) {
+            throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted ZIP archives is not supported in this version.")
+        }
         val compContainerLen = got.coerceAtLeast(1).toLong()
         ZipInputStream(ByteArrayInputStream(bytes)).use { zis ->
             val chunk = ByteArray(16384)
             var totalUnpacked = 0L
             while (fileMap.size < 10_000) {
-                val entry = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
+                val entry = try {
+                    zis.nextEntry
+                } catch (ze: java.util.zip.ZipException) {
+                    if (ze.message?.contains("encrypted", ignoreCase = true) == true) {
+                        throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted ZIP archives is not supported in this version.")
+                    }
+                    null
+                } catch (_: Throwable) { null } ?: break
                 val cleanName = entry.name.replace('\\', '/').trimStart('/')
                 if (!entry.isDirectory && cleanName.isNotEmpty() && !cleanName.contains("..")) {
                     val bos = ByteArrayOutputStream()
@@ -6803,15 +6561,37 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
         }
     }
 
+    private fun readIsoRange(byteOffset: Long, len: Int): ByteArray? {
+        if (byteOffset < 0L || len <= 0 || len > 4 * 1024 * 1024) return null
+        val buf = ByteBuffer.allocateDirect(len)
+        val r = source.readAt(byteOffset, buf)
+        if (r <= 0) return null
+        buf.flip()
+        val out = ByteArray(r)
+        buf.get(out)
+        return out
+    }
+
+    private fun readRelocatedDirSize(dirLba: Long): Long {
+        val sec = readIsoRange(dirLba * SECTOR_SIZE, 256) ?: return SECTOR_SIZE
+        if (sec.size < 34) return SECTOR_SIZE
+        val recLen = sec[0].toInt() and 0xFF
+        if (recLen < 34 || recLen > sec.size) return SECTOR_SIZE
+        val len = ByteBuffer.wrap(sec).order(ByteOrder.LITTLE_ENDIAN).getInt(10).toLong() and 0xFFFFFFFFL
+        return if (len > 0L) len else SECTOR_SIZE
+    }
+
     private fun traverseIsoDirectory(
         dirLba: Long,
         dirSize: Long,
         parentPath: String,
         isJoliet: Boolean,
+        useRockRidge: Boolean,
+        suspSkip: Int,
         visitedLbas: MutableSet<Long>,
         depth: Int
     ) {
-        if (depth > 16 || dirSize <= 0L || dirSize > 4 * 1024 * 1024L || !visitedLbas.add(dirLba) || fileMap.size >= 10_000) return
+        if (depth > 32 || dirSize <= 0L || dirSize > 4 * 1024 * 1024L || !visitedLbas.add(dirLba) || fileMap.size >= 10_000) return
         val safeAlloc = minOf(dirSize, source.size.coerceAtLeast(2048L)).toInt()
         if (safeAlloc <= 0) return
         val buf = ByteBuffer.allocateDirect(safeAlloc).order(ByteOrder.LITTLE_ENDIAN)
@@ -6821,6 +6601,7 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
         buf.flip()
         buf.get(bytes)
         val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val multiExtentOpen = HashSet<String>()
 
         var pos = 0
         while (pos < bytes.size && fileMap.size < 10_000) {
@@ -6837,32 +6618,59 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
             val dataLen = bb.getInt(pos + 10).toLong() and 0xFFFFFFFFL
             val flags = bytes[pos + 25].toInt() and 0xFF
             val isDir = (flags and 0x02) != 0
+            val hasMoreExtents = (flags and 0x80) != 0
             val nameLen = bytes[pos + 32].toInt() and 0xFF
 
             if (nameLen > 0 && pos + 33 + nameLen <= pos + recLen) {
                 val firstNameByte = bytes[pos + 33].toInt() and 0xFF
                 if (!(nameLen == 1 && (firstNameByte == 0 || firstNameByte == 1))) {
-                    val rawName = if (isJoliet && nameLen >= 2) {
+                    val rr = if (useRockRidge) {
+                        CleanRoomIsoRockRidge.parseSystemUseArea(bytes, pos, recLen, nameLen, suspSkip) { lba, off, len ->
+                            readIsoRange(lba * SECTOR_SIZE + off, len)
+                        }
+                    } else null
+                    if (rr?.relocated == true) {
+                        pos += recLen
+                        continue
+                    }
+                    val rawName = rr?.name ?: if (isJoliet && nameLen >= 2) {
                         String(bytes, pos + 33, nameLen - (nameLen % 2), StandardCharsets.UTF_16BE)
                     } else {
                         String(bytes, pos + 33, nameLen, StandardCharsets.UTF_8)
                     }
-                    val cleanName = rawName
+                    val cleanName = (if (rr?.name != null) rawName else rawName.substringBefore(';').trimEnd('.'))
                         .replace('\u0000', ' ')
-                        .substringBefore(';')
                         .trim()
                         .replace('\\', '/')
                     if (cleanName.isNotEmpty() && !cleanName.contains("..") && !cleanName.contains('/')) {
                         val fullPath = if (parentPath.isEmpty()) cleanName else "$parentPath/$cleanName"
-                        if (isDir) {
-                            traverseIsoDirectory(extLba, dataLen, fullPath, isJoliet, visitedLbas, depth + 1)
+                        val childLba = rr?.childLinkLba
+                        if (childLba != null) {
+                            val relocSize = readRelocatedDirSize(childLba)
+                            traverseIsoDirectory(childLba, relocSize, fullPath, isJoliet, useRockRidge, suspSkip, visitedLbas, depth + 1)
+                        } else if (isDir) {
+                            traverseIsoDirectory(extLba, dataLen, fullPath, isJoliet, useRockRidge, suspSkip, visitedLbas, depth + 1)
+                        } else if (rr?.symlinkTarget != null) {
+                            val targetBytes = rr.symlinkTarget.toByteArray(StandardCharsets.UTF_8)
+                            fileMap[fullPath] = IsoFileEntry(
+                                path = fullPath,
+                                size = targetBytes.size.toLong(),
+                                extents = emptyList(),
+                                inlinePayload = targetBytes
+                            )
+                            displayEntries.add("$fullPath (${targetBytes.size} B)")
                         } else {
                             val existing = fileMap[fullPath]
                             val newExtent = UdfExtent(extLba * SECTOR_SIZE, dataLen)
-                            if (existing != null && (flags and 0x80) != 0) {
+                            if (existing != null && fullPath in multiExtentOpen) {
                                 val combinedExtents = existing.extents + newExtent
                                 val combinedSize = existing.size + dataLen
                                 fileMap[fullPath] = existing.copy(size = combinedSize, extents = combinedExtents)
+                                if (!hasMoreExtents) {
+                                    multiExtentOpen.remove(fullPath)
+                                    val idx = displayEntries.indexOfLast { it.startsWith("$fullPath (") }
+                                    if (idx >= 0) displayEntries[idx] = "$fullPath ($combinedSize B)"
+                                }
                             } else {
                                 fileMap[fullPath] = IsoFileEntry(
                                     path = fullPath,
@@ -6870,6 +6678,7 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
                                     extents = listOf(newExtent)
                                 )
                                 displayEntries.add("$fullPath ($dataLen B)")
+                                if (hasMoreExtents) multiExtentOpen.add(fullPath)
                             }
                         }
                     }
@@ -6892,26 +6701,9 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
 
         var tempFile: File? = null
         return try {
-            val candidateDirs = listOfNotNull(
-                System.getProperty("omnireader.cache.dir")?.let { File(it) },
-                System.getProperty("java.io.tmpdir")?.let { File(it) },
-                File("/data/data/me.hlebkukleuski.fullfilestudio/cache"),
-                File("/data/data/me.hlebkukleuski.fullfilestudio.sitedl/cache")
-            )
-            var targetDir: File? = null
-            for (dir in candidateDirs) {
-                try {
-                    if (!dir.exists()) dir.mkdirs()
-                    if (dir.exists() && dir.canWrite()) {
-                        targetDir = dir
-                        break
-                    }
-                } catch (_: Throwable) {}
-            }
-            tempFile = if (targetDir != null) File.createTempFile("iso_entry_", ".tmp", targetDir) else File.createTempFile("iso_entry_", ".tmp")
-            tempFile.deleteOnExit()
+            tempFile = com.omnireader.core.engine.ScratchFiles.createTempFile("iso_entry_", ".tmp")
 
-            FileOutputStream(tempFile).use { fos ->
+            com.omnireader.core.engine.ScratchFiles.openOutput(tempFile).use { fos ->
                 if (entry.inlinePayload != null) {
                     fos.write(entry.inlinePayload)
                 } else {
@@ -6943,14 +6735,14 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
             }
             synchronized(this) {
                 if (isClosed) {
-                    tempFile.delete()
+                    com.omnireader.core.engine.ScratchFiles.delete(tempFile)
                     return null
                 }
                 tempExtractedFiles.add(tempFile)
             }
-            ParcelFileDescriptor.open(tempFile, ParcelFileDescriptor.MODE_READ_ONLY)
+            com.omnireader.core.engine.ScratchFiles.openReadOnly(tempFile)
         } catch (_: Exception) {
-            try { tempFile?.delete() } catch (_: Throwable) {}
+            com.omnireader.core.engine.ScratchFiles.delete(tempFile)
             null
         }
     }
@@ -6989,7 +6781,552 @@ class CleanRoomIso9660Session(private val pfd: ParcelFileDescriptor) : ArchiveSe
         source.close()
         try { pfd.close() } catch (_: Exception) {}
         filesToDelete.forEach { file ->
-            try { file.delete() } catch (_: Throwable) {}
+            com.omnireader.core.engine.ScratchFiles.delete(file)
         }
+    }
+}
+
+object BiffCf {
+    fun extProps(b: ByteArray, start: Int, end: Int): Map<Int, IntArray> {
+        val out = HashMap<Int, IntArray>()
+        if (start + 8 > end) return out
+        val n = u16(b, start + 6)
+        var q = start + 8
+        for (k in 0 until n.coerceAtMost(32)) {
+            if (q + 4 > end) break
+            val type = u16(b, q)
+            val cb = u16(b, q + 2)
+            if (cb < 4 || q + cb > end) break
+            if (cb >= 12 && type in setOf(4, 5, 7, 8, 9, 10, 11, 13)) out[type] = intArrayOf(u16(b, q + 4), u16(b, q + 6).toShort().toInt(), u32(b, q + 8))
+            q += cb
+        }
+        return out
+    }
+
+    fun withExt(st: CfStyle, ext: Map<Int, IntArray>, full: (IntArray) -> Int?): CfStyle {
+        if (ext.isEmpty()) return st
+        fun c(t: Int) = ext[t]?.let(full)
+        val fill = st.fill?.let { f ->
+            if (f.pattern > 1) SheetFill(c(5) ?: f.bg, f.pattern, c(4) ?: f.fg) else SheetFill(c(5) ?: c(4) ?: f.bg)
+        } ?: (c(5) ?: c(4))?.let { SheetFill(it) }
+        fun bd(b: SheetBorder?, t: Int) = b?.let { SheetBorder(it.style, c(t) ?: it.color) }
+        return CfStyle(fill, c(13) ?: st.color, st.bold, st.italic, st.underline, st.strike, bd(st.left, 9), bd(st.right, 10), bd(st.top, 7), bd(st.bottom, 8), st.numFmt)
+    }
+
+    private fun xnum(b: ByteArray, p: Int): Double {
+        var bits = 0L
+        for (k in 7 downTo 0) bits = (bits shl 8) or (b[p + k].toLong() and 0xFF)
+        return Double.fromBits(bits)
+    }
+
+    private fun cfColor(b: ByteArray, p: Int, icv: (Int) -> Int?, full: (IntArray) -> Int?): Int? {
+        val type = u32(b, p)
+        val v = u32(b, p + 4)
+        val tint = xnum(b, p + 8)
+        return when (type) {
+            1 -> icv(v)
+            2, 3 -> full(intArrayOf(type, (tint * 32767).toInt(), v))
+            else -> null
+        }
+    }
+
+    private class Cfvo(val obj: CfValueObject, val next: Int)
+
+    private fun cfvo(b: ByteArray, p: Int, end: Int, top: Int, left: Int): Cfvo? {
+        if (p + 3 > end) return null
+        val type = b[p].toInt() and 0xFF
+        val cce = u16(b, p + 1)
+        var q = p + 3
+        val fmla = if (cce > 0) formula(b, q, q + cce, top, left) else null
+        q += cce
+        var value: Double? = null
+        if (type != 2 && type != 3 && type != 7 && cce == 0) {
+            if (q + 8 > end) return null
+            value = xnum(b, q)
+            q += 8
+        }
+        val t = when (type) { 1 -> "num"; 2 -> "min"; 3 -> "max"; 4 -> "percent"; 5 -> "percentile"; else -> "formula" }
+        val v = fmla ?: value?.let { ExcelNumberFormat.general(it).replace(ExcelNumberFormat.decimalSeparator, '.') }
+        return Cfvo(CfValueObject(if (fmla != null && t != "formula") t else t, v), q)
+    }
+
+    private val ICON_SETS = listOf(
+        "3Arrows", "3ArrowsGray", "3Flags", "3TrafficLights1", "3TrafficLights2", "3Signs", "3Symbols", "3Symbols2",
+        "4Arrows", "4ArrowsGray", "4RedToBlack", "4Rating", "4TrafficLights", "5Arrows", "5ArrowsGray", "5Rating", "5Quarters"
+    )
+
+    fun cf12(b: ByteArray, start: Int, end: Int, top: Int, left: Int, icv: (Int) -> Int?, full: (IntArray) -> Int?, formats: Map<Int, String>, names: ((Int, Int) -> String?)? = null): CfRule? {
+        if (start + 10 > end) return null
+        val ct = b[start].toInt() and 0xFF
+        val cp = b[start + 1].toInt() and 0xFF
+        val cce1 = u16(b, start + 2)
+        val cce2 = u16(b, start + 4)
+        val cbDxf = u32(b, start + 6)
+        var q = start + 10
+        var style: CfStyle? = null
+        if (cbDxf > 0) {
+            val dxEnd = (q + cbDxf).coerceAtMost(end)
+            dxfn(b, q, dxEnd, icv, formats)?.let { (st, after) -> style = withExt(st, extProps(b, after, dxEnd), full) }
+            q += cbDxf
+        }
+        val f1 = if (cce1 > 0) formula(b, q, q + cce1, top, left, names) else null
+        q += cce1
+        val f2 = if (cce2 > 0) formula(b, q, q + cce2, top, left, names) else null
+        q += cce2
+        if (q + 2 > end) return null
+        q += 2 + u16(b, q)
+        if (q + 24 > end) return null
+        val flags = b[q + 2].toInt() and 0xFF
+        val priority = u16(b, q + 3)
+        q += 24
+        if (q + 6 > end) return null
+        return when (ct) {
+            1 -> if (f1 == null) null else CfRule(
+                "cellIs", priority, stopIfTrue = (flags and 0x02) != 0,
+                operator = when (cp) { 1 -> "between"; 2 -> "notBetween"; 3 -> "equal"; 4 -> "notEqual"; 5 -> "greaterThan"; 6 -> "lessThan"; 7 -> "greaterThanOrEqual"; else -> "lessThanOrEqual" },
+                formulas = listOfNotNull(f1, f2), style = style
+            )
+            2 -> if (f1 == null) null else CfRule("expression", priority, stopIfTrue = (flags and 0x02) != 0, formulas = listOf(f1), style = style)
+            3 -> {
+                val nInterp = b[q + 4].toInt() and 0xFF
+                val nCurve = b[q + 5].toInt() and 0xFF
+                var p = q + 6
+                val objs = ArrayList<CfValueObject>()
+                for (k in 0 until nInterp) {
+                    val c = cfvo(b, p, end, top, left) ?: return null
+                    objs.add(c.obj)
+                    p = c.next + 8
+                }
+                val colors = ArrayList<Int>()
+                for (k in 0 until nCurve) {
+                    if (p + 24 > end) return null
+                    colors.add(cfColor(b, p + 8, icv, full) ?: return null)
+                    p += 24
+                }
+                if (objs.size != colors.size) null else CfRule("colorScale", priority, cfvos = objs, colors = colors)
+            }
+            4 -> {
+                val minLen = (b[q + 4].toInt() and 0xFF) / 100f
+                val maxLen = (b[q + 5].toInt() and 0xFF) / 100f
+                val color = cfColor(b, q + 6, icv, full) ?: return null
+                val c1 = cfvo(b, q + 22, end, top, left) ?: return null
+                val c2 = cfvo(b, c1.next, end, top, left) ?: return null
+                CfRule("dataBar", priority, cfvos = listOf(c1.obj, c2.obj), colors = listOf(color), barMinLength = minLen, barMaxLength = maxLen.coerceAtLeast(minLen), barAxisNone = true)
+            }
+            6 -> {
+                val n = b[q + 3].toInt() and 0xFF
+                val set = ICON_SETS.getOrNull(b[q + 4].toInt() and 0xFF) ?: "3TrafficLights1"
+                val fl = b[q + 5].toInt() and 0xFF
+                var p = q + 6
+                val objs = ArrayList<CfValueObject>()
+                for (k in 0 until n.coerceAtMost(5)) {
+                    val c = cfvo(b, p, end, top, left) ?: return null
+                    if (c.next + 5 > end) return null
+                    val eq = b[c.next].toInt() != 0
+                    objs.add(CfValueObject(c.obj.type, c.obj.value, eq))
+                    p = c.next + 5
+                }
+                CfRule("iconSet", priority, cfvos = objs, iconSet = set, reverse = (fl and 0x04) != 0, showValue = (fl and 0x01) == 0)
+            }
+            else -> null
+        }
+    }
+
+    fun dxfn(b: ByteArray, start: Int, end: Int, color: (Int) -> Int?, formats: Map<Int, String>): Pair<CfStyle, Int>? {
+        if (start + 6 > end) return null
+        val flags = u32(b, start)
+        val flags2 = u16(b, start + 4)
+        var q = start + 6
+        var numFmt: String? = null
+        var fontColor: Int? = null
+        var bold: Boolean? = null
+        var italic: Boolean? = null
+        var strike: Boolean? = null
+        var underline: Int? = null
+        var left: SheetBorder? = null
+        var right: SheetBorder? = null
+        var top: SheetBorder? = null
+        var bottom: SheetBorder? = null
+        var fill: SheetFill? = null
+        if ((flags ushr 25) and 1 != 0) {
+            if ((flags2 and 1) != 0) {
+                if (q + 2 > end) return null
+                val cb = u16(b, q)
+                if (q + 5 <= end) {
+                    val cch = u16(b, q + 2)
+                    val hi = (b[q + 4].toInt() and 1) != 0
+                    val s = q + 5
+                    numFmt = if (hi && s + cch * 2 <= end) String(b, s, cch * 2, Charsets.UTF_16LE) else if (!hi && s + cch <= end) String(b, s, cch, Charsets.ISO_8859_1) else null
+                }
+                q += cb
+            } else {
+                if (q + 2 > end) return null
+                val ifmt = b[q + 1].toInt() and 0xFF
+                numFmt = formats[ifmt] ?: ExcelNumberFormat.code(ifmt, null)
+                q += 2
+            }
+        }
+        if ((flags ushr 26) and 1 != 0) {
+            if (q + 118 > end) return null
+            val ts = u32(b, q + 68)
+            val bls = u16(b, q + 72)
+            val uls = b[q + 76].toInt() and 0xFF
+            val icv = u32(b, q + 80)
+            val tsNinch = u32(b, q + 88)
+            val ulsNinch = u32(b, q + 96)
+            val blsNinch = u32(b, q + 100)
+            if (blsNinch == 0 && bls != 0xFFFF && bls != 0) bold = bls >= 0x2BC
+            if ((tsNinch and 0x02) == 0) italic = (ts and 0x02) != 0
+            if ((tsNinch and 0x80) == 0) strike = (ts and 0x80) != 0
+            if (ulsNinch == 0 && uls != 0xFF) underline = when (uls) { 1, 0x21 -> 1; 2, 0x22 -> 2; else -> 0 }
+            if (icv != -1 && icv in 0..0x3F) fontColor = color(icv)
+            q += 118
+        }
+        if ((flags ushr 27) and 1 != 0) q += 8
+        if ((flags ushr 28) and 1 != 0) {
+            if (q + 8 > end) return null
+            val dg = u16(b, q)
+            val icvLR = u16(b, q + 2)
+            val tb = u32(b, q + 4)
+            if ((flags ushr 10) and 1 == 0) left = side(dg and 0xF, color(icvLR and 0x7F))
+            if ((flags ushr 11) and 1 == 0) right = side((dg ushr 4) and 0xF, color((icvLR ushr 7) and 0x7F))
+            if ((flags ushr 12) and 1 == 0) top = side((dg ushr 8) and 0xF, color(tb and 0x7F))
+            if ((flags ushr 13) and 1 == 0) bottom = side((dg ushr 12) and 0xF, color((tb ushr 7) and 0x7F))
+            q += 8
+        }
+        if ((flags ushr 29) and 1 != 0) {
+            if (q + 4 > end) return null
+            val fls = (u16(b, q) ushr 10) and 0x3F
+            val icv = u16(b, q + 2)
+            val fg = if ((flags ushr 17) and 1 == 0) color(icv and 0x7F) else null
+            val bg = if ((flags ushr 18) and 1 == 0) color((icv ushr 7) and 0x7F) else null
+            val flsSet = (flags ushr 16) and 1 == 0
+            fill = when {
+                flsSet && fls > 1 -> SheetCellStyle.biffPattern(fls, fg, bg)
+                flsSet && fls == 0 -> null
+                else -> (bg ?: fg)?.let { SheetFill(it) }
+            }
+            q += 4
+        }
+        if ((flags ushr 30) and 1 != 0) q += 2
+        if (q > end) return null
+        return CfStyle(fill, fontColor, bold, italic, underline, strike, left, right, top, bottom, numFmt) to q
+    }
+
+    private fun side(style: Int, c: Int?): SheetBorder? = if (style == 0) null else SheetBorder(style.coerceIn(1, 13), c)
+
+    private fun u16(b: ByteArray, p: Int) = (b[p].toInt() and 0xFF) or ((b[p + 1].toInt() and 0xFF) shl 8)
+    private fun u32(b: ByteArray, p: Int) = u16(b, p) or (u16(b, p + 2) shl 16)
+
+    private val FTAB: Map<Int, Pair<String, Int>> = mapOf(
+        0 to ("COUNT" to -1), 1 to ("IF" to -1), 2 to ("ISNA" to 1), 3 to ("ISERROR" to 1), 4 to ("SUM" to -1), 5 to ("AVERAGE" to -1), 6 to ("MIN" to -1),
+        7 to ("MAX" to -1), 8 to ("ROW" to -1), 9 to ("COLUMN" to -1), 10 to ("NA" to 0), 11 to ("NPV" to -1), 12 to ("STDEV" to -1), 13 to ("DOLLAR" to -1),
+        14 to ("FIXED" to -1), 15 to ("SIN" to 1), 16 to ("COS" to 1), 17 to ("TAN" to 1), 18 to ("ATAN" to 1), 19 to ("PI" to 0), 20 to ("SQRT" to 1),
+        21 to ("EXP" to 1), 22 to ("LN" to 1), 23 to ("LOG10" to 1), 24 to ("ABS" to 1), 25 to ("INT" to 1), 26 to ("SIGN" to 1), 27 to ("ROUND" to 2),
+        28 to ("LOOKUP" to -1), 29 to ("INDEX" to -1), 30 to ("REPT" to 2), 31 to ("MID" to 3), 32 to ("LEN" to 1), 33 to ("VALUE" to 1), 34 to ("TRUE" to 0),
+        35 to ("FALSE" to 0), 36 to ("AND" to -1), 37 to ("OR" to -1), 38 to ("NOT" to 1), 39 to ("MOD" to 2), 40 to ("DCOUNT" to 3), 41 to ("DSUM" to 3),
+        42 to ("DAVERAGE" to 3), 43 to ("DMIN" to 3), 44 to ("DMAX" to 3), 45 to ("DSTDEV" to 3), 46 to ("VAR" to -1), 47 to ("DVAR" to 3),
+        48 to ("TEXT" to 2), 49 to ("LINEST" to -1), 50 to ("TREND" to -1), 51 to ("LOGEST" to -1), 52 to ("GROWTH" to -1), 56 to ("PV" to -1),
+        57 to ("FV" to -1), 58 to ("NPER" to -1), 59 to ("PMT" to -1), 60 to ("RATE" to -1), 61 to ("MIRR" to 3), 62 to ("IRR" to -1), 63 to ("RAND" to 0),
+        64 to ("MATCH" to -1), 65 to ("DATE" to 3), 66 to ("TIME" to 3), 67 to ("DAY" to 1), 68 to ("MONTH" to 1), 69 to ("YEAR" to 1), 70 to ("WEEKDAY" to 1),
+        71 to ("HOUR" to 1), 72 to ("MINUTE" to 1), 73 to ("SECOND" to 1), 74 to ("NOW" to 0), 75 to ("AREAS" to 1), 76 to ("ROWS" to 1),
+        77 to ("COLUMNS" to 1), 78 to ("OFFSET" to -1), 82 to ("SEARCH" to -1), 83 to ("TRANSPOSE" to 1), 86 to ("TYPE" to 1), 97 to ("ATAN2" to 2),
+        98 to ("ASIN" to 1), 99 to ("ACOS" to 1), 100 to ("CHOOSE" to -1), 101 to ("HLOOKUP" to 3), 102 to ("VLOOKUP" to 3), 105 to ("ISREF" to 1),
+        109 to ("LOG" to -1), 111 to ("CHAR" to 1), 112 to ("LOWER" to 1), 113 to ("UPPER" to 1), 114 to ("PROPER" to 1), 115 to ("LEFT" to -1),
+        116 to ("RIGHT" to -1), 117 to ("EXACT" to 2), 118 to ("TRIM" to 1), 119 to ("REPLACE" to 4), 120 to ("SUBSTITUTE" to -1), 121 to ("CODE" to 1),
+        124 to ("FIND" to -1), 125 to ("CELL" to -1), 126 to ("ISERR" to 1), 127 to ("ISTEXT" to 1), 128 to ("ISNUMBER" to 1), 129 to ("ISBLANK" to 1),
+        130 to ("T" to 1), 131 to ("N" to 1), 140 to ("DATEVALUE" to 1), 141 to ("TIMEVALUE" to 1), 142 to ("SLN" to 3), 143 to ("SYD" to 4),
+        144 to ("DDB" to -1), 148 to ("INDIRECT" to -1), 162 to ("CLEAN" to 1), 163 to ("MDETERM" to 1), 164 to ("MINVERSE" to 1), 165 to ("MMULT" to 2),
+        167 to ("IPMT" to -1), 168 to ("PPMT" to -1), 169 to ("COUNTA" to -1), 183 to ("PRODUCT" to -1), 184 to ("FACT" to 1), 189 to ("DPRODUCT" to 3),
+        190 to ("ISNONTEXT" to 1), 193 to ("STDEVP" to -1), 194 to ("VARP" to -1), 195 to ("DSTDEVP" to 3), 196 to ("DVARP" to 3), 197 to ("TRUNC" to 1),
+        198 to ("ISLOGICAL" to 1), 199 to ("DCOUNTA" to 3), 204 to ("DOLLAR" to -1), 208 to ("LEFTB" to -1), 209 to ("RIGHTB" to -1), 210 to ("MIDB" to 3),
+        211 to ("LENB" to 1), 212 to ("ROUNDUP" to 2), 213 to ("ROUNDDOWN" to 2), 214 to ("ASC" to 1), 215 to ("JIS" to 1), 216 to ("RANK" to -1),
+        219 to ("ADDRESS" to -1), 220 to ("DAYS360" to 2), 221 to ("TODAY" to 0), 222 to ("VDB" to -1), 227 to ("MEDIAN" to -1), 228 to ("SUMPRODUCT" to -1),
+        229 to ("SINH" to 1), 230 to ("COSH" to 1), 231 to ("TANH" to 1), 232 to ("ASINH" to 1), 233 to ("ACOSH" to 1), 234 to ("ATANH" to 1),
+        235 to ("DGET" to 3), 244 to ("INFO" to 1), 247 to ("DB" to -1), 252 to ("FREQUENCY" to 2), 261 to ("ORG.OPENOFFICE.ERRORTYPE" to 1),
+        269 to ("AVEDEV" to -1), 270 to ("BETADIST" to -1), 271 to ("GAMMALN" to 1), 272 to ("BETAINV" to -1), 273 to ("BINOMDIST" to 4),
+        274 to ("LEGACY.CHIDIST" to 2), 275 to ("LEGACY.CHIINV" to 2), 276 to ("COMBIN" to 2), 277 to ("CONFIDENCE" to 3), 278 to ("CRITBINOM" to 3),
+        279 to ("EVEN" to 1), 280 to ("EXPONDIST" to 3), 281 to ("LEGACY.FDIST" to 3), 282 to ("LEGACY.FINV" to 3), 283 to ("FISHER" to 1),
+        284 to ("FISHERINV" to 1), 285 to ("FLOOR" to 2), 286 to ("GAMMADIST" to 4), 287 to ("GAMMAINV" to 3), 288 to ("CEILING" to 2),
+        289 to ("HYPGEOMDIST" to 4), 290 to ("LOGNORMDIST" to 3), 291 to ("LOGINV" to 3), 292 to ("NEGBINOMDIST" to 3), 293 to ("NORMDIST" to 4),
+        294 to ("LEGACY.NORMSDIST" to 1), 295 to ("NORMINV" to 3), 296 to ("LEGACY.NORMSINV" to 1), 297 to ("STANDARDIZE" to 3), 298 to ("ODD" to 1),
+        299 to ("PERMUT" to 2), 300 to ("POISSON" to 3), 301 to ("TDIST" to 3), 302 to ("WEIBULL" to 4), 303 to ("SUMXMY2" to 2), 304 to ("SUMX2MY2" to 2),
+        305 to ("SUMX2PY2" to 2), 306 to ("LEGACY.CHITEST" to 2), 307 to ("CORREL" to 2), 308 to ("COVAR" to 2), 309 to ("FORECAST" to 3),
+        310 to ("FTEST" to 2), 311 to ("INTERCEPT" to 2), 312 to ("PEARSON" to 2), 313 to ("RSQ" to 2), 314 to ("STEYX" to 2), 315 to ("SLOPE" to 2),
+        316 to ("TTEST" to 4), 317 to ("PROB" to -1), 318 to ("DEVSQ" to -1), 319 to ("GEOMEAN" to -1), 320 to ("HARMEAN" to -1), 321 to ("SUMSQ" to -1),
+        322 to ("KURT" to -1), 323 to ("SKEW" to -1), 324 to ("ZTEST" to -1), 325 to ("LARGE" to 2), 326 to ("SMALL" to 2), 327 to ("QUARTILE" to 2),
+        328 to ("PERCENTILE" to 2), 329 to ("PERCENTRANK" to -1), 330 to ("MODE" to -1), 331 to ("TRIMMEAN" to 2), 332 to ("TINV" to 2),
+        336 to ("CONCATENATE" to -1), 337 to ("POWER" to 2), 342 to ("RADIANS" to 1), 343 to ("DEGREES" to 1), 344 to ("SUBTOTAL" to -1),
+        345 to ("SUMIF" to -1), 346 to ("COUNTIF" to 2), 347 to ("COUNTBLANK" to 1), 350 to ("ISPMT" to 4), 354 to ("ROMAN" to -1),
+        358 to ("GETPIVOTDATA" to -1), 359 to ("HYPERLINK" to -1), 361 to ("AVERAGEA" to -1), 362 to ("MAXA" to -1), 363 to ("MINA" to -1),
+        364 to ("STDEVPA" to -1), 365 to ("VARPA" to -1), 366 to ("STDEVA" to -1), 367 to ("VARA" to -1), 368 to ("COM.MICROSOFT.BAHTTEXT" to 1)
+    )
+
+    private val FTAB12: Map<Int, Pair<String, Int>> = mapOf(
+        0 to ("COUNT" to -1), 1 to ("IF" to -1), 2 to ("ISNA" to 1), 3 to ("ISERROR" to 1), 4 to ("SUM" to -1), 5 to ("AVERAGE" to -1), 6 to ("MIN" to -1),
+        7 to ("MAX" to -1), 8 to ("ROW" to -1), 9 to ("COLUMN" to -1), 10 to ("NA" to 0), 11 to ("NPV" to -1), 12 to ("STDEV" to -1), 13 to ("DOLLAR" to -1),
+        14 to ("FIXED" to -1), 15 to ("SIN" to 1), 16 to ("COS" to 1), 17 to ("TAN" to 1), 18 to ("ATAN" to 1), 19 to ("PI" to 0), 20 to ("SQRT" to 1),
+        21 to ("EXP" to 1), 22 to ("LN" to 1), 23 to ("LOG10" to 1), 24 to ("ABS" to 1), 25 to ("INT" to 1), 26 to ("SIGN" to 1), 27 to ("ROUND" to 2),
+        28 to ("LOOKUP" to -1), 29 to ("INDEX" to -1), 30 to ("REPT" to 2), 31 to ("MID" to 3), 32 to ("LEN" to 1), 33 to ("VALUE" to 1), 34 to ("TRUE" to 0),
+        35 to ("FALSE" to 0), 36 to ("AND" to -1), 37 to ("OR" to -1), 38 to ("NOT" to 1), 39 to ("MOD" to 2), 40 to ("DCOUNT" to 3), 41 to ("DSUM" to 3),
+        42 to ("DAVERAGE" to 3), 43 to ("DMIN" to 3), 44 to ("DMAX" to 3), 45 to ("DSTDEV" to 3), 46 to ("VAR" to -1), 47 to ("DVAR" to 3),
+        48 to ("TEXT" to 2), 49 to ("LINEST" to -1), 50 to ("TREND" to -1), 51 to ("LOGEST" to -1), 52 to ("GROWTH" to -1), 56 to ("PV" to -1),
+        57 to ("FV" to -1), 58 to ("NPER" to -1), 59 to ("PMT" to -1), 60 to ("RATE" to -1), 61 to ("MIRR" to 3), 62 to ("IRR" to -1), 63 to ("RAND" to 0),
+        64 to ("MATCH" to -1), 65 to ("DATE" to 3), 66 to ("TIME" to 3), 67 to ("DAY" to 1), 68 to ("MONTH" to 1), 69 to ("YEAR" to 1), 70 to ("WEEKDAY" to 1),
+        71 to ("HOUR" to 1), 72 to ("MINUTE" to 1), 73 to ("SECOND" to 1), 74 to ("NOW" to 0), 75 to ("AREAS" to 1), 76 to ("ROWS" to 1),
+        77 to ("COLUMNS" to 1), 78 to ("OFFSET" to -1), 82 to ("SEARCH" to -1), 83 to ("TRANSPOSE" to 1), 86 to ("TYPE" to 1), 97 to ("ATAN2" to 2),
+        98 to ("ASIN" to 1), 99 to ("ACOS" to 1), 100 to ("CHOOSE" to -1), 101 to ("HLOOKUP" to 3), 102 to ("VLOOKUP" to 3), 105 to ("ISREF" to 1),
+        109 to ("LOG" to -1), 111 to ("CHAR" to 1), 112 to ("LOWER" to 1), 113 to ("UPPER" to 1), 114 to ("PROPER" to 1), 115 to ("LEFT" to -1),
+        116 to ("RIGHT" to -1), 117 to ("EXACT" to 2), 118 to ("TRIM" to 1), 119 to ("REPLACE" to 4), 120 to ("SUBSTITUTE" to -1), 121 to ("CODE" to 1),
+        124 to ("FIND" to -1), 125 to ("CELL" to -1), 126 to ("ISERR" to 1), 127 to ("ISTEXT" to 1), 128 to ("ISNUMBER" to 1), 129 to ("ISBLANK" to 1),
+        130 to ("T" to 1), 131 to ("N" to 1), 140 to ("DATEVALUE" to 1), 141 to ("TIMEVALUE" to 1), 142 to ("SLN" to 3), 143 to ("SYD" to 4),
+        144 to ("DDB" to -1), 148 to ("INDIRECT" to -1), 162 to ("CLEAN" to 1), 163 to ("MDETERM" to 1), 164 to ("MINVERSE" to 1), 165 to ("MMULT" to 2),
+        167 to ("IPMT" to -1), 168 to ("PPMT" to -1), 169 to ("COUNTA" to -1), 183 to ("PRODUCT" to -1), 184 to ("FACT" to 1), 189 to ("DPRODUCT" to 3),
+        190 to ("ISNONTEXT" to 1), 193 to ("STDEVP" to -1), 194 to ("VARP" to -1), 195 to ("DSTDEVP" to 3), 196 to ("DVARP" to 3), 197 to ("TRUNC" to 1),
+        198 to ("ISLOGICAL" to 1), 199 to ("DCOUNTA" to 3), 204 to ("DOLLAR" to -1), 208 to ("LEFTB" to -1), 209 to ("RIGHTB" to -1), 210 to ("MIDB" to 3),
+        211 to ("LENB" to 1), 212 to ("ROUNDUP" to 2), 213 to ("ROUNDDOWN" to 2), 214 to ("ASC" to 1), 215 to ("JIS" to 1), 216 to ("RANK" to -1),
+        219 to ("ADDRESS" to -1), 220 to ("DAYS360" to 2), 221 to ("TODAY" to 0), 222 to ("VDB" to -1), 227 to ("MEDIAN" to -1), 228 to ("SUMPRODUCT" to -1),
+        229 to ("SINH" to 1), 230 to ("COSH" to 1), 231 to ("TANH" to 1), 232 to ("ASINH" to 1), 233 to ("ACOSH" to 1), 234 to ("ATANH" to 1),
+        235 to ("DGET" to 3), 244 to ("INFO" to 1), 247 to ("DB" to -1), 252 to ("FREQUENCY" to 2), 261 to ("ORG.OPENOFFICE.ERRORTYPE" to 1),
+        269 to ("AVEDEV" to -1), 270 to ("BETADIST" to -1), 271 to ("GAMMALN" to 1), 272 to ("BETAINV" to -1), 273 to ("BINOMDIST" to 4),
+        274 to ("LEGACY.CHIDIST" to 2), 275 to ("LEGACY.CHIINV" to 2), 276 to ("COMBIN" to 2), 277 to ("CONFIDENCE" to 3), 278 to ("CRITBINOM" to 3),
+        279 to ("EVEN" to 1), 280 to ("EXPONDIST" to 3), 281 to ("LEGACY.FDIST" to 3), 282 to ("LEGACY.FINV" to 3), 283 to ("FISHER" to 1),
+        284 to ("FISHERINV" to 1), 285 to ("FLOOR" to 2), 286 to ("GAMMADIST" to 4), 287 to ("GAMMAINV" to 3), 288 to ("CEILING" to 2),
+        289 to ("HYPGEOMDIST" to 4), 290 to ("LOGNORMDIST" to 3), 291 to ("LOGINV" to 3), 292 to ("NEGBINOMDIST" to 3), 293 to ("NORMDIST" to 4),
+        294 to ("LEGACY.NORMSDIST" to 1), 295 to ("NORMINV" to 3), 296 to ("LEGACY.NORMSINV" to 1), 297 to ("STANDARDIZE" to 3), 298 to ("ODD" to 1),
+        299 to ("PERMUT" to 2), 300 to ("POISSON" to 3), 301 to ("TDIST" to 3), 302 to ("WEIBULL" to 4), 303 to ("SUMXMY2" to 2), 304 to ("SUMX2MY2" to 2),
+        305 to ("SUMX2PY2" to 2), 306 to ("LEGACY.CHITEST" to 2), 307 to ("CORREL" to 2), 308 to ("COVAR" to 2), 309 to ("FORECAST" to 3),
+        310 to ("FTEST" to 2), 311 to ("INTERCEPT" to 2), 312 to ("PEARSON" to 2), 313 to ("RSQ" to 2), 314 to ("STEYX" to 2), 315 to ("SLOPE" to 2),
+        316 to ("TTEST" to 4), 317 to ("PROB" to -1), 318 to ("DEVSQ" to -1), 319 to ("GEOMEAN" to -1), 320 to ("HARMEAN" to -1), 321 to ("SUMSQ" to -1),
+        322 to ("KURT" to -1), 323 to ("SKEW" to -1), 324 to ("ZTEST" to -1), 325 to ("LARGE" to 2), 326 to ("SMALL" to 2), 327 to ("QUARTILE" to 2),
+        328 to ("PERCENTILE" to 2), 329 to ("PERCENTRANK" to -1), 330 to ("MODE" to -1), 331 to ("TRIMMEAN" to 2), 332 to ("TINV" to 2),
+        336 to ("CONCATENATE" to -1), 337 to ("POWER" to 2), 342 to ("RADIANS" to 1), 343 to ("DEGREES" to 1), 344 to ("SUBTOTAL" to -1),
+        345 to ("SUMIF" to -1), 346 to ("COUNTIF" to 2), 347 to ("COUNTBLANK" to 1), 350 to ("ISPMT" to 4), 354 to ("ROMAN" to -1),
+        358 to ("GETPIVOTDATA" to -1), 359 to ("HYPERLINK" to -1), 361 to ("AVERAGEA" to -1), 362 to ("MAXA" to -1), 363 to ("MINA" to -1),
+        364 to ("STDEVPA" to -1), 365 to ("VARPA" to -1), 366 to ("STDEVA" to -1), 367 to ("VARA" to -1), 368 to ("COM.MICROSOFT.BAHTTEXT" to 1),
+        384 to ("HEX2BIN" to -1), 385 to ("HEX2DEC" to 1), 386 to ("HEX2OCT" to -1), 387 to ("DEC2BIN" to -1), 388 to ("DEC2HEX" to -1),
+        389 to ("DEC2OCT" to -1), 390 to ("OCT2BIN" to -1), 391 to ("OCT2HEX" to -1), 392 to ("OCT2DEC" to 1), 393 to ("BIN2DEC" to 1),
+        394 to ("BIN2OCT" to -1), 395 to ("BIN2HEX" to -1), 396 to ("IMSUB" to 2), 397 to ("IMDIV" to 2), 398 to ("IMPOWER" to 2), 399 to ("IMABS" to 1),
+        400 to ("IMSQRT" to 1), 401 to ("IMLN" to 1), 402 to ("IMLOG2" to 1), 403 to ("IMLOG10" to 1), 404 to ("IMSIN" to 1), 405 to ("IMCOS" to 1),
+        406 to ("IMEXP" to 1), 407 to ("IMARGUMENT" to 1), 408 to ("IMCONJUGATE" to 1), 409 to ("IMAGINARY" to 1), 410 to ("IMREAL" to 1),
+        411 to ("COMPLEX" to -1), 412 to ("IMSUM" to -1), 413 to ("IMPRODUCT" to -1), 414 to ("SERIESSUM" to 4), 415 to ("FACTDOUBLE" to 1),
+        416 to ("SQRTPI" to 1), 417 to ("QUOTIENT" to 2), 418 to ("DELTA" to -1), 419 to ("GESTEP" to -1), 420 to ("ISEVEN" to 1), 421 to ("ISODD" to 1),
+        422 to ("MROUND" to 2), 423 to ("ERF" to -1), 424 to ("ERFC" to 1), 425 to ("BESSELJ" to 2), 426 to ("BESSELK" to 2), 427 to ("BESSELY" to 2),
+        428 to ("BESSELI" to 2), 429 to ("XIRR" to -1), 430 to ("XNPV" to 3), 431 to ("PRICEMAT" to -1), 432 to ("YIELDMAT" to -1), 433 to ("INTRATE" to -1),
+        434 to ("RECEIVED" to -1), 435 to ("DISC" to -1), 436 to ("PRICEDISC" to -1), 437 to ("YIELDDISC" to -1), 438 to ("TBILLEQ" to 3),
+        439 to ("TBILLPRICE" to 3), 440 to ("TBILLYIELD" to 3), 441 to ("PRICE" to -1), 442 to ("YIELD" to -1), 443 to ("DOLLARDE" to 2),
+        444 to ("DOLLARFR" to 2), 445 to ("NOMINAL" to 2), 446 to ("EFFECT" to 2), 447 to ("CUMPRINC" to 6), 448 to ("CUMIPMT" to 6), 449 to ("EDATE" to 2),
+        450 to ("EOMONTH" to 2), 451 to ("YEARFRAC" to -1), 452 to ("COUPDAYBS" to -1), 453 to ("COUPDAYS" to -1), 454 to ("COUPDAYSNC" to -1),
+        455 to ("COUPNCD" to -1), 456 to ("COUPNUM" to -1), 457 to ("COUPPCD" to -1), 458 to ("DURATION" to -1), 459 to ("MDURATION" to -1),
+        460 to ("ODDLPRICE" to -1), 461 to ("ODDLYIELD" to -1), 462 to ("ODDFPRICE" to -1), 463 to ("ODDFYIELD" to -1), 464 to ("RANDBETWEEN" to 2),
+        465 to ("WEEKNUM" to -1), 466 to ("AMORDEGRC" to -1), 467 to ("AMORLINC" to -1), 468 to ("CONVERT" to 3), 469 to ("ACCRINT" to -1),
+        470 to ("ACCRINTM" to -1), 471 to ("WORKDAY" to -1), 472 to ("NETWORKDAYS" to -1), 473 to ("GCD" to -1), 474 to ("MULTINOMIAL" to -1),
+        475 to ("LCM" to -1), 476 to ("FVSCHEDULE" to 2), 480 to ("IFERROR" to 2), 481 to ("COUNTIFS" to -1), 482 to ("SUMIFS" to -1),
+        483 to ("AVERAGEIF" to -1), 484 to ("AVERAGEIFS" to -1)
+    )
+
+    private fun ref(row: Int, col: Int, rowRel: Boolean, colRel: Boolean): String =
+        (if (colRel) "" else "$") + SheetConditionalFormats.colLetters(col.coerceIn(0, 16383)) + (if (rowRel) "" else "$") + (row.coerceAtLeast(0) + 1)
+
+    private fun i32(b: ByteArray, p: Int) = u32(b, p)
+
+    fun formula12(b: ByteArray, start: Int, end: Int, top: Int, left: Int): String? {
+        if (end > b.size || start >= end) return null
+        val st = ArrayList<String>()
+        var p = start
+        fun pop(): String = if (st.isEmpty()) throw IllegalStateException() else st.removeAt(st.size - 1)
+        fun col12(v: Int, rel: Boolean, base: Int): Pair<Int, Boolean> {
+            val colRel = (v and 0x4000) != 0
+            val raw = v and 0x3FFF
+            return (if (rel && colRel) base + (if (raw and 0x2000 != 0) raw - 0x4000 else raw) else raw) to colRel
+        }
+        try {
+            while (p < end) {
+                val id = b[p].toInt() and 0xFF
+                p++
+                when {
+                    id in 0x03..0x0E -> {
+                        val r = pop(); val l = pop()
+                        st.add(l + arrayOf("+", "-", "*", "/", "^", "&", "<", "<=", "=", ">=", ">", "<>")[id - 3] + r)
+                    }
+                    id == 0x12 -> st.add("+" + pop())
+                    id == 0x13 -> st.add("-" + pop())
+                    id == 0x14 -> st.add(pop() + "%")
+                    id == 0x15 -> st.add("(" + pop() + ")")
+                    id == 0x16 -> st.add("")
+                    id == 0x17 -> {
+                        val cch = u16(b, p)
+                        val txt = String(b, p + 2, cch * 2, Charsets.UTF_16LE)
+                        st.add("\"" + txt.replace("\"", "\"\"") + "\"")
+                        p += 2 + cch * 2
+                    }
+                    id == 0x19 -> {
+                        val grbit = b[p].toInt() and 0xFF
+                        if ((grbit and 0x04) != 0) return null
+                        if ((grbit and 0x10) != 0) st.add("SUM(" + pop() + ")")
+                        p += 3
+                    }
+                    id == 0x1C -> { st.add(when (b[p].toInt() and 0xFF) { 0x00 -> "#NULL!"; 0x07 -> "#DIV/0!"; 0x0F -> "#VALUE!"; 0x17 -> "#REF!"; 0x1D -> "#NAME?"; 0x24 -> "#NUM!"; else -> "#N/A" }); p++ }
+                    id == 0x1D -> { st.add(if (b[p].toInt() != 0) "TRUE" else "FALSE"); p++ }
+                    id == 0x1E -> { st.add(u16(b, p).toString()); p += 2 }
+                    id == 0x1F -> {
+                        var bits = 0L
+                        for (k in 7 downTo 0) bits = (bits shl 8) or (b[p + k].toLong() and 0xFF)
+                        st.add(ExcelFormula.numberText(Double.fromBits(bits)))
+                        p += 8
+                    }
+                    id >= 0x20 -> {
+                        val base = (id and 0x1F) or 0x20
+                        when (base) {
+                            0x21 -> {
+                                val f = u16(b, p); p += 2
+                                val (name, n) = FTAB12[f] ?: return null
+                                if (n < 0) return null
+                                val args = List(n) { pop() }.reversed()
+                                st.add(name + "(" + args.joinToString(",") + ")")
+                            }
+                            0x22 -> {
+                                val n = b[p].toInt() and 0x7F
+                                val f = u16(b, p + 1) and 0x7FFF
+                                p += 3
+                                val args = List(n) { pop() }.reversed()
+                                if (f == 255) return null
+                                val name = FTAB12[f]?.first ?: return null
+                                st.add(name + "(" + args.joinToString(",") + ")")
+                            }
+                            0x24, 0x2C -> {
+                                val rw = i32(b, p)
+                                val cf = u16(b, p + 4)
+                                p += 6
+                                val rel = base == 0x2C
+                                val rowRel = (cf and 0x8000) != 0
+                                val (col, colRel) = col12(cf, rel, left)
+                                val row = if (rel && rowRel) top + rw else rw
+                                st.add(ref(row, col, rowRel, colRel))
+                            }
+                            0x25, 0x2D -> {
+                                val r0 = i32(b, p); val r1 = i32(b, p + 4); val c0 = u16(b, p + 8); val c1 = u16(b, p + 10)
+                                p += 12
+                                val rel = base == 0x2D
+                                val (cc0, cr0) = col12(c0, rel, left)
+                                val (cc1, cr1) = col12(c1, rel, left)
+                                val rr0 = if (rel && (c0 and 0x8000) != 0) top + r0 else r0
+                                val rr1 = if (rel && (c1 and 0x8000) != 0) top + r1 else r1
+                                st.add(ref(rr0, cc0, (c0 and 0x8000) != 0, cr0) + ":" + ref(rr1, cc1, (c1 and 0x8000) != 0, cr1))
+                            }
+                            0x2A -> { st.add("#REF!"); p += 6 }
+                            0x2B -> { st.add("#REF!"); p += 12 }
+                            else -> return null
+                        }
+                    }
+                    else -> return null
+                }
+            }
+        } catch (_: Exception) {
+            return null
+        }
+        return st.singleOrNull()
+    }
+
+    fun formula(b: ByteArray, start: Int, end: Int, top: Int, left: Int, names: ((Int, Int) -> String?)? = null): String? {
+        if (end > b.size || start >= end) return null
+        val st = ArrayList<String>()
+        var p = start
+        fun pop(): String = if (st.isEmpty()) throw IllegalStateException() else st.removeAt(st.size - 1)
+        try {
+            while (p < end) {
+                val id = b[p].toInt() and 0xFF
+                p++
+                when {
+                    id in 0x03..0x0E -> {
+                        val r = pop(); val l = pop()
+                        val op = arrayOf("+", "-", "*", "/", "^", "&", "<", "<=", "=", ">=", ">", "<>")[id - 3]
+                        st.add(l + op + r)
+                    }
+                    id == 0x12 -> st.add("+" + pop())
+                    id == 0x13 -> st.add("-" + pop())
+                    id == 0x14 -> st.add(pop() + "%")
+                    id == 0x15 -> st.add("(" + pop() + ")")
+                    id == 0x16 -> st.add("")
+                    id == 0x17 -> {
+                        val cch = b[p].toInt() and 0xFF
+                        val hi = (b[p + 1].toInt() and 1) != 0
+                        val s = if (hi) String(b, p + 2, cch * 2, Charsets.UTF_16LE) else String(b, p + 2, cch, Charsets.ISO_8859_1)
+                        st.add("\"" + s.replace("\"", "\"\"") + "\"")
+                        p += 2 + if (hi) cch * 2 else cch
+                    }
+                    id == 0x19 -> {
+                        val grbit = b[p].toInt() and 0xFF
+                        if ((grbit and 0x04) != 0) return null
+                        if ((grbit and 0x10) != 0) st.add("SUM(" + pop() + ")")
+                        p += 3
+                    }
+                    id == 0x1C -> { st.add("#ERR!"); p++ }
+                    id == 0x1D -> { st.add(if (b[p].toInt() != 0) "TRUE" else "FALSE"); p++ }
+                    id == 0x1E -> { st.add(u16(b, p).toString()); p += 2 }
+                    id == 0x1F -> {
+                        var bits = 0L
+                        for (k in 7 downTo 0) bits = (bits shl 8) or (b[p + k].toLong() and 0xFF)
+                        st.add(ExcelNumberFormat.general(Double.fromBits(bits)).replace(ExcelNumberFormat.decimalSeparator, '.').replace("E+", "E"))
+                        p += 8
+                    }
+                    id >= 0x20 -> {
+                        when ((id and 0x1F) or 0x20) {
+                            0x21 -> {
+                                val f = u16(b, p); p += 2
+                                val (name, n) = FTAB[f] ?: return null
+                                if (n < 0) return null
+                                val args = List(n) { pop() }.reversed()
+                                st.add(name + "(" + args.joinToString(",") + ")")
+                            }
+                            0x22 -> {
+                                val n = b[p].toInt() and 0x7F
+                                val f = u16(b, p + 1) and 0x7FFF
+                                p += 3
+                                val args = List(n) { pop() }.reversed()
+                                if (f == 255) {
+                                    val fn = args.firstOrNull()?.takeIf { it.startsWith("@") }?.substring(1) ?: return null
+                                    st.add(fn + "(" + args.drop(1).joinToString(",") + ")")
+                                } else {
+                                    val name = FTAB[f]?.first ?: return null
+                                    st.add(name + "(" + args.joinToString(",") + ")")
+                                }
+                            }
+                            0x39 -> {
+                                val ixti = u16(b, p); val iname = u16(b, p + 2)
+                                p += 6
+                                val n = names?.invoke(ixti, iname) ?: return null
+                                st.add("@" + n)
+                            }
+                            0x24, 0x2C -> {
+                                val rw = u16(b, p)
+                                val cf = u16(b, p + 2)
+                                p += 4
+                                val rowRel = (cf and 0x8000) != 0
+                                val colRel = (cf and 0x4000) != 0
+                                val rel = ((id and 0x1F) or 0x20) == 0x2C
+                                val row = if (rel && rowRel) top + rw.toShort().toInt() else rw
+                                val col = if (rel && colRel) left + (cf and 0xFF).toByte().toInt() else cf and 0x3FFF
+                                st.add(ref(row, col, rowRel, colRel))
+                            }
+                            0x25, 0x2D -> {
+                                val r0 = u16(b, p); val r1 = u16(b, p + 2); val c0 = u16(b, p + 4); val c1 = u16(b, p + 6)
+                                p += 8
+                                val rel = ((id and 0x1F) or 0x20) == 0x2D
+                                fun rr(v: Int, flag: Int) = if (rel && (flag and 0x8000) != 0) top + v.toShort().toInt() else v
+                                fun cc(v: Int) = if (rel && (v and 0x4000) != 0) left + (v and 0xFF).toByte().toInt() else v and 0x3FFF
+                                st.add(ref(rr(r0, c0), cc(c0), (c0 and 0x8000) != 0, (c0 and 0x4000) != 0) + ":" + ref(rr(r1, c1), cc(c1), (c1 and 0x8000) != 0, (c1 and 0x4000) != 0))
+                            }
+                            0x2A -> { st.add("#REF!"); p += 4 }
+                            else -> return null
+                        }
+                    }
+                    else -> return null
+                }
+            }
+        } catch (_: Exception) {
+            return null
+        }
+        return st.singleOrNull()
     }
 }

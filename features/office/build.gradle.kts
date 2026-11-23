@@ -18,7 +18,7 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
  */
 
 plugins {
-    alias(libs.plugins.android.dynamic.feature)
+    alias(libs.plugins.android.library)
 }
 
 android {
@@ -34,16 +34,6 @@ android {
         sourceCompatibility = JavaVersion.VERSION_25
         targetCompatibility = JavaVersion.VERSION_25
     }
-
-    flavorDimensions += "distribution"
-    productFlavors {
-        create("googlePlay") {
-            dimension = "distribution"
-        }
-        create("standalone") {
-            dimension = "distribution"
-        }
-    }
 }
 
 kotlin {
@@ -53,7 +43,6 @@ kotlin {
 }
 
 dependencies {
-    implementation(project(":app"))
     implementation(project(":core:engine-api"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.collection)

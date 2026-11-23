@@ -18,24 +18,8 @@
 package me.hlebkukleuski.fullfilestudio.bootstrap
 
 import android.content.Context
-import android.os.Handler
-import android.os.Looper
-import com.google.android.play.core.splitcompat.SplitCompat
-import com.google.android.play.core.splitinstall.SplitInstallException
-import com.google.android.play.core.splitinstall.SplitInstallManager
-import com.google.android.play.core.splitinstall.SplitInstallManagerFactory
-import com.google.android.play.core.splitinstall.SplitInstallRequest
-import com.google.android.play.core.splitinstall.SplitInstallSessionState
-import com.google.android.play.core.splitinstall.SplitInstallStateUpdatedListener
-import com.google.android.play.core.splitinstall.model.SplitInstallSessionStatus
 import com.omnireader.core.engine.DetectedFormat
-import dalvik.system.PathClassLoader
-import me.hlebkukleuski.fullfilestudio.BuildConfig
-import java.io.File
 import java.util.Locale
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicInteger
 
 data class PlayFeatureBundle(
     val id: String,
@@ -49,10 +33,7 @@ data class PlayFeatureBundle(
 
 class PlayFeaturePluginManager(private val context: Context) {
 
-    private val splitInstallManager: SplitInstallManager = SplitInstallManagerFactory.create(context)
     private val prefs = context.getSharedPreferences("play_feature_prefs", Context.MODE_PRIVATE)
-    private val mainHandler = Handler(Looper.getMainLooper())
-    private val splitClassLoaders = ConcurrentHashMap<String, ClassLoader>()
 
     val availableBundles = listOf(
         PlayFeatureBundle(
@@ -113,9 +94,7 @@ class PlayFeaturePluginManager(private val context: Context) {
     )
 
     init {
-        if (BuildConfig.ALLOW_CUSTOM_SERVER_DOWNLOADS) {
-            markModulesInstalledSynchronously(availableBundles.map { it.id })
-        }
+        markModulesInstalledSynchronously(availableBundles.map { it.id })
     }
 
     private fun factoryClassNameForModule(moduleName: String): String? = when (moduleName) {
@@ -127,113 +106,21 @@ class PlayFeaturePluginManager(private val context: Context) {
 
     fun isFactoryClassAvailable(moduleName: String): Boolean {
         val className = factoryClassNameForModule(moduleName) ?: return false
-
-        val candidateLoaders = listOfNotNull(
-            splitClassLoaders[moduleName],
-            context.classLoader,
-            PlayFeaturePluginManager::class.java.classLoader,
-            Thread.currentThread().contextClassLoader
-        )
-        for (loader in candidateLoaders) {
-            try {
-                Class.forName(className, false, loader)
-                return true
-            } catch (_: Throwable) {}
-        }
-
-        try {
-            val splitCtx = context.createContextForSplit(moduleName)
-            val splitLoader = splitCtx.classLoader
-            if (splitLoader != null) {
-                Class.forName(className, false, splitLoader)
-                splitClassLoaders[moduleName] = splitLoader
-                return true
-            }
-        } catch (_: Throwable) {}
-
-        try {
-            val appInfo = context.applicationInfo
-            val splitDirs = appInfo.splitSourceDirs
-            if (!splitDirs.isNullOrEmpty()) {
-                for (splitPath in splitDirs) {
-                    val fileName = File(splitPath).name.lowercase(Locale.ROOT)
-                    if (fileName.contains(moduleName.lowercase(Locale.ROOT)) || splitDirs.size <= 6) {
-                        try {
-                            val loader = splitClassLoaders.getOrPut(splitPath) {
-                                PathClassLoader(splitPath, appInfo.nativeLibraryDir, context.classLoader)
-                            }
-                            Class.forName(className, false, loader)
-                            splitClassLoaders[moduleName] = loader
-                            return true
-                        } catch (_: Throwable) {}
-                    }
-                }
-            }
-        } catch (_: Throwable) {}
-
         return try {
-            SplitCompat.install(context)
             Class.forName(className, false, context.classLoader)
             true
         } catch (_: Throwable) {
-            try {
-                val pkgCtx = context.createPackageContext(
-                    context.packageName,
-                    Context.CONTEXT_INCLUDE_CODE or Context.CONTEXT_IGNORE_SECURITY
-                )
-                SplitCompat.install(pkgCtx)
-                Class.forName(className, false, pkgCtx.classLoader)
-                true
-            } catch (_: Throwable) {
-                false
-            }
+            false
         }
     }
 
     private fun markModulesInstalledSynchronously(modules: Collection<String>) {
         val editor = prefs.edit()
         modules.forEach { editor.putBoolean("module_installed_$it", true) }
-        editor.commit()
-        try {
-            SplitCompat.install(context)
-        } catch (_: Throwable) {}
+        editor.apply()
     }
 
-    fun isModuleDownloaded(moduleName: String): Boolean {
-        if (BuildConfig.ALLOW_CUSTOM_SERVER_DOWNLOADS) {
-            if (!prefs.getBoolean("module_installed_$moduleName", false)) {
-                markModulesInstalledSynchronously(listOf(moduleName))
-            } else {
-                try { SplitCompat.install(context) } catch (_: Throwable) {}
-            }
-            return true
-        }
-
-        if (isFactoryClassAvailable(moduleName)) {
-            if (!prefs.getBoolean("module_installed_$moduleName", false)) {
-                markModulesInstalledSynchronously(listOf(moduleName))
-            }
-            return true
-        }
-
-        val isInstalledViaPlay = try {
-            splitInstallManager.installedModules.contains(moduleName)
-        } catch (_: Throwable) {
-            false
-        }
-        val isMarkedInPrefs = prefs.getBoolean("module_installed_$moduleName", false)
-
-        if (isInstalledViaPlay || isMarkedInPrefs) {
-            if (!isMarkedInPrefs) {
-                markModulesInstalledSynchronously(listOf(moduleName))
-            } else {
-                try { SplitCompat.install(context) } catch (_: Throwable) {}
-            }
-            return true
-        }
-
-        return false
-    }
+    fun isModuleDownloaded(@Suppress("UNUSED_PARAMETER") moduleName: String): Boolean = true
 
     fun getBundleForExtension(ext: String): PlayFeatureBundle? {
         val cleanExt = ext.lowercase(Locale.ROOT).trim()
@@ -255,116 +142,11 @@ class PlayFeaturePluginManager(private val context: Context) {
         moduleNames: List<String>,
         onProgress: (Float) -> Unit,
         onSuccess: () -> Unit,
-        onError: (Int) -> Unit
+        @Suppress("UNUSED_PARAMETER") onError: (Int) -> Unit
     ) {
-        if (BuildConfig.ALLOW_CUSTOM_SERVER_DOWNLOADS) {
-            markModulesInstalledSynchronously(moduleNames)
-            onProgress(1.0f)
-            onSuccess()
-            return
-        }
-
-        val missing = moduleNames.filter { !isModuleDownloaded(it) }
-        if (missing.isEmpty()) {
-            markModulesInstalledSynchronously(moduleNames)
-            onProgress(1.0f)
-            onSuccess()
-            return
-        }
-
-        downloadViaGooglePlaySplitInstall(missing, onProgress, onSuccess, onError)
-    }
-
-    private fun downloadViaGooglePlaySplitInstall(
-        missing: List<String>,
-        onProgress: (Float) -> Unit,
-        onSuccess: () -> Unit,
-        onError: (Int) -> Unit
-    ) {
-        val mySessionId = AtomicInteger(-1)
-        val isCompleted = AtomicBoolean(false)
-        val requestedSet = missing.toSet()
-        var listener: SplitInstallStateUpdatedListener? = null
-
-        listener = SplitInstallStateUpdatedListener { state: SplitInstallSessionState ->
-            val currentSessionId = mySessionId.get()
-            val matchesSession = (currentSessionId >= 0 && state.sessionId() == currentSessionId) ||
-                    (currentSessionId == -1 && state.moduleNames().containsAll(requestedSet))
-
-            if (matchesSession && !isCompleted.get()) {
-                when (state.status()) {
-                    SplitInstallSessionStatus.DOWNLOADING, SplitInstallSessionStatus.INSTALLING -> {
-                        val total = state.totalBytesToDownload()
-                        val downloaded = state.bytesDownloaded()
-                        val progress = if (total > 0) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 0.99f) else 0.5f
-                        onProgress(progress)
-                    }
-                    SplitInstallSessionStatus.INSTALLED -> {
-                        if (isCompleted.compareAndSet(false, true)) {
-                            listener?.let { splitInstallManager.unregisterListener(it) }
-                            markModulesInstalledSynchronously(missing)
-                            onProgress(1.0f)
-                            onSuccess()
-                        }
-                    }
-                    SplitInstallSessionStatus.FAILED -> {
-                        if (isCompleted.compareAndSet(false, true)) {
-                            listener?.let { splitInstallManager.unregisterListener(it) }
-                            if (missing.all { isFactoryClassAvailable(it) }) {
-                                markModulesInstalledSynchronously(missing)
-                                onProgress(1.0f)
-                                onSuccess()
-                            } else {
-                                onError(state.errorCode())
-                            }
-                        }
-                    }
-                    SplitInstallSessionStatus.CANCELED, SplitInstallSessionStatus.CANCELING -> {
-                        if (isCompleted.compareAndSet(false, true)) {
-                            listener?.let { splitInstallManager.unregisterListener(it) }
-                            onError(-1)
-                        }
-                    }
-                    else -> {}
-                }
-            }
-        }
-
-        splitInstallManager.registerListener(listener)
-
-        val request = SplitInstallRequest.newBuilder().apply {
-            missing.forEach { addModule(it) }
-        }.build()
-
-        splitInstallManager.startInstall(request)
-            .addOnSuccessListener { sessionId ->
-                mySessionId.set(sessionId)
-                if (sessionId == 0 && isCompleted.compareAndSet(false, true)) {
-                    listener?.let { splitInstallManager.unregisterListener(it) }
-                    markModulesInstalledSynchronously(missing)
-                    onProgress(1.0f)
-                    onSuccess()
-                }
-            }
-            .addOnFailureListener { exception ->
-                if (missing.all { isFactoryClassAvailable(it) } &&
-                    isCompleted.compareAndSet(false, true)
-                ) {
-                    listener?.let { splitInstallManager.unregisterListener(it) }
-                    markModulesInstalledSynchronously(missing)
-                    mainHandler.post {
-                        onProgress(0.65f)
-                    }
-                    mainHandler.postDelayed({
-                        onProgress(1.0f)
-                        onSuccess()
-                    }, 150)
-                } else if (isCompleted.compareAndSet(false, true)) {
-                    listener?.let { splitInstallManager.unregisterListener(it) }
-                    val errorCode = if (exception is SplitInstallException) exception.errorCode else -1
-                    onError(errorCode)
-                }
-            }
+        markModulesInstalledSynchronously(moduleNames)
+        onProgress(1.0f)
+        onSuccess()
     }
 
     fun isFirstLaunchCompleted(): Boolean = prefs.getBoolean("first_launch_complete", false)

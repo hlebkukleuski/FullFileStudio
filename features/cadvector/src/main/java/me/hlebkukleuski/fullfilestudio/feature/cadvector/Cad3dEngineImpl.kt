@@ -34,8 +34,6 @@ import com.omnireader.core.engine.PackedTileKey
 import com.omnireader.core.engine.impl.Gles30MeshRenderer
 import com.omnireader.core.engine.impl.Gles30OffscreenContext
 import org.json.JSONObject
-import org.xmlpull.v1.XmlPullParser
-import org.xmlpull.v1.XmlPullParserFactory
 import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.ByteArrayInputStream
@@ -44,19 +42,17 @@ import java.io.FileDescriptor
 import java.io.IOException
 import java.io.InputStream
 import java.io.InputStreamReader
-import java.io.StringReader
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets
 import java.util.Locale
-import java.util.zip.GZIPInputStream
-import java.util.zip.Inflater
 import java.util.zip.ZipInputStream
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.roundToInt
 import kotlin.math.sin
 import kotlin.math.sqrt
 
@@ -100,7 +96,7 @@ class Cad3dEngineImpl : FileEngineProvider {
         if (ext in setOf(
                 "stl", "obj", "dxf", "dwg", "ply", "off", "3ds",
                 "gltf", "glb", "blend", "usdz", "usd", "usda", "usdc", "fbx",
-                "3mf", "dae", "step", "stp", "iges", "igs"
+                "3mf", "dae", "zae", "step", "stp", "iges", "igs"
             )
         ) return true
         if (signature.size >= 6 &&
@@ -142,16 +138,17 @@ class Cad3dEngineImpl : FileEngineProvider {
         return Stl3dMeshSession(pfd, "unknown")
     }
 
-    fun createSessionForFormat(fd: FileDescriptor, extension: String): DocumentSession {
+    fun createSessionForFormat(fd: FileDescriptor, extension: String, password: String? = null): DocumentSession {
         val pfd = ParcelFileDescriptor.dup(fd)
-        return Stl3dMeshSession(pfd, extension)
+        return Stl3dMeshSession(pfd, extension, password)
     }
 }
 
 class Stl3dMeshSession(
     private val pfd: ParcelFileDescriptor,
-    private val originalExtension: String
-) : DocumentSession {
+    private val originalExtension: String,
+    private val password: String? = null
+) : DocumentSession, com.omnireader.core.engine.MeshSceneSource {
     @Volatile private var isClosed = false
     @Volatile private var lastErrorMsg: String? = null
     @Volatile private var isGeometryTruncated = false
@@ -171,17 +168,37 @@ class Stl3dMeshSession(
 
     internal data class DxfPoint3D(val x: Float, val y: Float, val z: Float)
 
-    private data class BlendBlock(
-        val code: String,
-        val dataOffset: Int,
-        val len: Int,
-        val sdnaIndex: Int,
-        val count: Int
-    )
-
     private var rawVertices = FloatArray(30_000)
     private var polyColors = IntArray(3_500)
     private var vertexCount = 0
+    private var triUvs: FloatArray? = null
+    private var triTex: IntArray? = null
+    private var cornerColors: IntArray? = null
+    private var cornerNormals: FloatArray? = null
+    private var triNormalTex: IntArray? = null
+    private var triBone: IntArray? = null
+    private var skinOffsets: IntArray? = null
+    private var skinJointsArr = IntArray(0)
+    private var skinWeightsArr = FloatArray(0)
+    private var skinBindArr = FloatArray(0)
+    private var skinBindNrmArr = FloatArray(0)
+    private var skinHasNormals = false
+    private var skinCount = 0
+    private var skinK = 4
+    private var skinDqArr = IntArray(0)
+    private var skinHasDq = false
+    private var morphPolyArr = IntArray(0)
+    private var morphTargetArr = IntArray(0)
+    private var morphDeltaArr = FloatArray(0)
+    private var morphNormalArr = FloatArray(0)
+    private var morphHasNormals = false
+    private var morphEntries = 0
+    private var animClip: AnimClip? = null
+    private val textures = ArrayList<Bitmap>()
+    private val textureKeys = HashMap<String, Int>()
+    private var textureBudgetPixels = initialTextureBudget()
+
+    private fun initialTextureBudget(): Long = (Runtime.getRuntime().maxMemory() / 16L).coerceIn(4L * 1024L * 1024L, 48L * 1024L * 1024L)
     private val textLabels = mutableListOf<CadTextLabel3D>()
     private var dxfEmittedOpsCount = 0
     private var dwgPreviewBitmap: Bitmap? = null
@@ -197,18 +214,6 @@ class Stl3dMeshSession(
     private val maxPolygonsLimit: Int = computeDynamicPolygonLimit()
     private val maxVertexFloats: Int = maxPolygonsLimit * 9
 
-    private val paint = Paint().apply {
-        isAntiAlias = true
-        style = Paint.Style.FILL
-        typeface = android.graphics.Typeface.SANS_SERIF
-    }
-    private val textLabelPaint = Paint().apply {
-        isAntiAlias = true
-        style = Paint.Style.FILL
-        color = Color.parseColor("#89B4FA")
-        typeface = android.graphics.Typeface.SANS_SERIF
-    }
-    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
 
     companion object {
         private const val MAX_INSERT_DEPTH = 8
@@ -262,50 +267,6 @@ class Stl3dMeshSession(
                 else -> 0
             }
         }
-
-        private fun formatLocalizedHudStatus(
-            langOrdinal: Int,
-            modelType: String,
-            polyCount: Int,
-            isTruncated: Boolean,
-            maxLimit: Int
-        ): String {
-            val localizedModelType = when (modelType) {
-                "Binary STL" -> when (langOrdinal) {
-                    1 -> "Бинарный STL"
-                    2 -> "Binäres STL"
-                    3 -> "STL binario"
-                    4 -> "STL binaire"
-                    5 -> "Binarny STL"
-                    6 -> "Бінарний STL"
-                    7 -> "二进制 STL"
-                    else -> "Binary STL"
-                }
-                else -> modelType
-            }
-            val polygonsWord = when (langOrdinal) {
-                1 -> "Полигоны"
-                2 -> "Polygone"
-                3 -> "Polígonos"
-                4 -> "Polygones"
-                5 -> "Wielokąty"
-                6 -> "Полігони"
-                7 -> "多边形"
-                else -> "Polygons"
-            }
-            val maxWord = when (langOrdinal) {
-                1 -> "Макс."
-                2 -> "Max."
-                3 -> "Máx."
-                4 -> "Max."
-                5 -> "Maks."
-                6 -> "Макс."
-                7 -> "最大"
-                else -> "Max"
-            }
-            val limitBadge = if (isTruncated) " | ⚠ $maxWord $maxLimit" else ""
-            return "3D/CAD: $localizedModelType | $polygonsWord: $polyCount$limitBadge"
-        }
     }
 
     private fun resolveDescriptorFileSize(): Long {
@@ -343,7 +304,105 @@ class Stl3dMeshSession(
         return readDescriptorSliceAt(0L, cap)
     }
 
-    init {
+    private val companionFiles = HashMap<String, ByteArray>()
+    private val missingResources = LinkedHashSet<String>()
+
+    private fun normalizeResourceRef(ref: String): String {
+        val decoded = try { java.net.URLDecoder.decode(ref.replace("+", "%2B"), "UTF-8") } catch (_: Throwable) { ref }
+        var n = decoded.replace('\\', '/').trim().trim('"')
+        while (n.startsWith("./")) n = n.substring(2)
+        n = n.removePrefix("file://").removePrefix("file:")
+        return n.lowercase(Locale.ROOT)
+    }
+
+    private fun companionResource(ref: String): ByteArray? {
+        if (ref.isBlank()) return null
+        val n = normalizeResourceRef(ref)
+        companionFiles[n]?.let { return it }
+        companionFiles[n.substringAfterLast('/')]?.let { return it }
+        val original = try { java.net.URLDecoder.decode(ref.replace("+", "%2B"), "UTF-8") } catch (_: Throwable) { ref }
+        missingResources.add(original.replace('\\', '/').trim().removePrefix("./"))
+        return null
+    }
+
+    private fun companionResourceQuiet(ref: String): ByteArray? {
+        val n = normalizeResourceRef(ref)
+        return companionFiles[n] ?: companionFiles[n.substringAfterLast('/')]
+    }
+
+    @Synchronized
+    override fun getMissingResources(): List<String> = missingResources.toList()
+
+    @Synchronized
+    override fun provideResource(name: String, fd: java.io.FileDescriptor): Boolean {
+        if (isClosed) return false
+        val bytes = try {
+            val size = try { Os.fstat(fd).st_size } catch (_: Throwable) { -1L }
+            if (size > 512L * 1024L * 1024L) return false
+            java.io.FileInputStream(fd).use { it.readBytes() }
+        } catch (_: Throwable) {
+            return false
+        }
+        val n = normalizeResourceRef(name)
+        val base = n.substringAfterLast('/')
+        val wanted = missingResources.any { normalizeResourceRef(it).let { m -> m == n || m.substringAfterLast('/') == base } }
+        if (!wanted) return false
+        companionFiles[n] = bytes
+        companionFiles[base] = bytes
+        return true
+    }
+
+    @Synchronized
+    override fun applyProvidedResources(): Boolean {
+        if (isClosed) return false
+        resetModel()
+        parseModel()
+        return vertexCount > 0
+    }
+
+    private fun resetModel() {
+        rawVertices = FloatArray(30_000)
+        polyColors = IntArray(3_500)
+        vertexCount = 0
+        triUvs = null
+        triTex = null
+        cornerColors = null
+        cornerNormals = null
+        triNormalTex = null
+        triBone = null
+        skinOffsets = null
+        skinJointsArr = IntArray(0)
+        skinWeightsArr = FloatArray(0)
+        skinBindArr = FloatArray(0)
+        skinBindNrmArr = FloatArray(0)
+        skinHasNormals = false
+        skinCount = 0
+        skinK = 4
+        skinDqArr = IntArray(0)
+        skinHasDq = false
+        morphPolyArr = IntArray(0)
+        morphTargetArr = IntArray(0)
+        morphDeltaArr = FloatArray(0)
+        morphNormalArr = FloatArray(0)
+        morphHasNormals = false
+        morphEntries = 0
+        animClip = null
+        textures.forEach { if (!it.isRecycled) it.recycle() }
+        textures.clear()
+        textureKeys.clear()
+        textureBudgetPixels = initialTextureBudget()
+        textLabels.clear()
+        usesDraco = false
+        dxfEmittedOpsCount = 0
+        isGeometryTruncated = false
+        lastErrorMsg = null
+        missingResources.clear()
+        minX = Float.MAX_VALUE; maxX = -Float.MAX_VALUE
+        minY = Float.MAX_VALUE; maxY = -Float.MAX_VALUE
+        minZ = Float.MAX_VALUE; maxZ = -Float.MAX_VALUE
+    }
+
+    private fun parseModel() {
         try {
             val header = readDescriptorSliceAt(0L, 1024)
             val readBytes = header.size
@@ -381,12 +440,17 @@ class Stl3dMeshSession(
                         headerStr.startsWith("; fbx") ||
                         (headerStr.contains("fbxheaderextension") && headerStr.contains("objects:")) ||
                         extLower == "fbx"
-                val isColladaMagic = headerStr.contains("<collada") || extLower == "dae"
+                val isColladaMagic = headerStr.contains("<collada") || extLower == "dae" || extLower == "zae"
                 val is3mfMagic = extLower == "3mf"
                 val isStepMagic = headerStr.startsWith("iso-10303-21;") ||
                         (headerStr.contains("iso-10303-21;") && headerStr.contains("header;")) ||
                         extLower in setOf("step", "stp")
-                val isIgesMagic = extLower in setOf("iges", "igs")
+                val firstIgesLine = String(header, 0, readBytes, StandardCharsets.US_ASCII)
+                    .lineSequence().firstOrNull { it.isNotEmpty() }?.trimEnd('\r')
+                val isIgesMagic = extLower in setOf("iges", "igs") ||
+                        (firstIgesLine != null && firstIgesLine.length == 80 &&
+                                (firstIgesLine[72] == 'S' || firstIgesLine[72] == 's') &&
+                                firstIgesLine.substring(73).trim().let { it.isNotEmpty() && it.all(Char::isDigit) })
 
                 val isVerifiedBinaryStlSize = if (readBytes >= 84 && exactFileSize >= 134L) {
                     val triCount = ByteBuffer.wrap(header, 80, 4).order(ByteOrder.LITTLE_ENDIAN).int.toLong() and 0xFFFFFFFFL
@@ -411,11 +475,19 @@ class Stl3dMeshSession(
                         modelType = "USDZ / USD 3D"
                         parseUsdOrUsdzCleanRoom()
                     }
+                    isZipMagic && extLower == "zae" -> {
+                        modelType = "COLLADA (ZAE)"
+                        parseColladaDaeCleanRoom()
+                    }
                     isZipMagic -> {
                         // Inspect ZIP container: could be 3MF or USDZ opened without extension
                         parse3mfCleanRoom()
                         if (vertexCount == 0) {
                             parseUsdOrUsdzCleanRoom()
+                        }
+                        if (vertexCount == 0) {
+                            modelType = "COLLADA (ZAE)"
+                            parseColladaDaeCleanRoom()
                         }
                     }
                     isGlbMagic || isGltfJson || extLower in setOf("glb", "gltf") -> {
@@ -485,11 +557,15 @@ class Stl3dMeshSession(
                     }
                 }
             }
+        } catch (e: SecurityException) {
+            lastErrorMsg = e.message
         } catch (e: Exception) {
             lastErrorMsg = "Ошибка разбора 3D/CAD модели: ${e.localizedMessage}"
         }
 
-        if (vertexCount == 0 && textLabels.isEmpty() && dwgPreviewBitmap == null && lastErrorMsg == null) {
+        if (vertexCount == 0 && missingResources.isNotEmpty()) {
+            lastErrorMsg = null
+        } else if (vertexCount == 0 && textLabels.isEmpty() && dwgPreviewBitmap == null && lastErrorMsg == null) {
             lastErrorMsg = "Модель $modelType пуста, повреждена или не содержит поддерживаемой геометрии."
         }
     }
@@ -887,84 +963,491 @@ class Stl3dMeshSession(
     /**
      * Clean-Room parser for Autodesk 3D Studio `.3ds` binary mesh chunks (`0x4D4D` -> `0x3D3D` -> `0x4000` -> `0x4100` -> `0x4110` vertices & `0x4120` faces).
      */
+    private class Mat3ds(var name: String = "", var color: Int = 0, var alpha: Float = 1f, var texture: String? = null,
+                         var uScale: Float = 1f, var vScale: Float = 1f, var uOff: Float = 0f, var vOff: Float = 0f, var bump: String? = null)
+
+    private class Track3ds(val frames: IntArray, val values: Array<FloatArray>)
+
+    private class Mesh3ds(val name: String) {
+        var verts = FloatArray(0)
+        var uvs: FloatArray? = null
+        var faces = IntArray(0)
+        var smoothing: IntArray? = null
+        val faceMaterials = ArrayList<Pair<String, IntArray>>()
+        var matrix: FloatArray? = null
+    }
+
+    private class Node3ds(var name: String, var parent: Int, val id: Int) {
+        var instance: String? = null
+        var pivot = floatArrayOf(0f, 0f, 0f)
+        var pos: FloatArray? = null
+        var rot: FloatArray? = null
+        var scl: FloatArray? = null
+        var posKeys: Track3ds? = null
+        var rotKeys: Track3ds? = null
+        var sclKeys: Track3ds? = null
+    }
+
     private fun parse3dsCleanRoom(fileSize: Long) {
-        val limit = if (fileSize > 0L) fileSize else 128L * 1024L * 1024L
-        if (limit < 16L) return
-        val hdrBuf = ByteBuffer.allocateDirect(6).order(ByteOrder.LITTLE_ENDIAN)
-        var currentMeshVerts: FloatArray? = null
-        var currentMeshVertCount = 0
+        if (fileSize > 256L * 1024L * 1024L) {
+            lastErrorMsg = "Файл 3DS слишком большой для загрузки."
+            return
+        }
+        val bytes = readDescriptorBytes(256 * 1024 * 1024)
+        if (bytes.size < 16) return
+        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+        val materials = HashMap<String, Mat3ds>()
+        val meshes = ArrayList<Mesh3ds>()
+        val nodes = ArrayList<Node3ds>()
 
-        fun walk3dsChunksPread(start: Long, endLimit: Long, depth: Int) {
-            if (depth > 16) return
-            var pos = start
-            while (pos + 6L <= endLimit && !isGeometryTruncated) {
-                hdrBuf.clear()
-                if (try { Os.pread(pfd.fileDescriptor, hdrBuf, pos) } catch (_: Throwable) { 0 } < 6) break
-                hdrBuf.flip()
-                val chunkId = hdrBuf.short.toInt() and 0xFFFF
-                val chunkLen = hdrBuf.int.toLong() and 0xFFFFFFFFL
-                if (chunkLen < 6L) break
-                val nextPos = minOf(endLimit, pos + chunkLen)
-                val dataPos = pos + 6L
+        fun cstr(at: Int, end: Int): Pair<String, Int> {
+            var k = at
+            while (k < end && bytes[k].toInt() != 0) k++
+            return String(bytes, at, k - at, Charsets.ISO_8859_1) to minOf(k + 1, end)
+        }
 
-                when (chunkId) {
-                    0x4D4D, 0x3D3D, 0x4100 -> walk3dsChunksPread(dataPos, nextPos, depth + 1)
-                    0x4000 -> {
-                        val nameProbe = readDescriptorSliceAt(dataPos, minOf(256L, nextPos - dataPos).toInt())
-                        var strLen = 0
-                        while (strLen < nameProbe.size && nameProbe[strLen].toInt() != 0) strLen++
-                        if (dataPos + strLen + 1L < nextPos) {
-                            walk3dsChunksPread(dataPos + strLen + 1L, nextPos, depth + 1)
-                        }
-                    }
-                    0x4110 -> {
-                        val payloadLen = (nextPos - dataPos).coerceAtMost(24 * 1024 * 1024L).toInt()
-                        if (payloadLen >= 2) {
-                            val chunkBytes = readDescriptorSliceAt(dataPos, payloadLen)
-                            val bb = ByteBuffer.wrap(chunkBytes).order(ByteOrder.LITTLE_ENDIAN)
-                            val vCount = (bb.getShort(0).toInt() and 0xFFFF).coerceIn(0, (chunkBytes.size - 2) / 12)
-                            val coords = FloatArray(vCount * 3)
-                            for (i in 0 until vCount) {
-                                val base = 2 + i * 12
-                                coords[i * 3] = bb.getFloat(base)
-                                coords[i * 3 + 1] = bb.getFloat(base + 4)
-                                coords[i * 3 + 2] = bb.getFloat(base + 8)
-                            }
-                            currentMeshVerts = coords
-                            currentMeshVertCount = vCount
-                        }
-                    }
-                    0x4120 -> {
-                        val verts = currentMeshVerts
-                        val vCount = currentMeshVertCount
-                        val payloadLen = (nextPos - dataPos).coerceAtMost(24 * 1024 * 1024L).toInt()
-                        if (verts != null && vCount > 0 && payloadLen >= 2) {
-                            val chunkBytes = readDescriptorSliceAt(dataPos, payloadLen)
-                            val bb = ByteBuffer.wrap(chunkBytes).order(ByteOrder.LITTLE_ENDIAN)
-                            val fCount = (bb.getShort(0).toInt() and 0xFFFF).coerceIn(0, (chunkBytes.size - 2) / 8)
-                            for (i in 0 until fCount) {
-                                val base = 2 + i * 8
-                                val i0 = bb.getShort(base).toInt() and 0xFFFF
-                                val i1 = bb.getShort(base + 2).toInt() and 0xFFFF
-                                val i2 = bb.getShort(base + 4).toInt() and 0xFFFF
-                                if (i0 in 0 until vCount && i1 in 0 until vCount && i2 in 0 until vCount) {
-                                    val b0 = i0 * 3; val b1 = i1 * 3; val b2 = i2 * 3
-                                    addTriangle(
-                                        verts[b0], verts[b0 + 1], verts[b0 + 2],
-                                        verts[b1], verts[b1 + 1], verts[b1 + 2],
-                                        verts[b2], verts[b2 + 1], verts[b2 + 2]
-                                    )
-                                }
-                            }
-                        }
-                    }
+        fun readColor(start: Int, end: Int): Int? {
+            var p = start
+            var linear: Int? = null
+            var gamma: Int? = null
+            while (p + 6 <= end) {
+                val id = bb.getShort(p).toInt() and 0xFFFF
+                val len = bb.getInt(p + 2)
+                if (len < 6 || p + len > end) break
+                val d = p + 6
+                val c = when (id) {
+                    0x0010, 0x0013 -> if (d + 12 <= p + len) Color.rgb((bb.getFloat(d).coerceIn(0f, 1f) * 255).roundToInt(), (bb.getFloat(d + 4).coerceIn(0f, 1f) * 255).roundToInt(), (bb.getFloat(d + 8).coerceIn(0f, 1f) * 255).roundToInt()) else null
+                    0x0011, 0x0012 -> if (d + 3 <= p + len) Color.rgb(bytes[d].toInt() and 0xFF, bytes[d + 1].toInt() and 0xFF, bytes[d + 2].toInt() and 0xFF) else null
+                    else -> null
                 }
-                if (nextPos <= pos) break
-                pos = nextPos
+                if (c != null) {
+                    if (id == 0x0012 || id == 0x0013) gamma = c else if (linear == null) linear = c
+                }
+                p += len
+            }
+            return gamma ?: linear
+        }
+
+        fun readPercent(start: Int, end: Int): Float? {
+            if (start + 6 > end) return null
+            val id = bb.getShort(start).toInt() and 0xFFFF
+            return when (id) {
+                0x0030 -> (bb.getShort(start + 6).toInt()) / 100f
+                0x0031 -> bb.getFloat(start + 6) / 100f
+                else -> null
             }
         }
 
-        walk3dsChunksPread(0L, limit, 0)
+        fun readTrack(d: Int, end: Int, comps: Int): FloatArray? {
+            if (d + 14 > end) return null
+            val nkeys = bb.getInt(d + 10)
+            var p = d + 14
+            if (nkeys <= 0) return null
+            p += 4
+            if (p + 2 > end) return null
+            val flags = bb.getShort(p).toInt() and 0xFFFF
+            p += 2
+            for (bit in 0 until 5) if (flags and (1 shl bit) != 0) p += 4
+            if (p + comps * 4 > end) return null
+            return FloatArray(comps) { bb.getFloat(p + it * 4) }
+        }
+
+        fun readTrackKeys(d: Int, end: Int, comps: Int): Track3ds? {
+            if (d + 14 > end) return null
+            val nkeys = bb.getInt(d + 10)
+            if (nkeys <= 0 || nkeys > 100_000) return null
+            var p = d + 14
+            val frames = ArrayList<Int>()
+            val values = ArrayList<FloatArray>()
+            for (k in 0 until nkeys) {
+                if (p + 6 > end) break
+                val frame = bb.getInt(p)
+                p += 4
+                val flags = bb.getShort(p).toInt() and 0xFFFF
+                p += 2
+                for (bit in 0 until 5) if (flags and (1 shl bit) != 0) p += 4
+                if (p + comps * 4 > end) break
+                val start = p
+                values.add(FloatArray(comps) { bb.getFloat(start + it * 4) })
+                frames.add(frame)
+                p += comps * 4
+            }
+            if (values.isEmpty()) return null
+            return Track3ds(frames.toIntArray(), values.toTypedArray())
+        }
+
+        var segStart = 0
+        var segEnd = -1
+
+        fun walk(start: Int, end: Int, depth: Int, mesh: Mesh3ds?, mat: Mat3ds?, node: Node3ds?) {
+            if (depth > 16) return
+            var p = start
+            while (p + 6 <= end && !isGeometryTruncated) {
+                val id = bb.getShort(p).toInt() and 0xFFFF
+                val len = bb.getInt(p + 2).toLong() and 0xFFFFFFFFL
+                if (len < 6) break
+                val next = minOf(end.toLong(), p + len).toInt()
+                val d = p + 6
+                when (id) {
+                    0x4D4D, 0x3D3D, 0xB000 -> walk(d, next, depth + 1, null, null, null)
+                    0xAFFF -> {
+                        val m = Mat3ds()
+                        walk(d, next, depth + 1, null, m, null)
+                        if (m.name.isNotEmpty()) materials[m.name] = m
+                    }
+                    0xA000 -> mat?.name = cstr(d, next).first
+                    0xA020 -> mat?.let { m -> readColor(d, next)?.let { m.color = it } }
+                    0xA050 -> mat?.let { m -> readPercent(d, next)?.let { m.alpha = (1f - it).coerceIn(0f, 1f) } }
+                    0xA200 -> walk(d, next, depth + 1, null, mat, null)
+                    0xA230 -> if (mat != null) {
+                        var q = d
+                        while (q + 6 <= next) {
+                            val sid = bb.getShort(q).toInt() and 0xFFFF
+                            val slen = bb.getInt(q + 2)
+                            if (slen < 6 || q + slen > next) break
+                            if (sid == 0xA300) mat.bump = cstr(q + 6, q + slen).first
+                            q += slen
+                        }
+                    }
+                    0xA300 -> mat?.texture = cstr(d, next).first
+                    0xA354 -> if (d + 4 <= next) mat?.uScale = bb.getFloat(d)
+                    0xA356 -> if (d + 4 <= next) mat?.vScale = bb.getFloat(d)
+                    0xA358 -> if (d + 4 <= next) mat?.uOff = bb.getFloat(d)
+                    0xA35A -> if (d + 4 <= next) mat?.vOff = bb.getFloat(d)
+                    0x4000 -> {
+                        val (name, after) = cstr(d, next)
+                        val m = Mesh3ds(name)
+                        walk(after, next, depth + 1, m, null, null)
+                        if (m.verts.isNotEmpty()) meshes.add(m)
+                    }
+                    0x4100 -> walk(d, next, depth + 1, mesh, null, null)
+                    0x4110 -> if (mesh != null && d + 2 <= next) {
+                        val n = (bb.getShort(d).toInt() and 0xFFFF).coerceAtMost((next - d - 2) / 12)
+                        mesh.verts = FloatArray(n * 3) { bb.getFloat(d + 2 + it * 4) }
+                    }
+                    0x4140 -> if (mesh != null && d + 2 <= next) {
+                        val n = (bb.getShort(d).toInt() and 0xFFFF).coerceAtMost((next - d - 2) / 8)
+                        mesh.uvs = FloatArray(n * 2) { bb.getFloat(d + 2 + it * 4) }
+                    }
+                    0x4160 -> if (mesh != null && d + 48 <= next) {
+                        val m = FloatArray(16)
+                        for (c in 0 until 4) for (r in 0 until 3) m[c * 4 + r] = bb.getFloat(d + (c * 3 + r) * 4)
+                        m[15] = 1f
+                        mesh.matrix = m
+                    }
+                    0x4120 -> if (mesh != null && d + 2 <= next) {
+                        val n = (bb.getShort(d).toInt() and 0xFFFF).coerceAtMost((next - d - 2) / 8)
+                        mesh.faces = IntArray(n * 3) { bb.getShort(d + 2 + (it / 3) * 8 + (it % 3) * 2).toInt() and 0xFFFF }
+                        walk(d + 2 + n * 8, next, depth + 1, mesh, null, null)
+                    }
+                    0x4150 -> if (mesh != null) {
+                        val n = mesh.faces.size / 3
+                        if (d + n * 4 <= next) mesh.smoothing = IntArray(n) { bb.getInt(d + it * 4) }
+                    }
+                    0xB008 -> if (d + 8 <= next) {
+                        segStart = bb.getInt(d)
+                        segEnd = bb.getInt(d + 4)
+                    }
+                    0x4130 -> if (mesh != null) {
+                        val (name, after) = cstr(d, next)
+                        if (after + 2 <= next) {
+                            val n = (bb.getShort(after).toInt() and 0xFFFF).coerceAtMost((next - after - 2) / 2)
+                            mesh.faceMaterials.add(name to IntArray(n) { bb.getShort(after + 2 + it * 2).toInt() and 0xFFFF })
+                        }
+                    }
+                    0xB002 -> {
+                        val n = Node3ds("", -1, nodes.size)
+                        walk(d, next, depth + 1, null, null, n)
+                        nodes.add(n)
+                    }
+                    0xB010 -> if (node != null) {
+                        val (name, after) = cstr(d, next)
+                        node.name = name
+                        node.parent = if (after + 6 <= next) bb.getShort(after + 4).toInt() else -1
+                    }
+                    0xB011 -> node?.instance = cstr(d, next).first
+                    0xB013 -> if (node != null && d + 12 <= next) node.pivot = floatArrayOf(bb.getFloat(d), bb.getFloat(d + 4), bb.getFloat(d + 8))
+                    0xB020 -> node?.let { n -> n.pos = readTrack(d, next, 3); n.posKeys = readTrackKeys(d, next, 3) }
+                    0xB021 -> node?.let { n -> n.rot = readTrack(d, next, 4); n.rotKeys = readTrackKeys(d, next, 4) }
+                    0xB022 -> node?.let { n -> n.scl = readTrack(d, next, 3); n.sclKeys = readTrackKeys(d, next, 3) }
+                }
+                if (next <= p) break
+                p = next
+            }
+        }
+
+        walk(0, bytes.size, 0, null, null, null)
+
+        val matTextures = HashMap<String, Int>()
+        fun texOf(m: Mat3ds): Int {
+            val t = m.texture ?: return -1
+            return matTextures.getOrPut(m.name) {
+                val data = companionResource(t)
+                registerTexture("3ds:" + normalizeResourceRef(t), data, m.alpha >= 0.999f)
+            }
+        }
+
+        val matNormals = HashMap<String, Int>()
+        fun normalOf(m: Mat3ds): Int {
+            val t = m.bump ?: return -1
+            return matNormals.getOrPut(m.name) {
+                val data = companionResourceQuiet(t) ?: companionResource(t)
+                if (data != null && NormalMapHeuristic.looksLikeNormalMap(data)) registerNormalTexture("3ds:" + normalizeResourceRef(t), data, false, 1f) else -1
+            }
+        }
+
+        fun axisQuat(r: FloatArray): FloatArray? {
+            val ax = r[1]; val ay = r[2]; val az = r[3]
+            val l = kotlin.math.sqrt(ax * ax + ay * ay + az * az)
+            if (l <= 1e-8f) return null
+            val om = -0.5f * r[0]
+            val sn = kotlin.math.sin(om) / l
+            return floatArrayOf(ax * sn, ay * sn, az * sn, kotlin.math.cos(om))
+        }
+
+        fun quatMul(a: FloatArray, b: FloatArray) = floatArrayOf(
+            a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1],
+            a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0],
+            a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3],
+            a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]
+        )
+
+        fun slerp(a: FloatArray, b0: FloatArray, t: Float): FloatArray {
+            var dot = a[0] * b0[0] + a[1] * b0[1] + a[2] * b0[2] + a[3] * b0[3]
+            val b = if (dot < 0f) { dot = -dot; FloatArray(4) { -b0[it] } } else b0
+            if (dot > 0.9995f) {
+                val r = FloatArray(4) { a[it] + (b[it] - a[it]) * t }
+                val l = kotlin.math.sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2] + r[3] * r[3])
+                return FloatArray(4) { r[it] / l }
+            }
+            val th = kotlin.math.acos(dot.coerceIn(-1f, 1f))
+            val st = kotlin.math.sin(th)
+            val wa = kotlin.math.sin((1 - t) * th) / st
+            val wb = kotlin.math.sin(t * th) / st
+            return FloatArray(4) { wa * a[it] + wb * b[it] }
+        }
+
+        val absRot = HashMap<Int, Array<FloatArray>>()
+        fun absoluteRotations(n: Node3ds): Array<FloatArray>? {
+            val tr = n.rotKeys ?: return null
+            return absRot.getOrPut(n.id) {
+                var acc = floatArrayOf(0f, 0f, 0f, 1f)
+                Array(tr.values.size) { k ->
+                    val q = axisQuat(tr.values[k]) ?: floatArrayOf(0f, 0f, 0f, 1f)
+                    acc = if (k == 0) q else quatMul(acc, q)
+                    acc
+                }
+            }
+        }
+
+        fun sampleVec(tr: Track3ds?, frame: Float, def: FloatArray?): FloatArray? {
+            if (tr == null) return def
+            val f = tr.frames
+            if (frame <= f[0] || f.size == 1) return tr.values[0]
+            if (frame >= f[f.size - 1]) return tr.values[f.size - 1]
+            var i = 0
+            while (i + 1 < f.size && f[i + 1] <= frame) i++
+            val span = (f[i + 1] - f[i]).toFloat().takeIf { it > 0f } ?: 1f
+            val a = (frame - f[i]) / span
+            return FloatArray(tr.values[i].size) { tr.values[i][it] + (tr.values[i + 1][it] - tr.values[i][it]) * a }
+        }
+
+        fun sampleRot(n: Node3ds, frame: Float): FloatArray? {
+            val tr = n.rotKeys ?: return n.rot?.let { axisQuat(it) }
+            val abs = absoluteRotations(n) ?: return null
+            val f = tr.frames
+            if (frame <= f[0] || f.size == 1) return abs[0]
+            if (frame >= f[f.size - 1]) return abs[f.size - 1]
+            var i = 0
+            while (i + 1 < f.size && f[i + 1] <= frame) i++
+            val span = (f[i + 1] - f[i]).toFloat().takeIf { it > 0f } ?: 1f
+            return slerp(abs[i], abs[i + 1], (frame - f[i]) / span)
+        }
+
+        fun nodeMatrixAt(n: Node3ds, frame: Float?): FloatArray {
+            val t = (if (frame == null) n.pos else sampleVec(n.posKeys, frame, n.pos)) ?: floatArrayOf(0f, 0f, 0f)
+            val q = if (frame == null) n.rot?.let { axisQuat(it) } else sampleRot(n, frame)
+            val s = (if (frame == null) n.scl else sampleVec(n.sclKeys, frame, n.scl)) ?: floatArrayOf(1f, 1f, 1f)
+            val m = CleanRoomGltf.trs(t, q, s)
+            return CleanRoomGltf.mul(m, CleanRoomGltf.trs(floatArrayOf(-n.pivot[0], -n.pivot[1], -n.pivot[2]), null, null))
+        }
+
+        fun nodeMatrix(n: Node3ds): FloatArray = nodeMatrixAt(n, null)
+
+        fun invertAffine(m: FloatArray): FloatArray? {
+            val a = m[0]; val b = m[4]; val c = m[8]
+            val d = m[1]; val e = m[5]; val f = m[9]
+            val g = m[2]; val h = m[6]; val i = m[10]
+            val det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
+            if (kotlin.math.abs(det) < 1e-12f) return null
+            val inv = FloatArray(16)
+            inv[0] = (e * i - f * h) / det; inv[4] = (c * h - b * i) / det; inv[8] = (b * f - c * e) / det
+            inv[1] = (f * g - d * i) / det; inv[5] = (a * i - c * g) / det; inv[9] = (c * d - a * f) / det
+            inv[2] = (d * h - e * g) / det; inv[6] = (b * g - a * h) / det; inv[10] = (a * e - b * d) / det
+            inv[12] = -(inv[0] * m[12] + inv[4] * m[13] + inv[8] * m[14])
+            inv[13] = -(inv[1] * m[12] + inv[5] * m[13] + inv[9] * m[14])
+            inv[14] = -(inv[2] * m[12] + inv[6] * m[13] + inv[10] * m[14])
+            inv[15] = 1f
+            return inv
+        }
+
+        val byName = nodes.groupBy { it.name }
+        val worldOf = HashMap<Int, FloatArray>()
+        fun world(n: Node3ds, depth: Int): FloatArray {
+            worldOf[n.id]?.let { return it }
+            val local = nodeMatrix(n)
+            val parent = nodes.getOrNull(n.parent)?.takeIf { it !== n && depth < 32 }
+            val w = if (parent != null) CleanRoomGltf.mul(world(parent, depth + 1), local) else local
+            worldOf[n.id] = w
+            return w
+        }
+        fun moving(n: Node3ds) = (n.posKeys?.frames?.size ?: 0) > 1 || (n.rotKeys?.frames?.size ?: 0) > 1 || (n.sclKeys?.frames?.size ?: 0) > 1
+        val frameCount = if (segEnd > segStart && nodes.any { moving(it) }) minOf(4000, segEnd - segStart + 1) else 0
+        val dynamic = HashMap<Int, Boolean>()
+        fun isDynamic(n: Node3ds, depth: Int): Boolean = dynamic.getOrPut(n.id) {
+            moving(n) || (nodes.getOrNull(n.parent)?.takeIf { it !== n && depth < 32 }?.let { isDynamic(it, depth + 1) } ?: false)
+        }
+        fun worldAt(n: Node3ds, frame: Float, depth: Int): FloatArray {
+            val local = nodeMatrixAt(n, frame)
+            val parent = nodes.getOrNull(n.parent)?.takeIf { it !== n && depth < 32 }
+            return if (parent != null) CleanRoomGltf.mul(worldAt(parent, frame, depth + 1), local) else local
+        }
+        val boneFrames3ds = ArrayList<FloatArray>()
+        val boneOf = HashMap<Int, Int>()
+        fun boneFor(n: Node3ds?): Int {
+            if (n == null || frameCount < 2 || !isDynamic(n, 0)) return -1
+            return boneOf.getOrPut(n.id) {
+                if ((boneFrames3ds.size + 1).toLong() * frameCount * 12 > 8_000_000L) return@getOrPut -1
+                val inv = invertAffine(world(n, 0)) ?: return@getOrPut -1
+                val frames = FloatArray(frameCount * 12)
+                for (k in 0 until frameCount) {
+                    val m = CleanRoomGltf.mul(worldAt(n, (segStart + k).toFloat(), 0), inv)
+                    val at = k * 12
+                    frames[at] = m[0]; frames[at + 1] = m[1]; frames[at + 2] = m[2]
+                    frames[at + 3] = m[4]; frames[at + 4] = m[5]; frames[at + 5] = m[6]
+                    frames[at + 6] = m[8]; frames[at + 7] = m[9]; frames[at + 8] = m[10]
+                    frames[at + 9] = m[12]; frames[at + 10] = m[13]; frames[at + 11] = m[14]
+                }
+                boneFrames3ds.add(frames)
+                boneFrames3ds.size - 1
+            }
+        }
+
+        val uv = FloatArray(6)
+        val nrm = FloatArray(9)
+        val triAnim3ds = TriAnim()
+        for (mesh in meshes) {
+            val v = mesh.verts
+            val vCount = v.size / 3
+            val nFaces = mesh.faces.size / 3
+            val faceMat = arrayOfNulls<Mat3ds>(nFaces)
+            for ((name, list) in mesh.faceMaterials) {
+                val m = materials[name] ?: continue
+                for (f in list) if (f in faceMat.indices) faceMat[f] = m
+            }
+            val sg = mesh.smoothing
+            val cornerN = if (sg != null && sg.any { it != 0 }) {
+                val fn = FloatArray(nFaces * 3)
+                val adj = Array(vCount) { ArrayList<Int>(6) }
+                for (f in 0 until nFaces) {
+                    val a = mesh.faces[f * 3]; val b = mesh.faces[f * 3 + 1]; val c = mesh.faces[f * 3 + 2]
+                    if (a >= vCount || b >= vCount || c >= vCount) continue
+                    val ux = v[b * 3] - v[a * 3]; val uy = v[b * 3 + 1] - v[a * 3 + 1]; val uz = v[b * 3 + 2] - v[a * 3 + 2]
+                    val wx = v[c * 3] - v[a * 3]; val wy = v[c * 3 + 1] - v[a * 3 + 1]; val wz = v[c * 3 + 2] - v[a * 3 + 2]
+                    fn[f * 3] = uy * wz - uz * wy
+                    fn[f * 3 + 1] = uz * wx - ux * wz
+                    fn[f * 3 + 2] = ux * wy - uy * wx
+                    adj[a].add(f); adj[b].add(f); adj[c].add(f)
+                }
+                val out = FloatArray(nFaces * 9)
+                for (f in 0 until nFaces) {
+                    val g = sg.getOrElse(f) { 0 }
+                    if (g == 0) continue
+                    for (k in 0 until 3) {
+                        val vi = mesh.faces[f * 3 + k]
+                        if (vi >= vCount) continue
+                        var x = 0f
+                        var y = 0f
+                        var z = 0f
+                        for (f2 in adj[vi]) {
+                            if (sg.getOrElse(f2) { 0 } and g == 0) continue
+                            x += fn[f2 * 3]; y += fn[f2 * 3 + 1]; z += fn[f2 * 3 + 2]
+                        }
+                        val l = kotlin.math.sqrt(x * x + y * y + z * z)
+                        if (l > 0f) {
+                            out[f * 9 + k * 3] = x / l; out[f * 9 + k * 3 + 1] = y / l; out[f * 9 + k * 3 + 2] = z / l
+                        }
+                    }
+                }
+                out
+            } else null
+            val list = byName[mesh.name].orEmpty()
+            val primary = list.firstOrNull { it.instance == null } ?: list.firstOrNull()
+            val entries = ArrayList<Pair<FloatArray, Node3ds?>>()
+            entries.add(CleanRoomGltf.IDENTITY to primary)
+            if (primary != null && list.any { it.instance != null }) {
+                val inv = invertAffine(world(primary, 0))
+                if (inv != null) for (n in list) if (n !== primary) entries.add(CleanRoomGltf.mul(world(n, 0), inv) to n)
+            }
+            for ((xf, node) in entries) {
+                val bone = boneFor(node)
+                val pos = FloatArray(v.size)
+                for (k in 0 until vCount) {
+                    val x = v[k * 3]; val y = v[k * 3 + 1]; val z = v[k * 3 + 2]
+                    pos[k * 3] = xf[0] * x + xf[4] * y + xf[8] * z + xf[12]
+                    pos[k * 3 + 1] = xf[1] * x + xf[5] * y + xf[9] * z + xf[13]
+                    pos[k * 3 + 2] = xf[2] * x + xf[6] * y + xf[10] * z + xf[14]
+                }
+                for (f in 0 until nFaces) {
+                    if (isGeometryTruncated) return
+                    val a = mesh.faces[f * 3]; val b = mesh.faces[f * 3 + 1]; val c = mesh.faces[f * 3 + 2]
+                    if (a >= vCount || b >= vCount || c >= vCount) continue
+                    val m = faceMat[f]
+                    val tex = if (m != null) texOf(m) else -1
+                    val ntex = if (m != null) normalOf(m) else -1
+                    val uvs = mesh.uvs
+                    val hasUv = (tex >= 0 || ntex >= 0) && uvs != null && maxOf(a, b, c) * 2 + 1 < uvs.size
+                    if (hasUv) {
+                        for ((slot, vi) in intArrayOf(a, b, c).withIndex()) {
+                            uv[slot * 2] = uvs!![vi * 2] * m!!.uScale + m.uOff
+                            uv[slot * 2 + 1] = 1f - (uvs[vi * 2 + 1] * m.vScale + m.vOff)
+                        }
+                    }
+                    val hasN = cornerN != null && sg!!.getOrElse(f) { 0 } != 0
+                    if (hasN) {
+                        for (k in 0 until 3) {
+                            val nx = cornerN!![f * 9 + k * 3]; val ny = cornerN[f * 9 + k * 3 + 1]; val nz = cornerN[f * 9 + k * 3 + 2]
+                            val rx = xf[0] * nx + xf[4] * ny + xf[8] * nz
+                            val ry = xf[1] * nx + xf[5] * ny + xf[9] * nz
+                            val rz = xf[2] * nx + xf[6] * ny + xf[10] * nz
+                            val l = kotlin.math.sqrt(rx * rx + ry * ry + rz * rz).takeIf { it > 0f } ?: 1f
+                            nrm[k * 3] = rx / l; nrm[k * 3 + 1] = ry / l; nrm[k * 3 + 2] = rz / l
+                        }
+                    }
+                    val alpha = ((m?.alpha ?: 1f) * 255f).roundToInt().coerceIn(0, 255)
+                    val color = when {
+                        m == null -> 0
+                        hasUv && tex >= 0 -> Color.argb(alpha, 255, 255, 255)
+                        else -> Color.argb(alpha, Color.red(m.color), Color.green(m.color), Color.blue(m.color))
+                    }
+                    triAnim3ds.reset()
+                    triAnim3ds.bone = bone
+                    addTriangle(
+                        pos[a * 3], pos[a * 3 + 1], pos[a * 3 + 2],
+                        pos[b * 3], pos[b * 3 + 1], pos[b * 3 + 2],
+                        pos[c * 3], pos[c * 3 + 1], pos[c * 3 + 2],
+                        color, if (hasUv) uv else null, 0, if (hasUv && tex >= 0) tex else -1, 0, 0, 0,
+                        if (hasN) nrm else null, if (hasUv) ntex else -1, if (bone >= 0) triAnim3ds else null
+                    )
+                }
+            }
+        }
+        if (boneFrames3ds.isNotEmpty() && frameCount >= 2) {
+            val bones = boneFrames3ds.size
+            val matrices = FloatArray(frameCount * bones * 12)
+            for (bi in 0 until bones) for (k in 0 until frameCount) System.arraycopy(boneFrames3ds[bi], k * 12, matrices, (k * bones + bi) * 12, 12)
+            animClip = AnimClip(30f, frameCount, bones, matrices)
+        }
     }
 
     /**
@@ -974,9 +1457,8 @@ class Stl3dMeshSession(
      */
     private fun parseGltfOrGlbCleanRoom(customBytes: ByteArray? = null) {
         var jsonString: String? = null
-        val inlineBuffersList = ArrayList<ByteArray>()
-        val fileBufferSlices = ArrayList<Pair<Long, Int>>() // (fileOffset, byteLength) for zero-OOM GLB BIN chunks
-
+        var binSource: GltfBinSource? = null
+        var binLength = 0L
         if (customBytes != null) {
             if (customBytes.size < 12) return
             val bb = ByteBuffer.wrap(customBytes).order(ByteOrder.LITTLE_ENDIAN)
@@ -990,10 +1472,12 @@ class Stl3dMeshSession(
                     val safeLen = minOf(chunkLen, customBytes.size - dataStart)
                     if (chunkType == 0x4E4F534A && jsonString == null) {
                         jsonString = String(customBytes, dataStart, safeLen, StandardCharsets.UTF_8)
-                    } else if (chunkType == 0x004E4942) {
-                        inlineBuffersList.add(customBytes.copyOfRange(dataStart, dataStart + safeLen))
+                    } else if (chunkType == 0x004E4942 && binSource == null) {
+                        val start = dataStart
+                        binLength = safeLen.toLong()
+                        binSource = GltfBinSource { off, len -> customBytes.copyOfRange(start + off.toInt(), start + off.toInt() + len) }
                     }
-                    pos = dataStart + safeLen
+                    pos = dataStart + ((safeLen + 3) and 3.inv())
                 }
             } else {
                 jsonString = String(customBytes, StandardCharsets.UTF_8)
@@ -1004,589 +1488,91 @@ class Stl3dMeshSession(
             if (headerBytes.size < 12) return
             val hbb = ByteBuffer.wrap(headerBytes).order(ByteOrder.LITTLE_ENDIAN)
             if (hbb.getInt(0) == 0x46546C67) {
-                modelType = "GLB (glTF 2.0)"
                 var pos = 12L
-                val chunkHdr = ByteBuffer.allocateDirect(8).order(ByteOrder.LITTLE_ENDIAN)
                 while (pos + 8L <= fileSize) {
-                    chunkHdr.clear()
-                    if (try { Os.pread(pfd.fileDescriptor, chunkHdr, pos) } catch (_: Throwable) { 0 } < 8) break
-                    chunkHdr.flip()
-                    val chunkLen = chunkHdr.int.toLong() and 0xFFFFFFFFL
-                    val chunkType = chunkHdr.int
+                    val hdr = readDescriptorSliceAt(pos, 8)
+                    if (hdr.size < 8) break
+                    val hb = ByteBuffer.wrap(hdr).order(ByteOrder.LITTLE_ENDIAN)
+                    val chunkLen = hb.getInt(0).toLong() and 0xFFFFFFFFL
+                    val chunkType = hb.getInt(4)
                     val dataStart = pos + 8L
-                    if (chunkLen <= 0L || dataStart >= fileSize) break
-                    val availChunkLen = minOf(chunkLen, fileSize - dataStart)
-
-                    if (chunkType == 0x4E4F534A && jsonString == null && availChunkLen <= 32L * 1024L * 1024L) {
-                        val jsonBytes = readDescriptorSliceAt(dataStart, availChunkLen.toInt())
-                        jsonString = String(jsonBytes, StandardCharsets.UTF_8)
-                    } else if (chunkType == 0x004E4942) {
-                        fileBufferSlices.add(dataStart to availChunkLen.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())
+                    if (dataStart > fileSize) break
+                    val avail = minOf(chunkLen, fileSize - dataStart)
+                    if (chunkType == 0x4E4F534A && jsonString == null && avail <= 64L * 1024L * 1024L) {
+                        jsonString = String(readDescriptorSliceAt(dataStart, avail.toInt()), StandardCharsets.UTF_8)
+                    } else if (chunkType == 0x004E4942 && binSource == null) {
+                        val start = dataStart
+                        binLength = avail
+                        binSource = GltfBinSource { off, len -> readDescriptorSliceAt(start + off, len).takeIf { it.size == len } }
                     }
-                    pos = dataStart + availChunkLen
+                    if (chunkLen <= 0L) break
+                    pos = dataStart + ((chunkLen + 3L) and 3L.inv())
                 }
             } else {
-                modelType = "glTF 2.0"
-                val jsonBytes = readDescriptorBytes(48 * 1024 * 1024)
-                jsonString = String(jsonBytes, StandardCharsets.UTF_8)
+                jsonString = String(readDescriptorBytes(64 * 1024 * 1024), StandardCharsets.UTF_8)
             }
         }
-
-        val rootJsonStr = jsonString?.trim() ?: return
-        if (!rootJsonStr.startsWith("{")) return
-
-        val root = try { JSONObject(rootJsonStr) } catch (_: Throwable) { return }
-
-        val jsonBuffers = root.optJSONArray("buffers")
-        if (jsonBuffers != null) {
-            for (i in 0 until jsonBuffers.length()) {
-                val bufObj = jsonBuffers.optJSONObject(i) ?: continue
-                val uri = bufObj.optString("uri", "")
-                if (uri.startsWith("data:", ignoreCase = true) && uri.contains(";base64,")) {
-                    val b64 = uri.substringAfter(";base64,").trim()
-                    if (b64.length <= 64 * 1024 * 1024) {
-                        try {
-                            val decoded = Base64.decode(b64, Base64.DEFAULT)
-                            if (i < inlineBuffersList.size) {
-                                inlineBuffersList[i] = decoded
-                            } else {
-                                inlineBuffersList.add(decoded)
-                            }
-                        } catch (_: Throwable) {}
-                    }
-                }
+        val text = jsonString?.trim()?.trimStart('\uFEFF') ?: return
+        if (!text.startsWith("{")) return
+        val root = try { JSONObject(text) } catch (_: Throwable) { return }
+        val required = root.optJSONArray("extensionsRequired")
+        if (required != null) {
+            for (k in 0 until required.length()) {
+                if (required.optString(k) == "KHR_draco_mesh_compression") usesDraco = true
             }
         }
-
-        if (inlineBuffersList.isEmpty() && fileBufferSlices.isEmpty()) return
-
-        val bufferViews = root.optJSONArray("bufferViews") ?: return
-        val accessors = root.optJSONArray("accessors") ?: return
-        val meshes = root.optJSONArray("meshes") ?: return
-        val materials = root.optJSONArray("materials")
-        val texturesJson = root.optJSONArray("textures")
-        val imagesJson = root.optJSONArray("images")
-
-        fun readBufferRange(bufIdx: Int, startOffset: Int, byteLength: Int): ByteArray? {
-            if (startOffset < 0 || byteLength <= 0 || byteLength > 48 * 1024 * 1024) return null
-            val inlineBuf = inlineBuffersList.getOrNull(bufIdx)
-            if (inlineBuf != null) {
-                if (startOffset >= inlineBuf.size) return null
-                val end = minOf(inlineBuf.size, startOffset + byteLength)
-                return inlineBuf.copyOfRange(startOffset, end)
-            }
-            val fileSlice = fileBufferSlices.getOrNull(bufIdx) ?: return null
-            if (startOffset >= fileSlice.second) return null
-            val safeLen = minOf(byteLength, fileSlice.second - startOffset)
-            return readDescriptorSliceAt(fileSlice.first + startOffset.toLong(), safeLen)
+        CleanRoomGltf(root, binSource, binLength, sceneOutput, maxPolygonsLimit * 3).load()
+        if (vertexCount == 0 && usesDraco) {
+            lastErrorMsg = "Модель glTF сжата Draco, но её геометрию не удалось распаковать."
         }
+    }
 
-        fun linearToSrgbChannel(linearVal: Double): Float {
-            val c = linearVal.coerceIn(0.0, 1.0)
-            val srgb = if (c <= 0.0031308) {
-                c * 12.92
-            } else {
-                1.055 * Math.pow(c, 1.0 / 2.4) - 0.055
-            }
-            return srgb.toFloat().coerceIn(0f, 1f)
+    private var usesDraco = false
+
+    private val sceneOutput = object : GltfOutput {
+        override val truncated: Boolean get() = isGeometryTruncated
+        override fun triangle(p: FloatArray, color: Int, uv: FloatArray?, texture: Int, c0: Int, c1: Int, c2: Int) {
+            addTriangle(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], color, uv, 0, texture, c0, c1, c2)
         }
-
-        val textureAvgColorCache = HashMap<Int, Int>()
-        fun sampleTextureAverageColor(texIdx: Int): Int? {
-            if (texIdx < 0 || texturesJson == null || imagesJson == null || texIdx >= texturesJson.length()) return null
-            textureAvgColorCache[texIdx]?.let { return if (it == 0) null else it }
-            val imgIdx = texturesJson.optJSONObject(texIdx)?.optInt("source", -1) ?: -1
-            if (imgIdx !in 0 until imagesJson.length()) {
-                textureAvgColorCache[texIdx] = 0
-                return null
-            }
-            val imgObj = imagesJson.optJSONObject(imgIdx) ?: return null
-            val imgBytes: ByteArray? = when {
-                imgObj.has("bufferView") -> {
-                    val bvIdx = imgObj.optInt("bufferView", -1)
-                    val bv = if (bvIdx in 0 until bufferViews.length()) bufferViews.optJSONObject(bvIdx) else null
-                    if (bv != null) {
-                        val bIdx = bv.optInt("buffer", 0)
-                        val bOff = bv.optInt("byteOffset", 0)
-                        val bLen = bv.optInt("byteLength", 0)
-                        if (bLen in 16..(16 * 1024 * 1024)) readBufferRange(bIdx, bOff, bLen) else null
-                    } else null
-                }
-                imgObj.optString("uri", "").startsWith("data:", ignoreCase = true) -> {
-                    val uri = imgObj.optString("uri", "")
-                    if (uri.contains(";base64,")) {
-                        val b64 = uri.substringAfter(";base64,").trim()
-                        if (b64.length <= 16 * 1024 * 1024) {
-                            try { Base64.decode(b64, Base64.DEFAULT) } catch (_: Throwable) { null }
-                        } else null
-                    } else null
-                }
-                else -> null
-            }
-            if (imgBytes == null || imgBytes.size < 16) {
-                textureAvgColorCache[texIdx] = 0
-                return null
-            }
-            val sampled = try {
-                val boundsOpts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size, boundsOpts)
-                val maxDim = maxOf(boundsOpts.outWidth, boundsOpts.outHeight)
+        override fun triangleN(p: FloatArray, color: Int, uv: FloatArray?, texture: Int, c0: Int, c1: Int, c2: Int, normals: FloatArray?) {
+            addTriangle(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], color, uv, 0, texture, c0, c1, c2, normals)
+        }
+        override fun line(x1: Float, y1: Float, z1: Float, x2: Float, y2: Float, z2: Float, color: Int) {
+            addLineSegment(x1, y1, z1, x2, y2, z2, color)
+        }
+        override fun triangleFull(
+            p: FloatArray, color: Int, uv: FloatArray?, texture: Int, c0: Int, c1: Int, c2: Int,
+            normals: FloatArray?, normalTexture: Int, anim: TriAnim?
+        ) {
+            addTriangle(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], color, uv, 0, texture, c0, c1, c2, normals, normalTexture, anim)
+        }
+        override fun texture(key: String, bytes: ByteArray?, opaque: Boolean): Int = registerTexture(key, bytes, opaque)
+        override fun pixels(bytes: ByteArray): DecodedPixels? = try {
+            CleanRoomTextureDecoders.decode(bytes) ?: run {
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
                 var sample = 1
-                while (maxDim / sample > 32) sample *= 2
+                while (maxOf(bounds.outWidth, bounds.outHeight) / sample > 4096) sample *= 2
                 val opts = BitmapFactory.Options().apply {
                     inSampleSize = sample
                     inPreferredConfig = Bitmap.Config.ARGB_8888
+                    inPremultiplied = false
                 }
-                val bmp = BitmapFactory.decodeByteArray(imgBytes, 0, imgBytes.size, opts)
-                if (bmp != null) {
-                    var sumR = 0L; var sumG = 0L; var sumB = 0L; var sumA = 0L; var count = 0L
-                    for (py in 0 until bmp.height) {
-                        for (px in 0 until bmp.width) {
-                            val pxCol = bmp.getPixel(px, py)
-                            val pa = Color.alpha(pxCol)
-                            if (pa > 32) {
-                                sumR += Color.red(pxCol)
-                                sumG += Color.green(pxCol)
-                                sumB += Color.blue(pxCol)
-                                sumA += pa
-                                count++
-                            }
-                        }
-                    }
-                    bmp.recycle()
-                    if (count > 0L) {
-                        Color.argb(
-                            (sumA / count).toInt().coerceIn(32, 255),
-                            (sumR / count).toInt().coerceIn(0, 255),
-                            (sumG / count).toInt().coerceIn(0, 255),
-                            (sumB / count).toInt().coerceIn(0, 255)
-                        )
-                    } else 0
-                } else 0
-            } catch (_: Throwable) {
-                0
-            }
-            textureAvgColorCache[texIdx] = sampled
-            return if (sampled == 0) null else sampled
-        }
-
-        val resolvedMaterialCache = HashMap<Int, Int>()
-        fun resolveMaterialColor(matIdx: Int): Int {
-            if (materials == null || matIdx !in 0 until materials.length()) return Color.rgb(185, 192, 204)
-            resolvedMaterialCache[matIdx]?.let { return it }
-            val mat = materials.optJSONObject(matIdx) ?: return Color.rgb(185, 192, 204)
-            val matName = mat.optString("name", "").lowercase(Locale.ROOT)
-            val alphaMode = mat.optString("alphaMode", "OPAQUE").uppercase(Locale.ROOT)
-            val pbr = mat.optJSONObject("pbrMetallicRoughness")
-            val factor = pbr?.optJSONArray("baseColorFactor")
-                ?: mat.optJSONObject("extensions")?.optJSONObject("KHR_materials_pbrSpecularGlossiness")?.optJSONArray("diffuseFactor")
-                ?: mat.optJSONArray("emissiveFactor")
-
-            var rSrgb = 0.78f
-            var gSrgb = 0.80f
-            var bSrgb = 0.84f
-            var alphaFactor = 1.0f
-
-            if (factor != null && factor.length() >= 3) {
-                rSrgb = linearToSrgbChannel(factor.optDouble(0, 0.8))
-                gSrgb = linearToSrgbChannel(factor.optDouble(1, 0.8))
-                bSrgb = linearToSrgbChannel(factor.optDouble(2, 0.8))
-                if (factor.length() >= 4) {
-                    alphaFactor = factor.optDouble(3, 1.0).toFloat().coerceIn(0f, 1f)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.let { b ->
+                    val px = IntArray(b.width * b.height)
+                    b.getPixels(px, 0, b.width, 0, 0, b.width, b.height)
+                    DecodedPixels(b.width, b.height, px).also { b.recycle() }
                 }
             }
-
-            val baseTexIdx = pbr?.optJSONObject("baseColorTexture")?.optInt("index", -1) ?: -1
-            val texColor = sampleTextureAverageColor(baseTexIdx)
-            if (texColor != null) {
-                val tr = Color.red(texColor) / 255f
-                val tg = Color.green(texColor) / 255f
-                val tb = Color.blue(texColor) / 255f
-                val ta = Color.alpha(texColor) / 255f
-                rSrgb = (rSrgb * tr).coerceIn(0f, 1f)
-                gSrgb = (gSrgb * tg).coerceIn(0f, 1f)
-                bSrgb = (bSrgb * tb).coerceIn(0f, 1f)
-                if (alphaMode == "BLEND") {
-                    alphaFactor = (alphaFactor * ta).coerceIn(0f, 1f)
-                }
-            }
-
-            if (alphaMode == "BLEND" && (alphaFactor < 0.28f || matName.contains("coat") || matName.contains("refraction") || matName == "material_0")) {
-                resolvedMaterialCache[matIdx] = Int.MIN_VALUE
-                return Int.MIN_VALUE
-            }
-
-            val finalAlpha = when {
-                alphaMode == "BLEND" || matName.contains("glass") || matName.contains("window") ->
-                    (alphaFactor * 140f).toInt().coerceIn(48, 175)
-                else -> 255
-            }
-
-            val r = maxOf((rSrgb * 255f).toInt().coerceIn(0, 255), 42)
-            val g = maxOf((gSrgb * 255f).toInt().coerceIn(0, 255), 44)
-            val b = maxOf((bSrgb * 255f).toInt().coerceIn(0, 255), 48)
-            val packed = Color.argb(finalAlpha, r, g, b)
-            resolvedMaterialCache[matIdx] = packed
-            return packed
+        } catch (_: Throwable) {
+            null
         }
-
-        fun readAccessorColors(accIdx: Int): IntArray? {
-            if (accIdx !in 0 until accessors.length()) return null
-            val acc = accessors.optJSONObject(accIdx) ?: return null
-            val bvIdx = acc.optInt("bufferView", -1)
-            if (bvIdx !in 0 until bufferViews.length()) return null
-            val bv = bufferViews.optJSONObject(bvIdx) ?: return null
-            val bufIdx = bv.optInt("buffer", 0)
-            val compType = acc.optInt("componentType", 5126)
-            val accType = acc.optString("type", "VEC3")
-            val numComp = if (accType == "VEC4") 4 else 3
-            val bpc = when (compType) { 5120, 5121 -> 1; 5122, 5123 -> 2; else -> 4 }
-            val defStride = numComp * bpc
-            val stride = bv.optInt("byteStride", defStride).coerceAtLeast(defStride)
-            val start = bv.optInt("byteOffset", 0) + acc.optInt("byteOffset", 0)
-            val declared = acc.optInt("count", 0).coerceIn(0, maxPolygonsLimit * 3)
-            if (declared <= 0) return null
-            val slice = readBufferRange(bufIdx, start, (declared - 1) * stride + defStride) ?: return null
-            if (slice.size < defStride) return null
-            val count = minOf(declared, 1 + (slice.size - defStride) / stride)
-            val bufBb = ByteBuffer.wrap(slice).order(ByteOrder.LITTLE_ENDIAN)
-            return IntArray(count) { i ->
-                val p = i * stride
-                fun ch(c: Int): Int {
-                    val cp = p + c * bpc
-                    return when (compType) {
-                        5126 -> (bufBb.getFloat(cp).coerceIn(0f, 1f) * 255f).toInt()
-                        5123 -> ((bufBb.getShort(cp).toInt() and 0xFFFF) ushr 8).coerceIn(0, 255)
-                        5121 -> slice[cp].toInt() and 0xFF
-                        else -> 200
-                    }
-                }
-                Color.rgb(maxOf(ch(0), 20), maxOf(ch(1), 20), maxOf(ch(2), 24))
-            }
+        override fun normalTexture(key: String, bytes: ByteArray?, flipGreen: Boolean, strength: Float): Int =
+            registerNormalTexture(key, bytes, flipGreen, strength)
+        override fun animation(clip: AnimClip) {
+            animClip = clip
         }
-
-        fun readAccessorPositions(accIdx: Int): FloatArray? {
-            if (accIdx !in 0 until accessors.length()) return null
-            val acc = accessors.optJSONObject(accIdx) ?: return null
-            val bvIdx = acc.optInt("bufferView", -1)
-            if (bvIdx !in 0 until bufferViews.length()) return null
-            val bv = bufferViews.optJSONObject(bvIdx) ?: return null
-            val bufIdx = bv.optInt("buffer", 0)
-
-            val compType = acc.optInt("componentType", 5126)
-            val accType = acc.optString("type", "VEC3")
-            val numComponents = when (accType) {
-                "SCALAR" -> 1
-                "VEC2" -> 2
-                "VEC3" -> 3
-                "VEC4" -> 4
-                else -> 3
-            }
-            val bytesPerComp = when (compType) {
-                5120, 5121 -> 1
-                5122, 5123 -> 2
-                5125, 5126 -> 4
-                else -> 4
-            }
-            val defaultStride = numComponents * bytesPerComp
-            val byteStride = bv.optInt("byteStride", defaultStride).coerceAtLeast(defaultStride)
-            val startOffset = bv.optInt("byteOffset", 0) + acc.optInt("byteOffset", 0)
-            val declaredCount = acc.optInt("count", 0).coerceIn(0, maxPolygonsLimit * 3)
-            if (declaredCount <= 0) return null
-
-            val neededBytes = (declaredCount - 1) * byteStride + defaultStride
-            val sliceBytes = readBufferRange(bufIdx, startOffset, neededBytes) ?: return null
-            if (sliceBytes.size < defaultStride) return null
-
-            val maxPossibleElements = 1 + (sliceBytes.size - defaultStride) / byteStride
-            val count = minOf(declaredCount, maxPossibleElements)
-            if (count <= 0) return null
-
-            val bufBb = ByteBuffer.wrap(sliceBytes).order(ByteOrder.LITTLE_ENDIAN)
-            val out = FloatArray(count * 3)
-            val normalized = acc.optBoolean("normalized", false)
-
-            for (i in 0 until count) {
-                val elemPos = i * byteStride
-                if (elemPos + numComponents * bytesPerComp > sliceBytes.size) break
-                for (c in 0 until minOf(3, numComponents)) {
-                    val cPos = elemPos + c * bytesPerComp
-                    val v: Float = when (compType) {
-                        5126 -> bufBb.getFloat(cPos)
-                        5122 -> {
-                            val s = bufBb.getShort(cPos).toFloat()
-                            if (normalized) (s / 32767f).coerceIn(-1f, 1f) else s
-                        }
-                        5123 -> {
-                            val u = (bufBb.getShort(cPos).toInt() and 0xFFFF).toFloat()
-                            if (normalized) u / 65535f else u
-                        }
-                        5120 -> {
-                            val b = sliceBytes[cPos].toFloat()
-                            if (normalized) (b / 127f).coerceIn(-1f, 1f) else b
-                        }
-                        5121 -> {
-                            val ub = (sliceBytes[cPos].toInt() and 0xFF).toFloat()
-                            if (normalized) ub / 255f else ub
-                        }
-                        else -> 0f
-                    }
-                    out[i * 3 + c] = if (v.isFinite()) v else 0f
-                }
-            }
-            return out
-        }
-
-        fun readAccessorIndices(accIdx: Int): IntArray? {
-            if (accIdx !in 0 until accessors.length()) return null
-            val acc = accessors.optJSONObject(accIdx) ?: return null
-            val bvIdx = acc.optInt("bufferView", -1)
-            if (bvIdx !in 0 until bufferViews.length()) return null
-            val bv = bufferViews.optJSONObject(bvIdx) ?: return null
-            val bufIdx = bv.optInt("buffer", 0)
-
-            val compType = acc.optInt("componentType", 5123)
-            val bytesPerComp = when (compType) {
-                5120, 5121 -> 1
-                5122, 5123 -> 2
-                5125 -> 4
-                else -> 2
-            }
-            val byteStride = bv.optInt("byteStride", bytesPerComp).coerceAtLeast(bytesPerComp)
-            val startOffset = bv.optInt("byteOffset", 0) + acc.optInt("byteOffset", 0)
-            val declaredCount = acc.optInt("count", 0).coerceIn(0, maxPolygonsLimit * 6)
-            if (declaredCount <= 0) return null
-
-            val neededBytes = (declaredCount - 1) * byteStride + bytesPerComp
-            val sliceBytes = readBufferRange(bufIdx, startOffset, neededBytes) ?: return null
-            if (sliceBytes.size < bytesPerComp) return null
-
-            val maxPossibleIndices = 1 + (sliceBytes.size - bytesPerComp) / byteStride
-            val count = minOf(declaredCount, maxPossibleIndices)
-            if (count <= 0) return null
-
-            val bufBb = ByteBuffer.wrap(sliceBytes).order(ByteOrder.LITTLE_ENDIAN)
-            val out = IntArray(count)
-            for (i in 0 until count) {
-                val p = i * byteStride
-                if (p + bytesPerComp > sliceBytes.size) break
-                out[i] = when (compType) {
-                    5121, 5120 -> sliceBytes[p].toInt() and 0xFF
-                    5123, 5122 -> bufBb.getShort(p).toInt() and 0xFFFF
-                    5125 -> bufBb.getInt(p)
-                    else -> 0
-                }
-            }
-            return out
-        }
-
-        fun transformVerts(verts: FloatArray, m: FloatArray): FloatArray {
-            val out = FloatArray(verts.size)
-            for (i in 0 until verts.size step 3) {
-                val x = verts[i]
-                val y = verts[i + 1]
-                val z = verts[i + 2]
-                out[i] = m[0] * x + m[4] * y + m[8] * z + m[12]
-                out[i + 1] = m[1] * x + m[5] * y + m[9] * z + m[13]
-                out[i + 2] = m[2] * x + m[6] * y + m[10] * z + m[14]
-            }
-            return out
-        }
-
-        fun emitMeshAtMatrix(meshIdx: Int, worldMatrix: FloatArray) {
-            if (meshIdx !in 0 until meshes.length() || isGeometryTruncated) return
-            val meshObj = meshes.optJSONObject(meshIdx) ?: return
-            val primitives = meshObj.optJSONArray("primitives") ?: return
-
-            for (pIdx in 0 until primitives.length()) {
-                if (isGeometryTruncated) break
-                val prim = primitives.optJSONObject(pIdx) ?: continue
-                val attrs = prim.optJSONObject("attributes") ?: continue
-                val posAccIdx = attrs.optInt("POSITION", -1)
-                val rawPos = readAccessorPositions(posAccIdx) ?: continue
-                val pos = transformVerts(rawPos, worldMatrix)
-                val vCount = pos.size / 3
-                if (vCount <= 0) continue
-
-                val mode = prim.optInt("mode", 4)
-                val matColor = resolveMaterialColor(prim.optInt("material", -1))
-                if (matColor == Int.MIN_VALUE) continue
-                val vertColors = if (attrs.has("COLOR_0")) readAccessorColors(attrs.optInt("COLOR_0", -1)) else null
-                val indices = if (prim.has("indices")) readAccessorIndices(prim.optInt("indices", -1)) else null
-
-                fun getVx(vi: Int) = pos[vi * 3]
-                fun getVy(vi: Int) = pos[vi * 3 + 1]
-                fun getVz(vi: Int) = pos[vi * 3 + 2]
-                fun colorAt(vi: Int) = vertColors?.getOrNull(vi) ?: matColor
-
-                when (mode) {
-                    4 -> { // TRIANGLES
-                        if (indices != null) {
-                            var i = 0
-                            while (i + 2 < indices.size && !isGeometryTruncated) {
-                                val i0 = indices[i]; val i1 = indices[i + 1]; val i2 = indices[i + 2]
-                                if (i0 in 0 until vCount && i1 in 0 until vCount && i2 in 0 until vCount) {
-                                    addTriangle(
-                                        getVx(i0), getVy(i0), getVz(i0),
-                                        getVx(i1), getVy(i1), getVz(i1),
-                                        getVx(i2), getVy(i2), getVz(i2),
-                                        colorAt(i0)
-                                    )
-                                }
-                                i += 3
-                            }
-                        } else {
-                            var i = 0
-                            while (i + 2 < vCount && !isGeometryTruncated) {
-                                addTriangle(
-                                    getVx(i), getVy(i), getVz(i),
-                                    getVx(i + 1), getVy(i + 1), getVz(i + 1),
-                                    getVx(i + 2), getVy(i + 2), getVz(i + 2),
-                                    colorAt(i)
-                                )
-                                i += 3
-                            }
-                        }
-                    }
-                    5 -> { // TRIANGLE_STRIP
-                        val count = indices?.size ?: vCount
-                        for (i in 0 until count - 2) {
-                            if (isGeometryTruncated) break
-                            val i0 = if (i % 2 == 0) (indices?.get(i) ?: i) else (indices?.get(i + 1) ?: (i + 1))
-                            val i1 = if (i % 2 == 0) (indices?.get(i + 1) ?: (i + 1)) else (indices?.get(i) ?: i)
-                            val i2 = indices?.get(i + 2) ?: (i + 2)
-                            if (i0 in 0 until vCount && i1 in 0 until vCount && i2 in 0 until vCount) {
-                                addTriangle(
-                                    getVx(i0), getVy(i0), getVz(i0),
-                                    getVx(i1), getVy(i1), getVz(i1),
-                                    getVx(i2), getVy(i2), getVz(i2),
-                                    matColor
-                                )
-                            }
-                        }
-                    }
-                    6 -> { // TRIANGLE_FAN
-                        val count = indices?.size ?: vCount
-                        if (count >= 3) {
-                            val i0 = indices?.get(0) ?: 0
-                            for (i in 1 until count - 1) {
-                                if (isGeometryTruncated) break
-                                val i1 = indices?.get(i) ?: i
-                                val i2 = indices?.get(i + 1) ?: (i + 1)
-                                if (i0 in 0 until vCount && i1 in 0 until vCount && i2 in 0 until vCount) {
-                                    addTriangle(
-                                        getVx(i0), getVy(i0), getVz(i0),
-                                        getVx(i1), getVy(i1), getVz(i1),
-                                        getVx(i2), getVy(i2), getVz(i2),
-                                        matColor
-                                    )
-                                }
-                            }
-                        }
-                    }
-                    1, 2, 3 -> { // LINES / LINE_LOOP / LINE_STRIP
-                        val count = indices?.size ?: vCount
-                        val step = if (mode == 1) 2 else 1
-                        var i = 0
-                        while (i + 1 < count && !isGeometryTruncated) {
-                            val i0 = indices?.get(i) ?: i
-                            val i1 = indices?.get(i + 1) ?: (i + 1)
-                            if (i0 in 0 until vCount && i1 in 0 until vCount) {
-                                addLineSegment(getVx(i0), getVy(i0), getVz(i0), getVx(i1), getVy(i1), getVz(i1), matColor)
-                            }
-                            i += step
-                        }
-                    }
-                }
-            }
-        }
-
-        val identityMat = floatArrayOf(
-            1f, 0f, 0f, 0f,
-            0f, 1f, 0f, 0f,
-            0f, 0f, 1f, 0f,
-            0f, 0f, 0f, 1f
-        )
-
-        fun multiplyMat4(a: FloatArray, b: FloatArray): FloatArray {
-            val res = FloatArray(16)
-            for (c in 0..3) {
-                for (r in 0..3) {
-                    res[c * 4 + r] =
-                        a[0 * 4 + r] * b[c * 4 + 0] +
-                                a[1 * 4 + r] * b[c * 4 + 1] +
-                                a[2 * 4 + r] * b[c * 4 + 2] +
-                                a[3 * 4 + r] * b[c * 4 + 3]
-                }
-            }
-            return res
-        }
-
-        fun computeNodeLocalMatrix(node: JSONObject): FloatArray {
-            val matArr = node.optJSONArray("matrix")
-            if (matArr != null && matArr.length() == 16) {
-                return FloatArray(16) { matArr.optDouble(it, if (it % 5 == 0) 1.0 else 0.0).toFloat() }
-            }
-            val t = node.optJSONArray("translation")
-            val tx = t?.optDouble(0, 0.0)?.toFloat() ?: 0f
-            val ty = t?.optDouble(1, 0.0)?.toFloat() ?: 0f
-            val tz = t?.optDouble(2, 0.0)?.toFloat() ?: 0f
-
-            val r = node.optJSONArray("rotation")
-            val qx = r?.optDouble(0, 0.0)?.toFloat() ?: 0f
-            val qy = r?.optDouble(1, 0.0)?.toFloat() ?: 0f
-            val qz = r?.optDouble(2, 0.0)?.toFloat() ?: 0f
-            val qw = r?.optDouble(3, 1.0)?.toFloat() ?: 1f
-
-            val s = node.optJSONArray("scale")
-            val sx = s?.optDouble(0, 1.0)?.toFloat() ?: 1f
-            val sy = s?.optDouble(1, 1.0)?.toFloat() ?: 1f
-            val sz = s?.optDouble(2, 1.0)?.toFloat() ?: 1f
-
-            val x2 = qx + qx; val y2 = qy + qy; val z2 = qz + qz
-            val xx = qx * x2; val xy = qx * y2; val xz = qx * z2
-            val yy = qy * y2; val yz = qy * z2; val zz = qz * z2
-            val wx = qw * x2; val wy = qw * y2; val wz = qw * z2
-
-            return floatArrayOf(
-                (1f - (yy + zz)) * sx, (xy + wz) * sx, (xz - wy) * sx, 0f,
-                (xy - wz) * sy, (1f - (xx + zz)) * sy, (yz + wx) * sy, 0f,
-                (xz + wy) * sz, (yz - wx) * sz, (1f - (xx + yy)) * sz, 0f,
-                tx, ty, tz, 1f
-            )
-        }
-
-        val nodes = root.optJSONArray("nodes")
-        val visitedNodes = HashSet<Int>()
-        if (nodes != null && nodes.length() > 0) {
-            fun traverseNode(nodeIdx: Int, parentMat: FloatArray, depth: Int) {
-                if (depth > 32 || isGeometryTruncated || nodeIdx !in 0 until nodes.length() || !visitedNodes.add(nodeIdx)) return
-                val nodeObj = nodes.optJSONObject(nodeIdx) ?: return
-                val worldMat = multiplyMat4(parentMat, computeNodeLocalMatrix(nodeObj))
-                if (nodeObj.has("mesh")) {
-                    emitMeshAtMatrix(nodeObj.optInt("mesh", -1), worldMat)
-                }
-                val children = nodeObj.optJSONArray("children")
-                if (children != null) {
-                    for (c in 0 until children.length()) {
-                        traverseNode(children.optInt(c, -1), worldMat, depth + 1)
-                    }
-                }
-            }
-
-            for (n in 0 until nodes.length()) {
-                if (n !in visitedNodes && !isGeometryTruncated) {
-                    traverseNode(n, identityMat, 0)
-                }
-            }
-        }
-
-        if (vertexCount == 0) {
-            for (mIdx in 0 until meshes.length()) {
-                if (isGeometryTruncated) break
-                emitMeshAtMatrix(mIdx, identityMat)
-            }
-        }
+        override fun resource(uri: String): ByteArray? = companionResource(uri)
     }
     /**
      * Clean-Room Blender 3D (`.blend`) binary parser supporting Blender 2.7x, 2.8x, 2.9x, 3.x, 4.x, and 5.x.
@@ -1595,553 +1581,79 @@ class Stl3dMeshSession(
      * attribute buffers), and triangulates all mesh geometry.
      */
     private fun parseBlendCleanRoom() {
-        var bytes = readDescriptorBytes(64 * 1024 * 1024)
-        if (bytes.size < 16) return
-
-        // Handle GZIP-compressed .blend files (1F 8B) with compression ratio bomb protection
-        if ((bytes[0].toInt() and 0xFF) == 0x1F && (bytes[1].toInt() and 0xFF) == 0x8B) {
-            val compressedLen = bytes.size
-            bytes = try {
-                GZIPInputStream(ByteArrayInputStream(bytes)).use { gis ->
-                    val bos = ByteArrayOutputStream(minOf(compressedLen * 3, 64 * 1024 * 1024))
-                    val tmp = ByteArray(16384)
-                    var total = 0
-                    while (total < 64 * 1024 * 1024) {
-                        val r = gis.read(tmp)
-                        if (r <= 0) break
-                        total += r
-                        if (total > 16 * 1024 * 1024 && total / compressedLen.coerceAtLeast(1) > 150) {
-                            throw SecurityException("Превышен безопасный коэффициент сжатия GZIP.")
-                        }
-                        bos.write(tmp, 0, r)
-                    }
-                    bos.toByteArray()
-                }
-            } catch (_: Throwable) {
-                return
-            }
-        }
-
-        if (bytes.size < 16 || String(bytes, 0, 7, StandardCharsets.US_ASCII) != "BLENDER") {
+        val size = resolveDescriptorFileSize()
+        if (size > 512L * 1024L * 1024L) {
+            lastErrorMsg = "Файл Blender слишком большой для загрузки."
             return
         }
-
-        val is17ByteHeader = bytes[7].toInt().toChar().isDigit() && bytes[8].toInt().toChar().isDigit()
-        val ptrSize: Int
-        val order: ByteOrder
-        val versionStr: String
-        var pos: Int
-
-        if (is17ByteHeader && bytes.size >= 17) {
-            ptrSize = 8
-            order = if (bytes[12].toInt().toChar() == 'V') ByteOrder.BIG_ENDIAN else ByteOrder.LITTLE_ENDIAN
-            versionStr = String(bytes, 13, 4, StandardCharsets.US_ASCII)
-            pos = 17
-        } else {
-            ptrSize = if (bytes[7].toInt().toChar() == '_') 4 else 8
-            order = if (bytes[8].toInt().toChar() == 'V') ByteOrder.BIG_ENDIAN else ByteOrder.LITTLE_ENDIAN
-            versionStr = String(bytes, 9, 3, StandardCharsets.US_ASCII)
-            pos = 12
+        val bridge = GplCad3dBridgeLoader.get()
+        if (bridge == null) {
+            lastErrorMsg = "Blender (.blend) engine is not included in this build."
+            return
         }
-        modelType = "Blender ($versionStr)"
-
-        val bb = ByteBuffer.wrap(bytes).order(order)
-        val blocks = ArrayList<BlendBlock>()
-
-        while (pos + 16 <= bytes.size && blocks.size < 200_000) {
-            val codeBytes = ByteArray(4)
-            System.arraycopy(bytes, pos, codeBytes, 0, 4)
-            val code = String(codeBytes, StandardCharsets.US_ASCII).trimEnd('\u0000', ' ')
-
-            val len: Int
-            val sdnaNr: Int
-            val nr: Int
-            val hdrSize: Int
-
-            if (is17ByteHeader) {
-                if (pos + 32 > bytes.size) break
-                sdnaNr = bb.getInt(pos + 4)
-                len = bb.getLong(pos + 16).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
-                nr = bb.getLong(pos + 24).coerceIn(0L, Int.MAX_VALUE.toLong()).toInt()
-                hdrSize = 32
-            } else {
-                hdrSize = 16 + ptrSize
-                if (pos + hdrSize > bytes.size) break
-                len = bb.getInt(pos + 4)
-                sdnaNr = bb.getInt(pos + 8 + ptrSize)
-                nr = bb.getInt(pos + 12 + ptrSize)
-            }
-
-            val dataStart = pos + hdrSize
-            if (len < 0 || dataStart + len > bytes.size) break
-            blocks.add(BlendBlock(code, dataStart, len, sdnaNr, nr))
-            pos = dataStart + len
-            if (code == "ENDB") break
-        }
-
-        var mvertStructIdx = -1
-        var mpolyStructIdx = -1
-        var mloopStructIdx = -1
-        var mfaceStructIdx = -1
-
-        val dnaBlock = blocks.firstOrNull { it.code == "DNA1" }
-        if (dnaBlock != null && dnaBlock.len >= 16) {
-            var dPos = dnaBlock.dataOffset
-            val dEnd = dnaBlock.dataOffset + dnaBlock.len
-            if (String(bytes, dPos, 8, StandardCharsets.US_ASCII) == "SDNANAME") {
-                dPos += 8
-                val nameCount = bb.getInt(dPos).coerceIn(0, 65536)
-                dPos += 4
-                for (i in 0 until nameCount) {
-                    while (dPos < dEnd && bytes[dPos].toInt() != 0) dPos++
-                    dPos++
-                }
-                dPos = (dPos + 3) and -4
-                if (dPos + 8 <= dEnd && String(bytes, dPos, 4, StandardCharsets.US_ASCII) == "TYPE") {
-                    dPos += 4
-                    val typeCount = bb.getInt(dPos).coerceIn(0, 65536)
-                    dPos += 4
-                    val typeNames = Array(typeCount) { "" }
-                    for (i in 0 until typeCount) {
-                        val s = dPos
-                        while (dPos < dEnd && bytes[dPos].toInt() != 0) dPos++
-                        if (dPos > s) typeNames[i] = String(bytes, s, dPos - s, StandardCharsets.US_ASCII)
-                        dPos++
-                    }
-                    dPos = (dPos + 3) and -4
-                    if (dPos + 4 <= dEnd && String(bytes, dPos, 4, StandardCharsets.US_ASCII) == "TLEN") {
-                        dPos += 4 + typeCount * 2
-                        dPos = (dPos + 3) and -4
-                    }
-                    if (dPos + 8 <= dEnd && String(bytes, dPos, 4, StandardCharsets.US_ASCII) == "STRC") {
-                        dPos += 4
-                        val structCount = bb.getInt(dPos).coerceIn(0, 65536)
-                        dPos += 4
-                        for (sIdx in 0 until structCount) {
-                            if (dPos + 4 > dEnd) break
-                            val typeIdx = bb.getShort(dPos).toInt() and 0xFFFF
-                            val fieldCount = bb.getShort(dPos + 2).toInt() and 0xFFFF
-                            dPos += 4 + fieldCount * 4
-                            val structTypeName = typeNames.getOrNull(typeIdx) ?: ""
-                            when (structTypeName) {
-                                "MVert" -> mvertStructIdx = sIdx
-                                "MPoly" -> mpolyStructIdx = sIdx
-                                "MLoop" -> mloopStructIdx = sIdx
-                                "MFace" -> mfaceStructIdx = sIdx
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        var idx = 0
-        while (idx < blocks.size && !isGeometryTruncated) {
-            val blk = blocks[idx]
-            if (blk.code == "ME") {
-                val subBlocks = ArrayList<BlendBlock>()
-                var j = idx + 1
-                while (j < blocks.size && blocks[j].code == "DATA") {
-                    subBlocks.add(blocks[j])
-                    j++
-                }
-                extractBlenderMeshFromDataBlocks(bb, subBlocks, mvertStructIdx, mpolyStructIdx, mloopStructIdx, mfaceStructIdx)
-                idx = j
-            } else {
-                idx++
-            }
-        }
-
-        if (vertexCount == 0) {
-            val allDataBlocks = blocks.filter { it.code == "DATA" }
-            extractBlenderMeshFromDataBlocks(bb, allDataBlocks, mvertStructIdx, mpolyStructIdx, mloopStructIdx, mfaceStructIdx)
-        }
+        val raw = readDescriptorBytes(512 * 1024 * 1024)
+        bridge.parseBlend(raw, sceneOutput)?.let { modelType = it }
     }
 
-    private fun extractBlenderMeshFromDataBlocks(
-        bb: ByteBuffer,
-        dataBlocks: List<BlendBlock>,
-        mvertStructIdx: Int,
-        mpolyStructIdx: Int,
-        mloopStructIdx: Int,
-        mfaceStructIdx: Int
-    ) {
-        var vertCoords: FloatArray? = null
-        var vertCount = 0
-        val loops = ArrayList<Int>()
-        val polyLoops = ArrayList<Pair<Int, Int>>()
-        val polyOffsets = ArrayList<Int>()
-
-        for (blk in dataBlocks) {
-            val blkOffset = blk.dataOffset
-            val blkLen = blk.len
-            val blkSdna = blk.sdnaIndex
-            val blkCount = blk.count
-
-            if (blkLen < 12) continue
-
-            if (blkSdna == mvertStructIdx && mvertStructIdx >= 0 && blkCount > 0) {
-                val stride = (blkLen / blkCount).coerceAtLeast(12)
-                val safeCount = minOf(blkCount, blkLen / stride, 500_000)
-                if (safeCount > 0) {
-                    val coords = FloatArray(safeCount * 3)
-                    for (v in 0 until safeCount) {
-                        val p = blkOffset + v * stride
-                        coords[v * 3] = bb.getFloat(p)
-                        coords[v * 3 + 1] = bb.getFloat(p + 4)
-                        coords[v * 3 + 2] = bb.getFloat(p + 8)
-                    }
-                    vertCoords = coords
-                    vertCount = safeCount
-                }
-                continue
-            }
-
-            if (blkSdna == mloopStructIdx && mloopStructIdx >= 0 && blkCount > 0) {
-                val stride = (blkLen / blkCount).coerceAtLeast(4)
-                val safeCount = minOf(blkCount, blkLen / stride, 1_000_000)
-                for (k in 0 until safeCount) {
-                    loops.add(bb.getInt(blkOffset + k * stride))
-                }
-                continue
-            }
-
-            if (blkSdna == mpolyStructIdx && mpolyStructIdx >= 0 && blkCount > 0) {
-                val stride = (blkLen / blkCount).coerceAtLeast(8)
-                val safeCount = minOf(blkCount, blkLen / stride, 500_000)
-                for (k in 0 until safeCount) {
-                    val p = blkOffset + k * stride
-                    val ls = bb.getInt(p)
-                    val tl = bb.getInt(p + 4)
-                    if (ls >= 0 && tl in 3..1024) polyLoops.add(ls to tl)
-                }
-                continue
-            }
-
-            if (blkSdna == mfaceStructIdx && mfaceStructIdx >= 0 && blkCount > 0 && vertCoords != null) {
-                val coords = vertCoords
-                val stride = (blkLen / blkCount).coerceAtLeast(16)
-                val safeCount = minOf(blkCount, blkLen / stride, 500_000)
-                for (k in 0 until safeCount) {
-                    if (isGeometryTruncated) break
-                    val p = blkOffset + k * stride
-                    val v1 = bb.getInt(p); val v2 = bb.getInt(p + 4); val v3 = bb.getInt(p + 8); val v4 = bb.getInt(p + 12)
-                    if (v1 in 0 until vertCount && v2 in 0 until vertCount && v3 in 0 until vertCount) {
-                        addTriangle(
-                            coords[v1 * 3], coords[v1 * 3 + 1], coords[v1 * 3 + 2],
-                            coords[v2 * 3], coords[v2 * 3 + 1], coords[v2 * 3 + 2],
-                            coords[v3 * 3], coords[v3 * 3 + 1], coords[v3 * 3 + 2]
-                        )
-                        if (v4 > 0 && v4 in 0 until vertCount) {
-                            addTriangle(
-                                coords[v1 * 3], coords[v1 * 3 + 1], coords[v1 * 3 + 2],
-                                coords[v3 * 3], coords[v3 * 3 + 1], coords[v3 * 3 + 2],
-                                coords[v4 * 3], coords[v4 * 3 + 1], coords[v4 * 3 + 2]
-                            )
-                        }
-                    }
-                }
-                continue
-            }
-
-            if (vertCoords == null && blkLen % 12 == 0) {
-                val candidateVertCount = blkLen / 12
-                if (candidateVertCount in 3..500_000) {
-                    var validFloats = 0
-                    var nonZero = 0
-                    val sampleCheck = minOf(candidateVertCount, 32)
-                    for (s in 0 until sampleCheck) {
-                        val fx = bb.getFloat(blkOffset + s * 12)
-                        val fy = bb.getFloat(blkOffset + s * 12 + 4)
-                        val fz = bb.getFloat(blkOffset + s * 12 + 8)
-                        if (fx.isFinite() && fy.isFinite() && fz.isFinite() &&
-                            abs(fx) < 1e4f && abs(fy) < 1e4f && abs(fz) < 1e4f
-                        ) {
-                            validFloats++
-                            if (abs(fx) > 1e-5f || abs(fy) > 1e-5f || abs(fz) > 1e-5f) nonZero++
-                        }
-                    }
-                    if (validFloats == sampleCheck && nonZero > 0) {
-                        val coords = FloatArray(candidateVertCount * 3)
-                        for (v in 0 until candidateVertCount) {
-                            val p = blkOffset + v * 12
-                            coords[v * 3] = bb.getFloat(p)
-                            coords[v * 3 + 1] = bb.getFloat(p + 4)
-                            coords[v * 3 + 2] = bb.getFloat(p + 8)
-                        }
-                        vertCoords = coords
-                        vertCount = candidateVertCount
-                        continue
-                    }
-                }
-            }
-
-            val currentCoords = vertCoords
-            if (currentCoords != null && vertCount > 0 && blkLen % 4 == 0) {
-                val intCount = blkLen / 4
-                if (intCount in 3..1_000_000) {
-                    val firstInt = bb.getInt(blkOffset)
-                    if (firstInt == 0 && polyOffsets.isEmpty() && intCount >= 2) {
-                        var isMonotonic = true
-                        var prev = 0
-                        for (k in 1 until minOf(intCount, 64)) {
-                            val cur = bb.getInt(blkOffset + k * 4)
-                            if (cur < prev + 3 || cur > prev + 64) {
-                                isMonotonic = false
-                                break
-                            }
-                            prev = cur
-                        }
-                        if (isMonotonic) {
-                            for (k in 0 until intCount) {
-                                polyOffsets.add(bb.getInt(blkOffset + k * 4))
-                            }
-                            continue
-                        }
-                    }
-
-                    if (loops.isEmpty()) {
-                        var allValidIndices = true
-                        val checkCount = minOf(intCount, 64)
-                        for (k in 0 until checkCount) {
-                            val idxVal = bb.getInt(blkOffset + k * 4)
-                            if (idxVal !in 0 until vertCount) {
-                                allValidIndices = false
-                                break
-                            }
-                        }
-                        if (allValidIndices) {
-                            for (k in 0 until intCount) {
-                                loops.add(bb.getInt(blkOffset + k * 4))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        val coords = vertCoords ?: return
-        if (polyLoops.isEmpty() && polyOffsets.size >= 2) {
-            for (i in 0 until polyOffsets.size - 1) {
-                val start = polyOffsets[i]
-                val end = polyOffsets[i + 1]
-                if (end - start in 3..1024) {
-                    polyLoops.add(start to (end - start))
-                }
-            }
-        }
-
-        if (polyLoops.isNotEmpty() && loops.isNotEmpty()) {
-            for ((ls, tl) in polyLoops) {
-                if (isGeometryTruncated) break
-                if (ls < 0 || tl < 3 || ls + tl > loops.size) continue
-                val i0 = loops[ls]
-                if (i0 !in 0 until vertCount) continue
-                val b0 = i0 * 3
-                for (k in 1 until tl - 1) {
-                    val i1 = loops[ls + k]
-                    val i2 = loops[ls + k + 1]
-                    if (i1 in 0 until vertCount && i2 in 0 until vertCount) {
-                        val b1 = i1 * 3
-                        val b2 = i2 * 3
-                        addTriangle(
-                            coords[b0], coords[b0 + 1], coords[b0 + 2],
-                            coords[b1], coords[b1 + 1], coords[b1 + 2],
-                            coords[b2], coords[b2 + 1], coords[b2 + 2]
-                        )
-                    }
-                }
-            }
-        } else if (loops.size >= 3) {
-            var k = 0
-            while (k + 2 < loops.size && !isGeometryTruncated) {
-                val i0 = loops[k]; val i1 = loops[k + 1]; val i2 = loops[k + 2]
-                if (i0 in 0 until vertCount && i1 in 0 until vertCount && i2 in 0 until vertCount) {
-                    val b0 = i0 * 3; val b1 = i1 * 3; val b2 = i2 * 3
-                    addTriangle(
-                        coords[b0], coords[b0 + 1], coords[b0 + 2],
-                        coords[b1], coords[b1 + 1], coords[b1 + 2],
-                        coords[b2], coords[b2 + 1], coords[b2 + 2]
-                    )
-                }
-                k += 3
-            }
-        }
-    }
-
-    /**
-     * Clean-Room Apple/Pixar USDZ (`.usdz`), USDA (`.usda`), and USDC (`PXR-USDC`) 3D Scene Parser.
-     */
     private fun parseUsdOrUsdzCleanRoom() {
         val head = readDescriptorSliceAt(0L, 16)
         if (head.size < 4) return
-
-        if (head[0] == 0x50.toByte() && head[1] == 0x4B.toByte()) {
-            modelType = "USDZ 3D Package"
-            try {
+        try {
+            val packageFiles = HashMap<String, ByteArray>()
+            val rootId: String
+            if (head[0] == 0x50.toByte() && head[1] == 0x4B.toByte()) {
+                modelType = "USDZ 3D Package"
                 val fileSize = resolveDescriptorFileSize().let { if (it > 0L) it else 256L * 1024L * 1024L }
+                var first: String? = null
+                var shallowest: String? = null
                 openSafeStream { rawStream ->
                     ZipInputStream(rawStream).use { zis ->
-                        val buf = ByteArray(16384)
+                        val buf = ByteArray(65536)
                         var totalUnpacked = 0L
-                        while (!isGeometryTruncated) {
+                        while (true) {
                             val entry = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
-                            val name = entry.name.lowercase(Locale.ROOT)
-                            if (!entry.isDirectory) {
-                                val bos = ByteArrayOutputStream()
-                                var entryBytesCount = 0
-                                while (entryBytesCount < 48 * 1024 * 1024) {
-                                    val r = zis.read(buf)
-                                    if (r <= 0) break
-                                    bos.write(buf, 0, r)
-                                    entryBytesCount += r
-                                    totalUnpacked += r
-                                    if (totalUnpacked > 48 * 1024 * 1024L && totalUnpacked / fileSize.coerceAtLeast(1L) > 150L) {
-                                        throw SecurityException("Превышен безопасный коэффициент сжатия USDZ.")
-                                    }
-                                }
-                                val entryBytes = bos.toByteArray()
-                                when {
-                                    name.endsWith(".usda") || (name.endsWith(".usd") && entryBytes.size >= 5 && String(entryBytes, 0, 5, StandardCharsets.US_ASCII) == "#usda") -> {
-                                        parseUsdaTextScene(String(entryBytes, StandardCharsets.UTF_8))
-                                    }
-                                    name.endsWith(".usdc") || (entryBytes.size >= 8 && String(entryBytes, 0, 8, StandardCharsets.US_ASCII) == "PXR-USDC") -> {
-                                        parseUsdcCrateBinary(entryBytes)
-                                    }
-                                    name.endsWith(".glb") || name.endsWith(".gltf") -> {
-                                        parseGltfOrGlbCleanRoom(entryBytes)
-                                    }
-                                    (name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")) && dwgPreviewBitmap == null -> {
-                                        if (entryBytes.size in 64..(12 * 1024 * 1024)) {
-                                            dwgPreviewBitmap = BitmapFactory.decodeByteArray(entryBytes, 0, entryBytes.size)
-                                        }
-                                    }
+                            if (entry.isDirectory) continue
+                            val name = entry.name.replace('\\', '/').trimStart('/')
+                            val bos = ByteArrayOutputStream()
+                            while (true) {
+                                val r = zis.read(buf)
+                                if (r <= 0) break
+                                bos.write(buf, 0, r)
+                                totalUnpacked += r
+                                if (totalUnpacked > 512L * 1024 * 1024 || (totalUnpacked > 48L * 1024 * 1024 && totalUnpacked / fileSize.coerceAtLeast(1L) > 150L)) {
+                                    throw SecurityException("Превышен безопасный коэффициент сжатия USDZ.")
                                 }
                             }
-                            try { zis.closeEntry() } catch (_: Throwable) {}
-                        }
-                    }
-                }
-            } catch (_: Throwable) {}
-            if (vertexCount > 0) {
-                dwgPreviewBitmap?.recycle()
-                dwgPreviewBitmap = null
-            }
-            return
-        }
-
-        val bytes = readDescriptorBytes(64 * 1024 * 1024)
-        if (bytes.size < 8) return
-        if (String(bytes, 0, 8, StandardCharsets.US_ASCII) == "PXR-USDC") {
-            modelType = "USDC (Pixar Crate)"
-            parseUsdcCrateBinary(bytes)
-            return
-        }
-
-        modelType = "USDA 3D Scene"
-        parseUsdaTextScene(String(bytes, StandardCharsets.UTF_8))
-    }
-
-    private fun parseUsdaTextScene(usdaText: String) {
-        val pointsRegex = Regex("""point3f\[\]\s+points\s*=\s*\[([\s\S]*?)\]""")
-        val countsRegex = Regex("""int\[\]\s+faceVertexCounts\s*=\s*\[([\s\S]*?)\]""")
-        val indicesRegex = Regex("""int\[\]\s+faceVertexIndices\s*=\s*\[([\s\S]*?)\]""")
-        val tupleRegex = Regex("""\(\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*\)""")
-
-        val pointsMatches = pointsRegex.findAll(usdaText).toList()
-        val countsMatches = countsRegex.findAll(usdaText).toList()
-        val indicesMatches = indicesRegex.findAll(usdaText).toList()
-
-        val meshCount = minOf(pointsMatches.size, indicesMatches.size)
-        for (m in 0 until meshCount) {
-            if (isGeometryTruncated) break
-            val ptsStr = pointsMatches[m].groupValues[1]
-            val verts = ArrayList<FloatArray>()
-            for (tm in tupleRegex.findAll(ptsStr)) {
-                if (verts.size >= 500_000) break
-                val x = tm.groupValues[1].toFloatOrNull() ?: 0f
-                val y = tm.groupValues[2].toFloatOrNull() ?: 0f
-                val z = tm.groupValues[3].toFloatOrNull() ?: 0f
-                verts.add(floatArrayOf(x, y, z))
-            }
-            if (verts.isEmpty()) continue
-
-            val idxStr = indicesMatches[m].groupValues[1]
-            val indices = idxStr.split(Regex("[\\s,]+")).mapNotNull { it.toIntOrNull() }
-
-            val counts = if (m < countsMatches.size) {
-                countsMatches[m].groupValues[1].split(Regex("[\\s,]+")).mapNotNull { it.toIntOrNull() }
-            } else emptyList()
-
-            if (counts.isNotEmpty()) {
-                var cursor = 0
-                for (c in counts) {
-                    if (isGeometryTruncated) break
-                    if (c in 3..1024 && cursor + c <= indices.size) {
-                        val i0 = indices[cursor]
-                        if (i0 in verts.indices) {
-                            val v0 = verts[i0]
-                            for (k in 1 until c - 1) {
-                                val i1 = indices[cursor + k]
-                                val i2 = indices[cursor + k + 1]
-                                if (i1 in verts.indices && i2 in verts.indices) {
-                                    val v1 = verts[i1]
-                                    val v2 = verts[i2]
-                                    addTriangle(v0[0], v0[1], v0[2], v1[0], v1[1], v1[2], v2[0], v2[1], v2[2])
-                                }
+                            packageFiles[name] = bos.toByteArray()
+                            val lower = name.lowercase(Locale.ROOT)
+                            if (lower.endsWith(".usd") || lower.endsWith(".usda") || lower.endsWith(".usdc")) {
+                                if (first == null) first = name
+                                if (shallowest == null || name.count { it == '/' } < shallowest!!.count { it == '/' }) shallowest = name
                             }
                         }
                     }
-                    cursor += c.coerceAtLeast(1)
                 }
+                val isPackage = originalExtension.lowercase(Locale.ROOT).trim() == "usdz" || first?.contains('/') == false
+                rootId = (if (isPackage) first else shallowest) ?: return
             } else {
-                var k = 0
-                while (k + 2 < indices.size && !isGeometryTruncated) {
-                    val i0 = indices[k]; val i1 = indices[k + 1]; val i2 = indices[k + 2]
-                    if (i0 in verts.indices && i1 in verts.indices && i2 in verts.indices) {
-                        addTriangle(
-                            verts[i0][0], verts[i0][1], verts[i0][2],
-                            verts[i1][0], verts[i1][1], verts[i1][2],
-                            verts[i2][0], verts[i2][1], verts[i2][2]
-                        )
-                    }
-                    k += 3
-                }
+                val bytes = readDescriptorBytes(512 * 1024 * 1024)
+                if (bytes.size < 8) return
+                modelType = if (String(bytes, 0, 8, StandardCharsets.US_ASCII) == "PXR-USDC") "USDC (Pixar Crate)" else "USDA 3D Scene"
+                rootId = "\u0000root"
+                packageFiles[rootId] = bytes
             }
-        }
-    }
-
-    private fun parseUsdcCrateBinary(bytes: ByteArray) {
-        if (bytes.size < 64) return
-        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-
-        var pos = 64
-        val limit = minOf(bytes.size - 36, 32 * 1024 * 1024)
-        while (pos <= limit && !isGeometryTruncated) {
-            val x1 = bb.getFloat(pos); val y1 = bb.getFloat(pos + 4); val z1 = bb.getFloat(pos + 8)
-            val x2 = bb.getFloat(pos + 12); val y2 = bb.getFloat(pos + 16); val z2 = bb.getFloat(pos + 20)
-            val x3 = bb.getFloat(pos + 24); val y3 = bb.getFloat(pos + 28); val z3 = bb.getFloat(pos + 32)
-
-            if (isPlausibleMeshFloat(x1) && isPlausibleMeshFloat(y1) && isPlausibleMeshFloat(z1) &&
-                isPlausibleMeshFloat(x2) && isPlausibleMeshFloat(y2) && isPlausibleMeshFloat(z2) &&
-                isPlausibleMeshFloat(x3) && isPlausibleMeshFloat(y3) && isPlausibleMeshFloat(z3)
-            ) {
-                val d12 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) + (z2 - z1) * (z2 - z1)
-                val d23 = (x3 - x2) * (x3 - x2) + (y3 - y2) * (y3 - y2) + (z3 - z2) * (z3 - z2)
-                if (d12 in 1e-5f..1e6f && d23 in 1e-5f..1e6f) {
-                    addTriangle(x1, y1, z1, x2, y2, z2, x3, y3, z3)
-                    pos += 36
-                    continue
-                }
+            val lowerIndex = packageFiles.keys.associateBy { it.lowercase(Locale.ROOT) }
+            val stage = UsdStage({ id ->
+                packageFiles[id] ?: lowerIndex[id.lowercase(Locale.ROOT)]?.let { packageFiles[it] } ?: companionResource(id)
+            }, rootId)
+            if (stage.rootLayer == null) {
+                lastErrorMsg = "Не удалось разобрать сцену USD."
+                return
             }
-            pos += 4
-        }
-    }
-
-    private fun isPlausibleMeshFloat(v: Float): Boolean {
-        if (!v.isFinite()) return false
-        val a = abs(v)
-        return a == 0f || (a in 1e-4f..5000f)
+            CleanRoomUsd(stage, sceneOutput).load()
+        } catch (e: SecurityException) {
+            lastErrorMsg = e.message
+        } catch (_: Throwable) {}
     }
 
     /**
@@ -2150,216 +1662,23 @@ class Stl3dMeshSession(
      * decompresses zlib-deflated property arrays (`encoding == 1`), and triangulates all polygon loops.
      */
     private fun parseFbxCleanRoom() {
-        val bytes = readDescriptorBytes(64 * 1024 * 1024)
-        if (bytes.size < 32) return
-        val headAscii = String(bytes, 0, minOf(bytes.size, 256), StandardCharsets.US_ASCII)
-        if (!headAscii.startsWith("Kaydara FBX Binary")) {
-            val text = String(bytes, StandardCharsets.UTF_8)
-            val vertsMatches = Regex("""Vertices:\s*(?:\*\d+\s*\{\s*a:\s*)?([\s\S]*?)\}""").findAll(text).toList()
-            val idxMatches = Regex("""PolygonVertexIndex:\s*(?:\*\d+\s*\{\s*a:\s*)?([\s\S]*?)\}""").findAll(text).toList()
-            val meshCount = minOf(vertsMatches.size, idxMatches.size)
-            for (m in 0 until meshCount) {
-                if (isGeometryTruncated) break
-                val coords = vertsMatches[m].groupValues[1].split(Regex("[\\s,]+")).mapNotNull { it.toFloatOrNull() }.toFloatArray()
-                val indices = idxMatches[m].groupValues[1].split(Regex("[\\s,]+")).mapNotNull { it.toIntOrNull() }.toIntArray()
-                emitFbxMeshFromArrays(coords, indices)
-            }
+        val size = resolveDescriptorFileSize()
+        if (size > 512L * 1024L * 1024L) {
+            lastErrorMsg = "Файл FBX слишком большой для загрузки."
             return
         }
-
-        val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
-        val version = bb.getInt(23)
-        val is64Bit = version >= 7500
-        modelType = "FBX Binary (v$version)"
-
-        fun inflateFbxArray(offset: Int, compressedLen: Int, expectedBytes: Int): ByteArray? {
-            if (offset < 0 || compressedLen <= 0 || offset + compressedLen > bytes.size) return null
-            if (expectedBytes <= 0 || expectedBytes > 48 * 1024 * 1024) return null
-            for (nowrap in booleanArrayOf(false, true)) {
-                val inflater = Inflater(nowrap)
-                try {
-                    inflater.setInput(bytes, offset, compressedLen)
-                    val out = ByteArray(expectedBytes)
-                    var pos = 0
-                    while (!inflater.finished() && pos < expectedBytes) {
-                        val r = inflater.inflate(out, pos, expectedBytes - pos)
-                        if (r <= 0) break
-                        pos += r
-                    }
-                    if (pos > 0) return out
-                } catch (_: Throwable) {
-                } finally {
-                    try { inflater.end() } catch (_: Throwable) {}
-                }
-            }
-            return null
+        val bridge = GplCad3dBridgeLoader.get()
+        if (bridge == null) {
+            lastErrorMsg = "FBX (.fbx) engine is not included in this build."
+            return
         }
-
-        fun readFbxFloatArrayProp(propPos: Int, propEnd: Int): FloatArray? {
-            if (propPos + 13 > propEnd) return null
-            val typeChar = bytes[propPos].toInt().toChar()
-            if (typeChar != 'd' && typeChar != 'f') return null
-            val elemSize = if (typeChar == 'd') 8 else 4
-            val arrayLen = bb.getInt(propPos + 1).coerceIn(0, 1_500_000)
-            val encoding = bb.getInt(propPos + 5)
-            val compLen = bb.getInt(propPos + 9)
-            val dataStart = propPos + 13
-            if (arrayLen < 3) return null
-
-            val rawBytes: ByteArray = if (encoding == 0) {
-                val needed = arrayLen * elemSize
-                if (dataStart + needed > bytes.size) return null
-                bytes.copyOfRange(dataStart, dataStart + needed)
-            } else {
-                inflateFbxArray(dataStart, compLen, arrayLen * elemSize) ?: return null
-            }
-
-            val rbb = ByteBuffer.wrap(rawBytes).order(ByteOrder.LITTLE_ENDIAN)
-            val count = minOf(arrayLen, rawBytes.size / elemSize)
-            return FloatArray(count) { i ->
-                val v = if (elemSize == 8) rbb.getDouble(i * 8).toFloat() else rbb.getFloat(i * 4)
-                if (v.isFinite()) v else 0f
-            }
-        }
-
-        fun readFbxIntArrayProp(propPos: Int, propEnd: Int): IntArray? {
-            if (propPos + 13 > propEnd) return null
-            val typeChar = bytes[propPos].toInt().toChar()
-            if (typeChar != 'i') return null
-            val arrayLen = bb.getInt(propPos + 1).coerceIn(0, 3_000_000)
-            val encoding = bb.getInt(propPos + 5)
-            val compLen = bb.getInt(propPos + 9)
-            val dataStart = propPos + 13
-            if (arrayLen < 3) return null
-
-            val rawBytes: ByteArray = if (encoding == 0) {
-                val needed = arrayLen * 4
-                if (dataStart + needed > bytes.size) return null
-                bytes.copyOfRange(dataStart, dataStart + needed)
-            } else {
-                inflateFbxArray(dataStart, compLen, arrayLen * 4) ?: return null
-            }
-
-            val rbb = ByteBuffer.wrap(rawBytes).order(ByteOrder.LITTLE_ENDIAN)
-            val count = minOf(arrayLen, rawBytes.size / 4)
-            return IntArray(count) { i -> rbb.getInt(i * 4) }
-        }
-
-        var activeGeomVertices: FloatArray? = null
-        var activeGeomPolyIndices: IntArray? = null
-
-        fun flushActiveFbxGeom() {
-            val v = activeGeomVertices
-            val idx = activeGeomPolyIndices
-            if (v != null && idx != null) {
-                emitFbxMeshFromArrays(v, idx)
-            }
-            activeGeomVertices = null
-            activeGeomPolyIndices = null
-        }
-
-        fun walkFbxNodes(startOffset: Int, endLimit: Int, depth: Int) {
-            if (depth > 24 || isGeometryTruncated) return
-            var pos = startOffset
-            val minHeader = if (is64Bit) 25 else 13
-
-            while (pos + minHeader <= endLimit && !isGeometryTruncated) {
-                val endOffset: Int
-                val numProps: Int
-                val propListLen: Int
-                val nameLen: Int
-                val nameStart: Int
-
-                if (is64Bit) {
-                    endOffset = bb.getLong(pos).toInt()
-                    numProps = bb.getLong(pos + 8).toInt()
-                    propListLen = bb.getLong(pos + 16).toInt()
-                    nameLen = bytes[pos + 24].toInt() and 0xFF
-                    nameStart = pos + 25
-                } else {
-                    endOffset = bb.getInt(pos)
-                    numProps = bb.getInt(pos + 4)
-                    propListLen = bb.getInt(pos + 8)
-                    nameLen = bytes[pos + 12].toInt() and 0xFF
-                    nameStart = pos + 13
-                }
-
-                if (endOffset == 0) break // Null sentinel record at end of nested block
-                if (endOffset <= pos || endOffset > bytes.size || nameStart + nameLen > endOffset) break
-
-                val nodeName = if (nameLen > 0) String(bytes, nameStart, nameLen, StandardCharsets.US_ASCII) else ""
-                val propsStart = nameStart + nameLen
-                val childrenStart = propsStart + propListLen
-
-                when (nodeName) {
-                    "Geometry" -> {
-                        flushActiveFbxGeom()
-                        if (childrenStart < endOffset) {
-                            walkFbxNodes(childrenStart, endOffset, depth + 1)
-                        }
-                        flushActiveFbxGeom()
-                    }
-                    "Vertices" -> {
-                        if (numProps >= 1 && propsStart < endOffset) {
-                            activeGeomVertices = readFbxFloatArrayProp(propsStart, endOffset)
-                        }
-                    }
-                    "PolygonVertexIndex" -> {
-                        if (numProps >= 1 && propsStart < endOffset) {
-                            activeGeomPolyIndices = readFbxIntArrayProp(propsStart, endOffset)
-                        }
-                    }
-                    else -> {
-                        if (childrenStart in (propsStart)..(endOffset - minHeader)) {
-                            walkFbxNodes(childrenStart, endOffset, depth + 1)
-                        }
-                    }
-                }
-
-                pos = endOffset
-            }
-        }
-
-        walkFbxNodes(27, bytes.size, 0)
-        flushActiveFbxGeom()
-    }
-
-    private fun emitFbxMeshFromArrays(coords: FloatArray, indices: IntArray) {
-        val vCount = coords.size / 3
-        if (vCount < 3 || indices.size < 3) return
-        val polyVerts = IntArray(64)
-        var polyLen = 0
-
-        for (rawIdx in indices) {
-            if (isGeometryTruncated) break
-            val isEnd = rawIdx < 0
-            val actualIdx = if (isEnd) rawIdx.inv() else rawIdx
-            if (polyLen < polyVerts.size) {
-                polyVerts[polyLen++] = actualIdx
-            }
-            if (isEnd) {
-                if (polyLen >= 3) {
-                    val i0 = polyVerts[0]
-                    if (i0 in 0 until vCount) {
-                        val b0 = i0 * 3
-                        for (k in 1 until polyLen - 1) {
-                            val i1 = polyVerts[k]
-                            val i2 = polyVerts[k + 1]
-                            if (i1 in 0 until vCount && i2 in 0 until vCount) {
-                                val b1 = i1 * 3
-                                val b2 = i2 * 3
-                                addTriangle(
-                                    coords[b0], coords[b0 + 1], coords[b0 + 2],
-                                    coords[b1], coords[b1 + 1], coords[b1 + 2],
-                                    coords[b2], coords[b2 + 1], coords[b2 + 2]
-                                )
-                            }
-                        }
-                    }
-                }
-                polyLen = 0
-            }
-        }
+        val bytes = readDescriptorBytes(512 * 1024 * 1024)
+        if (bytes.size < 32) return
+        try {
+            bridge.parseFbx(bytes, sceneOutput)?.let { modelType = it }
+        } catch (e: SecurityException) {
+            lastErrorMsg = e.message
+        } catch (_: Throwable) {}
     }
 
     /**
@@ -2368,15 +1687,18 @@ class Stl3dMeshSession(
     private fun parse3mfCleanRoom() {
         val fileSize = resolveDescriptorFileSize().let { if (it > 0L) it else 256L * 1024L * 1024L }
         try {
+            val models = LinkedHashMap<String, ByteArray>()
+            var rels: ByteArray? = null
             openSafeStream { rawStream ->
                 ZipInputStream(rawStream).use { zis ->
                     var totalUnpacked = 0L
                     val buf = ByteArray(16384)
-                    while (!isGeometryTruncated) {
+                    while (true) {
                         val entry = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
                         val name = entry.name.replace('\\', '/').lowercase(Locale.ROOT)
-                        if (!entry.isDirectory && (name.endsWith(".model") || (name.startsWith("3d/") && name.endsWith(".xml")))) {
-                            modelType = "3MF 3D Model"
+                        val isModel = name.endsWith(".model") || (name.startsWith("3d/") && name.endsWith(".xml"))
+                        val isRels = name == "_rels/.rels"
+                        if (!entry.isDirectory && (isModel || isRels)) {
                             val bos = ByteArrayOutputStream()
                             var entryRead = 0
                             while (entryRead < 48 * 1024 * 1024) {
@@ -2389,91 +1711,21 @@ class Stl3dMeshSession(
                                     throw SecurityException("Превышен безопасный коэффициент сжатия 3MF.")
                                 }
                             }
-                            parse3mfModelXml(String(bos.toByteArray(), StandardCharsets.UTF_8))
+                            val data = bos.toByteArray()
+                            if (isRels) rels = data else models[entry.name] = data
                         }
                         try { zis.closeEntry() } catch (_: Throwable) {}
                     }
                 }
             }
-        } catch (_: Throwable) {}
-    }
-
-    private fun parse3mfModelXml(xmlText: String) {
-        try {
-            val factory = XmlPullParserFactory.newInstance()
-            factory.isNamespaceAware = false
-            val parser = factory.newPullParser()
-            parser.setInput(StringReader(xmlText))
-
-            var vertCoords = FloatArray(30_000)
-            var vertCount = 0
-            val colorGroups = HashMap<String, MutableList<Int>>()
-            var activeGroupId = ""
-            var defaultObjectColor = 0
-            var event = parser.eventType
-
-            fun parse3mfHexColor(hex: String?): Int {
-                if (hex.isNullOrBlank() || !hex.startsWith("#")) return 0
-                val clean = hex.removePrefix("#").trim()
-                val rgb = clean.take(6).toIntOrNull(16) ?: return 0
-                return (0xFF shl 24) or rgb
-            }
-
-            while (event != XmlPullParser.END_DOCUMENT && !isGeometryTruncated) {
-                if (event == XmlPullParser.START_TAG) {
-                    val localName = parser.name?.substringAfterLast(':')?.lowercase(Locale.ROOT) ?: ""
-                    when (localName) {
-                        "basematerials", "colorgroup" -> {
-                            activeGroupId = parser.getAttributeValue(null, "id") ?: ""
-                            if (activeGroupId.isNotEmpty()) colorGroups[activeGroupId] = ArrayList()
-                        }
-                        "base", "color" -> {
-                            val colStr = parser.getAttributeValue(null, "displaycolor") ?: parser.getAttributeValue(null, "color")
-                            val col = parse3mfHexColor(colStr)
-                            if (activeGroupId.isNotEmpty() && col != 0) colorGroups[activeGroupId]?.add(col)
-                        }
-                        "object" -> {
-                            val pid = parser.getAttributeValue(null, "pid") ?: ""
-                            val pindex = parser.getAttributeValue(null, "pindex")?.toIntOrNull() ?: 0
-                            defaultObjectColor = colorGroups[pid]?.getOrNull(pindex) ?: 0
-                        }
-                        "mesh" -> vertCount = 0
-                        "vertex" -> {
-                            val x = parser.getAttributeValue(null, "x")?.toFloatOrNull() ?: 0f
-                            val y = parser.getAttributeValue(null, "y")?.toFloatOrNull() ?: 0f
-                            val z = parser.getAttributeValue(null, "z")?.toFloatOrNull() ?: 0f
-                            if ((vertCount + 1) * 3 > vertCoords.size && vertCoords.size < 6_000_000) {
-                                vertCoords = vertCoords.copyOf(vertCoords.size * 2)
-                            }
-                            if ((vertCount + 1) * 3 <= vertCoords.size) {
-                                val base = vertCount * 3
-                                vertCoords[base] = x; vertCoords[base + 1] = y; vertCoords[base + 2] = z
-                                vertCount++
-                            }
-                        }
-                        "triangle" -> {
-                            val v1 = parser.getAttributeValue(null, "v1")?.toIntOrNull() ?: -1
-                            val v2 = parser.getAttributeValue(null, "v2")?.toIntOrNull() ?: -1
-                            val v3 = parser.getAttributeValue(null, "v3")?.toIntOrNull() ?: -1
-                            val pid = parser.getAttributeValue(null, "pid")
-                            val p1 = parser.getAttributeValue(null, "p1")?.toIntOrNull()
-                            val triCol = if (p1 != null) {
-                                val grp = if (pid != null) colorGroups[pid] else colorGroups.values.firstOrNull()
-                                grp?.getOrNull(p1) ?: defaultObjectColor
-                            } else defaultObjectColor
-                            if (v1 in 0 until vertCount && v2 in 0 until vertCount && v3 in 0 until vertCount) {
-                                val b1 = v1 * 3; val b2 = v2 * 3; val b3 = v3 * 3
-                                addTriangle(
-                                    vertCoords[b1], vertCoords[b1 + 1], vertCoords[b1 + 2],
-                                    vertCoords[b2], vertCoords[b2 + 1], vertCoords[b2 + 2],
-                                    vertCoords[b3], vertCoords[b3 + 1], vertCoords[b3 + 2],
-                                    triCol
-                                )
-                            }
-                        }
-                    }
-                }
-                event = parser.next()
+            if (models.isEmpty()) return
+            modelType = "3MF 3D Model"
+            com.omnireader.core.engine.impl.CleanRoomSceneFormats.parse3mf(
+                models,
+                com.omnireader.core.engine.impl.CleanRoomSceneFormats.find3mfRootModel(rels)
+            ) { x1, y1, z1, x2, y2, z2, x3, y3, z3, color ->
+                addTriangle(x1, y1, z1, x2, y2, z2, x3, y3, z3, color)
+                !isGeometryTruncated
             }
         } catch (_: Throwable) {}
     }
@@ -2482,137 +1734,48 @@ class Stl3dMeshSession(
      * Clean-Room parser for Khronos COLLADA (`.dae` XML) 3D models.
      */
     private fun parseColladaDaeCleanRoom() {
-        val bytes = readDescriptorBytes(48 * 1024 * 1024)
+        val bytes = readDescriptorBytes(256 * 1024 * 1024)
         if (bytes.isEmpty()) return
-        val xml = String(bytes, StandardCharsets.UTF_8)
         try {
-            val factory = XmlPullParserFactory.newInstance()
-            factory.isNamespaceAware = false
-            val parser = factory.newPullParser()
-            parser.setInput(StringReader(xml))
-
-            val floatArraysById = HashMap<String, FloatArray>()
-            val sourceToArrayId = HashMap<String, String>()
-            val verticesToSourceId = HashMap<String, String>()
-
-            var currentSourceId = ""
-            var currentVerticesId = ""
-            var currentFloatArrayId = ""
-            var inPrimitiveTag = false
-            var primitiveType = ""
-            var vertexInputOffset = 0
-            var maxInputOffset = 0
-            var currentVertexSourceId = ""
-            val vcountList = ArrayList<Int>()
-
-            var ev = parser.eventType
-            while (ev != XmlPullParser.END_DOCUMENT && !isGeometryTruncated) {
-                val tag = parser.name?.substringAfterLast(':')?.lowercase(Locale.ROOT) ?: ""
-                when (ev) {
-                    XmlPullParser.START_TAG -> {
-                        when (tag) {
-                            "source" -> currentSourceId = parser.getAttributeValue(null, "id") ?: ""
-                            "float_array" -> {
-                                currentFloatArrayId = parser.getAttributeValue(null, "id") ?: ""
-                                if (currentSourceId.isNotEmpty() && currentFloatArrayId.isNotEmpty()) {
-                                    sourceToArrayId[currentSourceId] = currentFloatArrayId
-                                }
-                                val txt = parser.nextText()
-                                val floats = txt.trim().split(Regex("\\s+")).mapNotNull { it.toFloatOrNull() }.toFloatArray()
-                                if (currentFloatArrayId.isNotEmpty()) floatArraysById[currentFloatArrayId] = floats
-                                if (currentSourceId.isNotEmpty()) floatArraysById[currentSourceId] = floats
-                            }
-                            "vertices" -> currentVerticesId = parser.getAttributeValue(null, "id") ?: ""
-                            "Triangles", "triangles", "polylist", "polygons", "trifans", "tristrips" -> {
-                                inPrimitiveTag = true
-                                primitiveType = tag
-                                vertexInputOffset = 0
-                                maxInputOffset = 0
-                                vcountList.clear()
-                            }
-                            "input" -> {
-                                val semantic = parser.getAttributeValue(null, "semantic")?.uppercase(Locale.ROOT) ?: ""
-                                val src = (parser.getAttributeValue(null, "source") ?: "").removePrefix("#")
-                                val offset = parser.getAttributeValue(null, "offset")?.toIntOrNull() ?: 0
-                                if (inPrimitiveTag) {
-                                    if (offset > maxInputOffset) maxInputOffset = offset
-                                    if (semantic == "VERTEX" || semantic == "POSITION") {
-                                        vertexInputOffset = offset
-                                        currentVertexSourceId = verticesToSourceId[src] ?: src
-                                    }
-                                } else if (currentVerticesId.isNotEmpty() && semantic == "POSITION") {
-                                    verticesToSourceId[currentVerticesId] = src
-                                }
-                            }
-                            "vcount" -> {
-                                val txt = parser.nextText()
-                                txt.trim().split(Regex("\\s+")).mapNotNullTo(vcountList) { it.toIntOrNull() }
-                            }
-                            "p" -> if (inPrimitiveTag) {
-                                val txt = parser.nextText()
-                                val ints = txt.trim().split(Regex("\\s+")).mapNotNull { it.toIntOrNull() }.toIntArray()
-                                val coords = floatArraysById[currentVertexSourceId]
-                                    ?: floatArraysById[sourceToArrayId[currentVertexSourceId]]
-                                    ?: floatArraysById.values.firstOrNull()
-                                if (coords != null && coords.size >= 9) {
-                                    val stride = (maxInputOffset + 1).coerceAtLeast(1)
-                                    val vCount = coords.size / 3
-                                    if (primitiveType == "polylist" && vcountList.isNotEmpty()) {
-                                        var cursor = 0
-                                        for (vc in vcountList) {
-                                            if (isGeometryTruncated) break
-                                            if (vc >= 3 && (cursor + vc) * stride <= ints.size) {
-                                                val i0 = ints[cursor * stride + vertexInputOffset]
-                                                if (i0 in 0 until vCount) {
-                                                    val b0 = i0 * 3
-                                                    for (k in 1 until vc - 1) {
-                                                        val i1 = ints[(cursor + k) * stride + vertexInputOffset]
-                                                        val i2 = ints[(cursor + k + 1) * stride + vertexInputOffset]
-                                                        if (i1 in 0 until vCount && i2 in 0 until vCount) {
-                                                            val b1 = i1 * 3; val b2 = i2 * 3
-                                                            addTriangle(
-                                                                coords[b0], coords[b0 + 1], coords[b0 + 2],
-                                                                coords[b1], coords[b1 + 1], coords[b1 + 2],
-                                                                coords[b2], coords[b2 + 1], coords[b2 + 2]
-                                                            )
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            cursor += vc.coerceAtLeast(1)
-                                        }
-                                    } else {
-                                        val totalVertRefs = ints.size / stride
-                                        var t = 0
-                                        while (t + 2 < totalVertRefs && !isGeometryTruncated) {
-                                            val i0 = ints[t * stride + vertexInputOffset]
-                                            val i1 = ints[(t + 1) * stride + vertexInputOffset]
-                                            val i2 = ints[(t + 2) * stride + vertexInputOffset]
-                                            if (i0 in 0 until vCount && i1 in 0 until vCount && i2 in 0 until vCount) {
-                                                val b0 = i0 * 3; val b1 = i1 * 3; val b2 = i2 * 3
-                                                addTriangle(
-                                                    coords[b0], coords[b0 + 1], coords[b0 + 2],
-                                                    coords[b1], coords[b1 + 1], coords[b1 + 2],
-                                                    coords[b2], coords[b2 + 1], coords[b2 + 2]
-                                                )
-                                            }
-                                            t += 3
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    XmlPullParser.END_TAG -> {
-                        if (tag in setOf("triangles", "polylist", "polygons", "trifans", "tristrips")) {
-                            inPrimitiveTag = false
-                        } else if (tag == "vertices") {
-                            currentVerticesId = ""
-                        }
+            val packageFiles = HashMap<String, ByteArray>()
+            var daeBytes = bytes
+            if (bytes.size > 4 && bytes[0] == 0x50.toByte() && bytes[1] == 0x4B.toByte()) {
+                ZipInputStream(java.io.ByteArrayInputStream(bytes)).use { zis ->
+                    var total = 0L
+                    while (true) {
+                        val e = try { zis.nextEntry } catch (_: Throwable) { null } ?: break
+                        if (e.isDirectory) continue
+                        val data = zis.readBytes()
+                        total += data.size
+                        if (total > 512L * 1024 * 1024) throw SecurityException("Превышен безопасный размер распаковки ZAE.")
+                        packageFiles[e.name.replace('\\', '/').trimStart('/')] = data
                     }
                 }
-                ev = parser.next()
+                val manifestRoot = packageFiles["manifest.xml"]?.let { Regex("<dae_root>\\s*([^<]+?)\\s*</dae_root>").find(String(it, StandardCharsets.UTF_8))?.groupValues?.get(1) }
+                    ?.let { try { java.net.URLDecoder.decode(it.removePrefix("./"), "UTF-8") } catch (_: Throwable) { it } }
+                val rootName = manifestRoot?.takeIf { packageFiles.containsKey(it) } ?: packageFiles.keys.firstOrNull { it.lowercase(Locale.ROOT).endsWith(".dae") } ?: return
+                daeBytes = packageFiles[rootName] ?: return
+                val dir = rootName.substringBeforeLast('/', "")
+                val lower = packageFiles.keys.associateBy { it.lowercase(Locale.ROOT) }
+                val output = object : GltfOutput by sceneOutput {
+                    override fun resource(uri: String): ByteArray? {
+                        val clean = uri.replace('\\', '/').removePrefix("./")
+                        val joined = if (dir.isEmpty()) clean else "$dir/$clean"
+                        return packageFiles[joined] ?: packageFiles[clean]
+                            ?: lower[joined.lowercase(Locale.ROOT)]?.let { packageFiles[it] }
+                            ?: packageFiles.entries.firstOrNull { it.key.substringAfterLast('/').equals(clean.substringAfterLast('/'), true) }?.value
+                            ?: sceneOutput.resource(uri)
+                    }
+                }
+                val rootEl = CleanRoomCollada.parse(daeBytes) ?: return
+                CleanRoomCollada(rootEl, output).load()
+            } else {
+                val rootEl = CleanRoomCollada.parse(daeBytes) ?: return
+                CleanRoomCollada(rootEl, sceneOutput).load()
             }
+            colladaYUp = true
+        } catch (e: SecurityException) {
+            lastErrorMsg = e.message
         } catch (_: Throwable) {}
     }
 
@@ -2622,159 +1785,19 @@ class Stl3dMeshSession(
      * and triangulates faceted B-Rep loops and wireframe topology.
      */
     private fun parseStepCleanRoom(stream: InputStream) {
-        val cartesianPoints = HashMap<Int, FloatArray>(8192)
-        val vertexPointToCartesian = HashMap<Int, Int>(4096)
-        val edgePairs = ArrayList<Pair<Int, Int>>(4096)
-        val polyLoops = ArrayList<IntArray>(1024)
-
-        val entityRegex = Regex("""#(\d+)\s*=\s*([A-Z0-9_]+)\s*\(([\s\S]*)\)\s*;""")
-        val coordTupleRegex = Regex("""\(\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)(?:\s*,\s*([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?))?\s*\)""")
-        val refRegex = Regex("""#(\d+)""")
-
-        BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8)).use { reader ->
-            val stmtSb = StringBuilder()
-            var line: String?
-            while (reader.readLine().also { line = it } != null && cartesianPoints.size < 600_000) {
-                val trimmed = line!!.trim()
-                if (trimmed.isEmpty() || trimmed.startsWith("/*")) continue
-                stmtSb.append(trimmed)
-                if (!trimmed.endsWith(";")) {
-                    if (stmtSb.length > 65536) stmtSb.setLength(0)
-                    continue
-                }
-                val stmt = stmtSb.toString()
-                stmtSb.setLength(0)
-
-                val m = entityRegex.find(stmt) ?: continue
-                val id = m.groupValues[1].toIntOrNull() ?: continue
-                val type = m.groupValues[2]
-                val args = m.groupValues[3]
-
-                when (type) {
-                    "CARTESIAN_POINT" -> {
-                        val cm = coordTupleRegex.find(args)
-                        if (cm != null) {
-                            val x = cm.groupValues[1].toFloatOrNull() ?: 0f
-                            val y = cm.groupValues[2].toFloatOrNull() ?: 0f
-                            val z = cm.groupValues[3].toFloatOrNull() ?: 0f
-                            cartesianPoints[id] = floatArrayOf(x, y, z)
-                        }
-                    }
-                    "VERTEX_POINT" -> {
-                        val refs = refRegex.findAll(args).mapNotNull { it.groupValues[1].toIntOrNull() }.toList()
-                        if (refs.isNotEmpty()) {
-                            vertexPointToCartesian[id] = refs.last()
-                        }
-                    }
-                    "EDGE_CURVE" -> {
-                        val refs = refRegex.findAll(args).mapNotNull { it.groupValues[1].toIntOrNull() }.toList()
-                        if (refs.size >= 2 && edgePairs.size < 200_000) {
-                            edgePairs.add(refs[0] to refs[1])
-                        }
-                    }
-                    "POLY_LOOP", "B_SPLINE_CURVE_WITH_KNOTS", "BEZIER_CURVE", "POLYLINE" -> {
-                        val refs = refRegex.findAll(args).mapNotNull { it.groupValues[1].toIntOrNull() }.toList().toIntArray()
-                        if (refs.size >= 2 && polyLoops.size < 100_000) {
-                            polyLoops.add(refs)
-                        }
-                    }
-                }
-            }
-        }
-
-        fun resolvePt(id: Int): FloatArray? {
-            return cartesianPoints[id] ?: vertexPointToCartesian[id]?.let { cartesianPoints[it] }
-        }
-
-        val cadColor = aciToColor(4)
-        for (loop in polyLoops) {
-            if (isGeometryTruncated) break
-            val pts = loop.map { resolvePt(it) }.filterNotNull()
-            if (pts.size >= 3) {
-                val p0 = pts[0]
-                for (k in 1 until pts.size - 1) {
-                    val p1 = pts[k]; val p2 = pts[k + 1]
-                    addTriangle(p0[0], p0[1], p0[2], p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], cadColor)
-                }
-            } else if (pts.size == 2) {
-                addLineSegment(pts[0][0], pts[0][1], pts[0][2], pts[1][0], pts[1][1], pts[1][2], cadColor)
-            }
-        }
-
-        for ((id1, id2) in edgePairs) {
-            if (isGeometryTruncated) break
-            val p1 = resolvePt(id1) ?: continue
-            val p2 = resolvePt(id2) ?: continue
-            addLineSegment(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], cadColor)
-        }
-
-        // If the STEP file only has CARTESIAN_POINTs (e.g. point-cloud or NURBS control net without explicit EDGE_CURVE), connect sequential points
-        if (vertexCount == 0 && cartesianPoints.size >= 2) {
-            val sortedPts = cartesianPoints.entries.sortedBy { it.key }.map { it.value }
-            for (i in 0 until sortedPts.size - 1) {
-                if (isGeometryTruncated) break
-                val p1 = sortedPts[i]; val p2 = sortedPts[i + 1]
-                addLineSegment(p1[0], p1[1], p1[2], p2[0], p2[1], p2[2], cadColor)
-            }
-        }
+        val text = stream.readBytes().toString(StandardCharsets.ISO_8859_1)
+        val entities = try { StepParser.parse(text) } catch (_: Throwable) { return }
+        try {
+            CleanRoomStep(entities, sceneOutput).load()
+        } catch (_: Throwable) {}
     }
 
-    /**
-     * Clean-Room parser for Initial Graphics Exchange Specification (`.iges` / `.igs`) CAD files.
-     * Parses Parameter Data (`P`) records for Entity 110 (Line), Entity 106 (Copious Data / Polyline),
-     * and Entity 126 (Rational B-Spline Curve).
-     */
     private fun parseIgesCleanRoom(stream: InputStream) {
-        val paramStatements = ArrayList<String>()
-        val currentSb = StringBuilder()
-
-        BufferedReader(InputStreamReader(stream, StandardCharsets.US_ASCII)).use { reader ->
-            var line: String?
-            while (reader.readLine().also { line = it } != null && paramStatements.size < 200_000) {
-                val raw = line!!
-                if (raw.length >= 73 && raw[72] == 'P') {
-                    val dataSlice = raw.substring(0, 64).trim()
-                    currentSb.append(dataSlice)
-                    if (dataSlice.contains(';')) {
-                        paramStatements.add(currentSb.toString().substringBefore(';'))
-                        currentSb.setLength(0)
-                    }
-                }
-            }
-        }
-
-        val cadColor = aciToColor(3)
-        for (stmt in paramStatements) {
-            if (isGeometryTruncated) break
-            val nums = stmt.split(',').mapNotNull { it.trim().replace('D', 'E').replace('d', 'e').toFloatOrNull() }
-            if (nums.isEmpty()) continue
-            val entityType = nums[0].toInt()
-            when (entityType) {
-                110 -> if (nums.size >= 7) {
-                    addLineSegment(nums[1], nums[2], nums[3], nums[4], nums[5], nums[6], cadColor)
-                }
-                106 -> if (nums.size >= 7) {
-                    val ip = nums[1].toInt()
-                    val n = nums[2].toInt().coerceIn(2, 10_000)
-                    if (ip == 1 && nums.size >= 4 + n * 2) {
-                        val z = nums[3]
-                        for (i in 0 until n - 1) {
-                            val base = 4 + i * 2
-                            addLineSegment(nums[base], nums[base + 1], z, nums[base + 2], nums[base + 3], z, cadColor)
-                        }
-                    } else if (ip == 2 && nums.size >= 3 + n * 3) {
-                        for (i in 0 until n - 1) {
-                            val base = 3 + i * 3
-                            addLineSegment(
-                                nums[base], nums[base + 1], nums[base + 2],
-                                nums[base + 3], nums[base + 4], nums[base + 5],
-                                cadColor
-                            )
-                        }
-                    }
-                }
-            }
-        }
+        val text = stream.readBytes().toString(StandardCharsets.ISO_8859_1)
+        val entities = try { IgesParser.parse(text) } catch (_: Throwable) { return }
+        try {
+            CleanRoomIges(entities, sceneOutput).load()
+        } catch (_: Throwable) {}
     }
 
     /**
@@ -2782,7 +1805,7 @@ class Stl3dMeshSession(
      */
     private fun parseDwgCleanRoom() {
         val statSize = resolveDescriptorFileSize()
-        val maxRead = minOf(if (statSize > 0L) statSize else 32L * 1024L * 1024L, 32L * 1024L * 1024L).toInt()
+        val maxRead = minOf(if (statSize > 0L) statSize else 128L * 1024L * 1024L, 128L * 1024L * 1024L).toInt()
         if (maxRead < 32) {
             lastErrorMsg = "DWG file is empty or truncated (< 32 bytes)."
             return
@@ -2820,6 +1843,46 @@ class Stl3dMeshSession(
         }
         modelType = "DWG ($releaseName)"
 
+        val geometryLoaded = try {
+            val bridge = com.omnireader.core.engine.impl.GplCoreEngineBridgeLoader.get()
+            if (bridge != null) {
+                bridge.renderDwg(bytes, password, object : com.omnireader.core.engine.impl.DwgGeometrySink {
+                    override val isFull: Boolean get() = isGeometryTruncated
+                    override fun line(x1: Double, y1: Double, z1: Double, x2: Double, y2: Double, z2: Double, color: Int) {
+                        addLineSegment(x1.toFloat(), y1.toFloat(), z1.toFloat(), x2.toFloat(), y2.toFloat(), z2.toFloat(), dwgColor(color))
+                    }
+                    override fun triangle(x1: Double, y1: Double, z1: Double, x2: Double, y2: Double, z2: Double, x3: Double, y3: Double, z3: Double, color: Int) {
+                        addTriangle(x1.toFloat(), y1.toFloat(), z1.toFloat(), x2.toFloat(), y2.toFloat(), z2.toFloat(), x3.toFloat(), y3.toFloat(), z3.toFloat(), dwgColor(color))
+                    }
+                    override fun textWidth(value: String, height: Double): Double = com.omnireader.core.engine.MeshSceneRenderer.measureLabelWidth(value, height)
+                    override fun text(value: String, x: Double, y: Double, z: Double, height: Double, rotationDeg: Double, color: Int) {
+                        if (textLabels.size >= 20_000 || !x.isFinite() || !y.isFinite() || !z.isFinite()) return
+                        textLabels.add(CadTextLabel3D(value, x.toFloat(), y.toFloat(), z.toFloat(), height.toFloat(), rotationDeg.toFloat(), dwgColor(color)))
+                        updateBounds(x.toFloat(), y.toFloat(), z.toFloat())
+                    }
+                })
+                vertexCount > 0 || textLabels.isNotEmpty()
+            } else {
+                false
+            }
+        } catch (e: com.omnireader.core.engine.impl.DwgFormatException) {
+            val msg = e.message ?: ""
+            val isSecErr = msg.startsWith("PASSWORD_REQUIRED") || msg.startsWith("UNSUPPORTED_ENCRYPTION") || msg.startsWith("DRM_PROTECTED")
+            lastErrorMsg = if (isSecErr) msg else "DWG ($releaseName): $msg"
+            if (isSecErr) {
+                dwgPreviewBitmap = null
+                return
+            }
+            false
+        } catch (e: OutOfMemoryError) {
+            lastErrorMsg = "DWG ($releaseName) is too large to load."
+            false
+        }
+        if (geometryLoaded) {
+            lastErrorMsg = null
+            return
+        }
+
         val bb = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
 
         val previewAddr = bb.getInt(0x0D)
@@ -2838,29 +1901,10 @@ class Stl3dMeshSession(
         if (dwgPreviewBitmap == null) {
             dwgPreviewBitmap = scanForEmbeddedPngOrBmpInDwg(bytes)
         }
-
-        val extractedLabels = extractDwgStrings(bytes, isUnicodeVersion = verCode >= "AC1021")
-        extractedLabels.forEachIndexed { idx, txt ->
-            val row = idx / 3
-            val col = idx % 3
-            val lx = (col - 1) * 85f
-            val ly = 75f - row * 22f
-            textLabels.add(
-                CadTextLabel3D(
-                    text = txt,
-                    x = lx,
-                    y = ly,
-                    z = 0f,
-                    height = 6.5f,
-                    rotationDeg = 0f,
-                    color = aciToColor((idx % 6) + 1)
-                )
-            )
-            updateBounds(lx, ly, 0f)
-        }
-
-        extractDwgGeometricEntities(bytes, bb, releaseName)
+        if (dwgPreviewBitmap != null) lastErrorMsg = null
     }
+
+    private fun dwgColor(c: Int): Int = if (c < 0) (0xFF shl 24) or (c and 0xFFFFFF) else aciToColor(c)
 
     private fun matchesDwgSentinelAt(bytes: ByteArray, offset: Int): Boolean {
         if (offset < 0 || offset + 16 > bytes.size) return false
@@ -2966,177 +2010,8 @@ class Stl3dMeshSession(
         return null
     }
 
-    private fun extractDwgStrings(bytes: ByteArray, isUnicodeVersion: Boolean): List<String> {
-        val found = LinkedHashSet<String>()
-        val ignoredKeywords = setOf(
-            "CONTINUOUS", "BYLAYER", "BYBLOCK", "STANDARD", "ACAD", "MODEL_SPACE", "PAPER_SPACE"
-        )
 
-        if (isUnicodeVersion) {
-            var i = 0x20
-            val scanLimit = minOf(bytes.size - 4, 2 * 1024 * 1024)
-            while (i < scanLimit && found.size < 24) {
-                val sb = StringBuilder()
-                var j = i
-                while (j + 1 < scanLimit && sb.length < 64) {
-                    val lo = bytes[j].toInt() and 0xFF
-                    val hi = bytes[j + 1].toInt() and 0xFF
-                    val ch = ((hi shl 8) or lo).toChar()
-                    if ((hi == 0 && lo in 32..126) || ch in '\u0400'..'\u04FF') {
-                        sb.append(ch)
-                        j += 2
-                    } else {
-                        break
-                    }
-                }
-                if (sb.length in 4..48) {
-                    val s = sb.toString().trim()
-                    if (s.any { it.isLetter() } && s.uppercase(Locale.ROOT) !in ignoredKeywords) {
-                        found.add(s)
-                    }
-                    i = j
-                } else {
-                    i += 2
-                }
-            }
-        }
 
-        var k = 0x20
-        val asciiLimit = minOf(bytes.size, 2 * 1024 * 1024)
-        val run = StringBuilder()
-        while (k < asciiLimit && found.size < 24) {
-            val b = bytes[k++].toInt() and 0xFF
-            if (b in 32..126) {
-                run.append(b.toChar())
-            } else {
-                if (run.length in 4..48) {
-                    val s = run.toString().trim()
-                    if (s.count { it.isLetter() } >= 3 && s.uppercase(Locale.ROOT) !in ignoredKeywords && !s.startsWith("AC10")) {
-                        found.add(s)
-                    }
-                }
-                run.setLength(0)
-            }
-        }
-
-        return found.toList()
-    }
-
-    private fun extractDwgGeometricEntities(bytes: ByteArray, bb: ByteBuffer, releaseName: String) {
-        val scanStart = minOf(0x100, bytes.size)
-        val scanEnd = minOf(bytes.size - 32, 16 * 1024 * 1024)
-        var i = scanStart
-        var extractedSegments = 0
-        while (i <= scanEnd && extractedSegments < 25_000) {
-            // 1. 3D line segment check (X1, Y1, Z1, X2, Y2, Z2)
-            if (i + 48 <= scanEnd) {
-                val x1 = bb.getDouble(i)
-                val y1 = bb.getDouble(i + 8)
-                val z1 = bb.getDouble(i + 16)
-                val x2 = bb.getDouble(i + 24)
-                val y2 = bb.getDouble(i + 32)
-                val z2 = bb.getDouble(i + 40)
-
-                val isPlausibleCoord = isPlausibleCadDouble(x1) && isPlausibleCadDouble(y1) && isPlausibleCadDouble(z1) &&
-                        isPlausibleCadDouble(x2) && isPlausibleCadDouble(y2) && isPlausibleCadDouble(z2)
-                if (isPlausibleCoord) {
-                    val dx = (x2 - x1).toFloat()
-                    val dy = (y2 - y1).toFloat()
-                    val dz = (z2 - z1).toFloat()
-                    val distSq = dx * dx + dy * dy + dz * dz
-                    if (distSq in 0.25f..25_000_000f) {
-                        addLineSegment(
-                            x1.toFloat(), y1.toFloat(), z1.toFloat(),
-                            x2.toFloat(), y2.toFloat(), z2.toFloat(),
-                            aciToColor((extractedSegments % 7) + 1)
-                        )
-                        extractedSegments++
-                        i += 48
-                        continue
-                    }
-                }
-            }
-
-            // 2. 2D line segment check (X1, Y1, X2, Y2)
-            if (i + 32 <= scanEnd) {
-                val x1_2d = bb.getDouble(i)
-                val y1_2d = bb.getDouble(i + 8)
-                val x2_2d = bb.getDouble(i + 16)
-                val y2_2d = bb.getDouble(i + 24)
-                if (isPlausibleCadDouble(x1_2d) && isPlausibleCadDouble(y1_2d) &&
-                    isPlausibleCadDouble(x2_2d) && isPlausibleCadDouble(y2_2d)
-                ) {
-                    val dx = (x2_2d - x1_2d).toFloat()
-                    val dy = (y2_2d - y1_2d).toFloat()
-                    val distSq = dx * dx + dy * dy
-                    if (distSq in 0.25f..25_000_000f) {
-                        addLineSegment(
-                            x1_2d.toFloat(), y1_2d.toFloat(), 0f,
-                            x2_2d.toFloat(), y2_2d.toFloat(), 0f,
-                            aciToColor((extractedSegments % 7) + 1)
-                        )
-                        extractedSegments++
-                        i += 32
-                        continue
-                    }
-                }
-            }
-
-            // 3. 2D circle/arc check (CX, CY, Radius)
-            if (i + 24 <= scanEnd) {
-                val cx = bb.getDouble(i)
-                val cy = bb.getDouble(i + 8)
-                val r = bb.getDouble(i + 16)
-                if (isPlausibleCadDouble(cx) && isPlausibleCadDouble(cy) && r.isFinite() && r in 1.0..5000.0) {
-                    val steps = 24
-                    val stepRad = (2.0 * Math.PI / steps).toFloat()
-                    val cf = cx.toFloat(); val sf = cy.toFloat(); val rf = r.toFloat()
-                    val col = aciToColor((extractedSegments % 7) + 1)
-                    for (s in 0 until steps) {
-                        val a1 = s * stepRad
-                        val a2 = (s + 1) * stepRad
-                        val px1 = cf + rf * cos(a1)
-                        val py1 = sf + rf * sin(a1)
-                        val px2 = cf + rf * cos(a2)
-                        val py2 = sf + rf * sin(a2)
-                        addLineSegment(px1, py1, 0f, px2, py2, 0f, col)
-                    }
-                    extractedSegments++
-                    i += 24
-                    continue
-                }
-            }
-
-            i += 8
-        }
-
-        if (vertexCount == 0 && dwgPreviewBitmap == null) {
-            val w = 160f
-            val h = 110f
-            val frameColor = aciToColor(4)
-            val gridColor = aciToColor(8)
-            addLineSegment(-w, -h, 0f, w, -h, 0f, frameColor)
-            addLineSegment(w, -h, 0f, w, h, 0f, frameColor)
-            addLineSegment(w, h, 0f, -w, h, 0f, frameColor)
-            addLineSegment(-w, h, 0f, -w, -h, 0f, frameColor)
-
-            for (gx in -120..120 step 40) {
-                addLineSegment(gx.toFloat(), -h, 0f, gx.toFloat(), h, 0f, gridColor)
-            }
-            for (gy in -80..80 step 40) {
-                addLineSegment(-w, gy.toFloat(), 0f, w, gy.toFloat(), 0f, gridColor)
-            }
-            if (textLabels.isEmpty()) {
-                textLabels.add(CadTextLabel3D(releaseName, -w + 12f, h - 18f, 0f, 10f, 0f, aciToColor(2)))
-            }
-        }
-    }
-
-    private fun isPlausibleCadDouble(v: Double): Boolean {
-        if (!v.isFinite()) return false
-        val a = abs(v)
-        return a == 0.0 || (a in 0.01..50_000.0)
-    }
 
     private fun updateBounds(x: Float, y: Float, z: Float) {
         if (x < minX) minX = x; if (x > maxX) maxX = x
@@ -3144,11 +2019,173 @@ class Stl3dMeshSession(
         if (z < minZ) minZ = z; if (z > maxZ) maxZ = z
     }
 
+    private fun exportAnimation(): com.omnireader.core.engine.MeshAnimation? {
+        val clip = animClip ?: return null
+        val polys = vertexCount / 9
+        if (polys == 0 || clip.frames < 2 || clip.matrices.size != clip.frames * clip.bones * 12) return null
+        val tb = triBone ?: return null
+        return com.omnireader.core.engine.MeshAnimation(
+            clip.fps, clip.frames, clip.bones, clip.matrices,
+            tb.copyOf(polys),
+            skinOffsets?.copyOf(polys),
+            if (skinCount > 0) skinJointsArr.copyOf(skinCount * 3 * skinK) else null,
+            if (skinCount > 0) skinWeightsArr.copyOf(skinCount * 3 * skinK) else null,
+            if (skinCount > 0) skinBindArr.copyOf(skinCount * 9) else null,
+            if (skinCount > 0 && skinHasNormals) skinBindNrmArr.copyOf(skinCount * 9) else null,
+            if (morphEntries > 0) clip.morphCount else 0,
+            if (morphEntries > 0) morphPolyArr.copyOf(morphEntries) else null,
+            if (morphEntries > 0) morphTargetArr.copyOf(morphEntries) else null,
+            if (morphEntries > 0) morphDeltaArr.copyOf(morphEntries * 9) else null,
+            clip.morphBase,
+            clip.morphWeights,
+            if (morphEntries > 0 && morphHasNormals) morphNormalArr.copyOf(morphEntries * 9) else null,
+            clip.clipNames,
+            clip.clipStarts,
+            clip.clipFrames,
+            skinK,
+            if (skinCount > 0 && skinHasDq) skinDqArr.copyOf(skinCount) else null
+        )
+    }
+
+    private fun registerNormalTexture(key: String, bytes: ByteArray?, flipGreen: Boolean, strength: Float): Int {
+        val k = "normal:$key:$flipGreen:$strength"
+        textureKeys[k]?.let { return it }
+        if (bytes == null || bytes.size < 8) {
+            textureKeys[k] = -1
+            return -1
+        }
+        val bmp = decodeTextureBitmap(bytes, true)
+        if (bmp == null) {
+            textureKeys[k] = -1
+            return -1
+        }
+        val result = if (flipGreen || strength != 1f || !bmp.isMutable) {
+            val w = bmp.width
+            val h = bmp.height
+            val px = IntArray(w * h)
+            bmp.getPixels(px, 0, w, 0, 0, w, h)
+            for (i in px.indices) {
+                val c = px[i]
+                var x = ((c shr 16) and 0xFF) / 127.5f - 1f
+                var y = ((c shr 8) and 0xFF) / 127.5f - 1f
+                var z = (c and 0xFF) / 127.5f - 1f
+                if (flipGreen) y = -y
+                if (strength != 1f) {
+                    x *= strength
+                    y *= strength
+                    val l = sqrt(x * x + y * y + z * z)
+                    if (l > 0f) {
+                        x /= l; y /= l; z /= l
+                    }
+                }
+                fun enc(v: Float) = ((v + 1f) * 127.5f).roundToInt().coerceIn(0, 255)
+                px[i] = (0xFF shl 24) or (enc(x) shl 16) or (enc(y) shl 8) or enc(z)
+            }
+            if (bmp.isMutable) {
+                bmp.setPixels(px, 0, w, 0, 0, w, h)
+                bmp
+            } else {
+                bmp.recycle()
+                Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+            }
+        } else bmp
+        textures.add(result)
+        textureBudgetPixels -= result.width.toLong() * result.height
+        val idx = textures.size - 1
+        textureKeys[k] = idx
+        return idx
+    }
+
+    private fun registerTexture(key: String, bytes: ByteArray?, opaque: Boolean = false): Int {
+        textureKeys[key]?.let { return it }
+        if (bytes == null || bytes.size < 8) {
+            textureKeys[key] = -1
+            return -1
+        }
+        val bmp = decodeTextureBitmap(bytes, opaque)
+        if (bmp == null) {
+            textureKeys[key] = -1
+            return -1
+        }
+        textures.add(bmp)
+        textureBudgetPixels -= bmp.width.toLong() * bmp.height
+        val idx = textures.size - 1
+        textureKeys[key] = idx
+        return idx
+    }
+
+    private fun decodeTextureBitmap(bytes: ByteArray, opaque: Boolean = false): Bitmap? = try {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            CleanRoomTextureDecoders.decode(bytes)?.let { d ->
+                val limit = if (textureBudgetPixels < 8L * 1024L * 1024L) 1024 else 2048
+                var step = 1
+                while (maxOf(d.width, d.height) / step > limit) step *= 2
+                val w = d.width / step
+                val h = d.height / step
+                val px = if (step == 1) d.argb else IntArray(w * h) { d.argb[(it / w) * step * d.width + (it % w) * step] }
+                if (opaque) for (k in px.indices) px[k] = px[k] or (0xFF shl 24)
+                Bitmap.createBitmap(px, w, h, Bitmap.Config.ARGB_8888)
+            }
+        } else {
+            val limit = when {
+                textureBudgetPixels <= 0L -> 256
+                textureBudgetPixels < 8L * 1024L * 1024L -> 1024
+                else -> 2048
+            }
+            var sample = 1
+            while (maxOf(bounds.outWidth, bounds.outHeight) / sample > limit) sample *= 2
+            val opts = BitmapFactory.Options().apply {
+                inSampleSize = sample
+                inPreferredConfig = Bitmap.Config.ARGB_8888
+                if (opaque) inPremultiplied = false
+            }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)?.let { decoded ->
+                val argb = if (decoded.config == Bitmap.Config.ARGB_8888 && !opaque) decoded else {
+                    val px = IntArray(decoded.width * decoded.height)
+                    decoded.getPixels(px, 0, decoded.width, 0, 0, decoded.width, decoded.height)
+                    if (opaque) for (k in px.indices) px[k] = px[k] or (0xFF shl 24)
+                    Bitmap.createBitmap(px, decoded.width, decoded.height, Bitmap.Config.ARGB_8888).also { decoded.recycle() }
+                }
+                argb
+            }
+        }
+    } catch (_: Throwable) {
+        null
+    }
+
+    private fun ensureDetailCapacity(polyIndex: Int, withUv: Boolean, withColors: Boolean) {
+        val cap = polyColors.size
+        if (withUv) {
+            val uvArr = triUvs
+            if (uvArr == null || uvArr.size < cap * 6) triUvs = (uvArr ?: FloatArray(0)).copyOf(cap * 6)
+            val texArr = triTex
+            if (texArr == null || texArr.size < cap) {
+                val old = texArr?.size ?: 0
+                triTex = (texArr ?: IntArray(0)).copyOf(cap).also { java.util.Arrays.fill(it, old, cap, -1) }
+            }
+        }
+        if (withColors) {
+            val c = cornerColors
+            if (c == null || c.size < cap * 3) cornerColors = (c ?: IntArray(0)).copyOf(cap * 3)
+        }
+    }
+
     private fun addTriangle(
         x1: Float, y1: Float, z1: Float,
         x2: Float, y2: Float, z2: Float,
         x3: Float, y3: Float, z3: Float,
-        customColor: Int = 0
+        customColor: Int = 0,
+        uv: FloatArray? = null,
+        uvOffset: Int = 0,
+        texture: Int = -1,
+        c1: Int = 0,
+        c2: Int = 0,
+        c3: Int = 0,
+        normals: FloatArray? = null,
+        normalTex: Int = -1,
+        anim: TriAnim? = null
     ) {
         if (!x1.isFinite() || !y1.isFinite() || !z1.isFinite() ||
             !x2.isFinite() || !y2.isFinite() || !z2.isFinite() ||
@@ -3169,6 +2206,116 @@ class Stl3dMeshSession(
             polyColors = polyColors.copyOf(nextPolyCap)
         }
         polyColors[polyIndex] = customColor
+        val hasUv = uv != null && (texture >= 0 || normalTex >= 0)
+        val hasColors = c1 != 0 || c2 != 0 || c3 != 0
+        if (hasUv || hasColors || triTex != null || cornerColors != null) {
+            ensureDetailCapacity(polyIndex, hasUv || triTex != null, hasColors || cornerColors != null)
+            triTex?.let { it[polyIndex] = if (hasUv) texture else -1 }
+            if (hasUv) System.arraycopy(uv!!, uvOffset, triUvs ?: return, polyIndex * 6, 6)
+            cornerColors?.let {
+                it[polyIndex * 3] = c1
+                it[polyIndex * 3 + 1] = c2
+                it[polyIndex * 3 + 2] = c3
+            }
+        }
+        if (normals != null || cornerNormals != null) {
+            val cap = polyColors.size * 9
+            val cn = cornerNormals
+            if (cn == null || cn.size < cap) cornerNormals = (cn ?: FloatArray(0)).copyOf(cap)
+            val dst = cornerNormals!!
+            if (normals != null) System.arraycopy(normals, 0, dst, polyIndex * 9, 9) else java.util.Arrays.fill(dst, polyIndex * 9, polyIndex * 9 + 9, 0f)
+        }
+
+        val cap = polyColors.size
+        if ((hasUv && normalTex >= 0) || triNormalTex != null) {
+            val nt = triNormalTex
+            if (nt == null || nt.size < cap) {
+                val old = nt?.size ?: 0
+                triNormalTex = (nt ?: IntArray(0)).copyOf(cap).also { java.util.Arrays.fill(it, old, cap, -1) }
+            }
+            triNormalTex!![polyIndex] = if (hasUv) normalTex else -1
+        }
+        if (anim != null || triBone != null) {
+            val tb = triBone
+            if (tb == null || tb.size < cap) {
+                val old = tb?.size ?: 0
+                triBone = (tb ?: IntArray(0)).copyOf(cap).also { java.util.Arrays.fill(it, old, cap, -1) }
+                val so = skinOffsets
+                skinOffsets = (so ?: IntArray(0)).copyOf(cap).also { java.util.Arrays.fill(it, so?.size ?: 0, cap, -1) }
+            }
+            val bones = triBone!!
+            val joints = anim?.joints
+            val weights = anim?.weights
+            val bind = anim?.bindPos
+            if (joints != null && weights != null && bind != null && joints.size >= 3 && joints.size % 3 == 0 && weights.size >= joints.size && bind.size >= 9) {
+                val k = (joints.size / 3).coerceAtMost(64)
+                if (k > skinK) {
+                    val nj = IntArray(skinJointsArr.size / skinK * k) { -1 }
+                    val nw = FloatArray(nj.size)
+                    for (e in 0 until skinCount) for (c in 0 until 3) {
+                        System.arraycopy(skinJointsArr, e * 3 * skinK + c * skinK, nj, e * 3 * k + c * k, skinK)
+                        System.arraycopy(skinWeightsArr, e * 3 * skinK + c * skinK, nw, e * 3 * k + c * k, skinK)
+                    }
+                    skinJointsArr = nj
+                    skinWeightsArr = nw
+                    skinK = k
+                }
+                val kk = skinK
+                if (skinJointsArr.size < (skinCount + 1) * 3 * kk) {
+                    val n = maxOf(64, skinCount * 2)
+                    val old = skinJointsArr.size
+                    skinJointsArr = skinJointsArr.copyOf(n * 3 * kk).also { java.util.Arrays.fill(it, old, it.size, -1) }
+                    skinWeightsArr = skinWeightsArr.copyOf(n * 3 * kk)
+                    skinBindArr = skinBindArr.copyOf(n * 9)
+                    skinBindNrmArr = skinBindNrmArr.copyOf(n * 9)
+                    skinDqArr = skinDqArr.copyOf(n).also { java.util.Arrays.fill(it, skinCount, it.size, -1) }
+                }
+                for (c in 0 until 3) for (j in 0 until kk) {
+                    val inside = j < k
+                    skinJointsArr[skinCount * 3 * kk + c * kk + j] = if (inside) joints[c * k + j] else -1
+                    skinWeightsArr[skinCount * 3 * kk + c * kk + j] = if (inside) weights[c * k + j] else 0f
+                }
+                skinDqArr[skinCount] = anim.dqPre
+                if (anim.dqPre >= 0) skinHasDq = true
+                System.arraycopy(bind, 0, skinBindArr, skinCount * 9, 9)
+                val bn = anim.bindNrm
+                if (bn != null && bn.size >= 9) {
+                    System.arraycopy(bn, 0, skinBindNrmArr, skinCount * 9, 9)
+                    skinHasNormals = true
+                }
+                bones[polyIndex] = -2
+                skinOffsets!![polyIndex] = skinCount
+                skinCount++
+            } else {
+                bones[polyIndex] = anim?.bone ?: -1
+                skinOffsets!![polyIndex] = -1
+            }
+            val mt = anim?.morphTargets
+            val md = anim?.morphDeltas
+            val mnd = anim?.morphNormalDeltas
+            if (mt != null && md != null) {
+                for (k in mt.indices) {
+                    if (md.size < (k + 1) * 9) break
+                    if (morphPolyArr.size <= morphEntries) {
+                        val n = maxOf(64, morphEntries * 2)
+                        morphPolyArr = morphPolyArr.copyOf(n)
+                        morphTargetArr = morphTargetArr.copyOf(n)
+                        morphDeltaArr = morphDeltaArr.copyOf(n * 9)
+                        morphNormalArr = morphNormalArr.copyOf(n * 9)
+                    }
+                    morphPolyArr[morphEntries] = polyIndex
+                    morphTargetArr[morphEntries] = mt[k]
+                    System.arraycopy(md, k * 9, morphDeltaArr, morphEntries * 9, 9)
+                    if (mnd != null && mnd.size >= (k + 1) * 9) {
+                        System.arraycopy(mnd, k * 9, morphNormalArr, morphEntries * 9, 9)
+                        morphHasNormals = true
+                    } else {
+                        java.util.Arrays.fill(morphNormalArr, morphEntries * 9, morphEntries * 9 + 9, 0f)
+                    }
+                    morphEntries++
+                }
+            }
+        }
 
         rawVertices[vertexCount++] = x1; rawVertices[vertexCount++] = y1; rawVertices[vertexCount++] = z1
         rawVertices[vertexCount++] = x2; rawVertices[vertexCount++] = y2; rawVertices[vertexCount++] = z2
@@ -3331,117 +2478,265 @@ class Stl3dMeshSession(
      * (36 MB flat array with zero object header overhead), so large `.obj` files (> 50–250 MB)
      * never drop vertices before reaching the `f` face definitions at the end of the file.
      */
+    private class ObjMaterial(
+        var color: Int = 0, var alpha: Float = 1f, var texture: Int = -1, var uScale: Float = 1f, var vScale: Float = 1f,
+        var uOffset: Float = 0f, var vOffset: Float = 0f, var normalTex: Int = -1
+    )
+
+    private class ObjMap(val file: String?, val uScale: Float?, val vScale: Float?, val uOffset: Float?, val vOffset: Float?, val bumpMultiplier: Float?)
+
+    private fun objMapArgs(parts: List<String>): ObjMap {
+        var k = 1
+        var uS: Float? = null
+        var vS: Float? = null
+        var uO: Float? = null
+        var vO: Float? = null
+        var bm: Float? = null
+        while (k < parts.size) {
+            val t = parts[k]
+            if (t.startsWith("-") && t.length > 1 && t[1].isLetter()) {
+                val nums = ArrayList<Float>()
+                var q = k + 1
+                while (q < parts.size && nums.size < 3) {
+                    val f = parts[q].toFloatOrNull() ?: break
+                    nums.add(f)
+                    q++
+                }
+                when (t.lowercase(Locale.ROOT)) {
+                    "-s" -> { uS = nums.getOrElse(0) { 1f }; vS = nums.getOrElse(1) { uS!! } }
+                    "-o" -> { uO = nums.getOrElse(0) { 0f }; vO = nums.getOrElse(1) { 0f } }
+                    "-bm" -> bm = nums.getOrNull(0)
+                }
+                k = if (nums.isEmpty() && q < parts.size && t.lowercase(Locale.ROOT) in setOf("-clamp", "-blendu", "-blendv", "-imfchan", "-type", "-texres", "-cc")) q + 1 else q
+                continue
+            }
+            return ObjMap(parts.subList(k, parts.size).joinToString(" "), uS, vS, uO, vO, bm)
+        }
+        return ObjMap(null, uS, vS, uO, vO, bm)
+    }
+
+    private fun parseMtl(bytes: ByteArray, into: HashMap<String, ObjMaterial>) {
+        var current: ObjMaterial? = null
+        val text = String(bytes, StandardCharsets.UTF_8)
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (line.isEmpty() || line.startsWith("#")) continue
+            val parts = line.split(Regex("\\s+"))
+            val key = parts[0].lowercase(Locale.ROOT)
+            if (key == "newmtl") {
+                current = ObjMaterial().also { into[line.substringAfter(parts[0]).trim()] = it }
+                continue
+            }
+            val m = current ?: continue
+            when (key) {
+                "kd" -> if (parts.size >= 4) {
+                    val r = parts[1].toFloatOrNull() ?: continue
+                    val g = parts[2].toFloatOrNull() ?: r
+                    val b = parts[3].toFloatOrNull() ?: r
+                    m.color = Color.rgb((r.coerceIn(0f, 1f) * 255f).roundToInt(), (g.coerceIn(0f, 1f) * 255f).roundToInt(), (b.coerceIn(0f, 1f) * 255f).roundToInt())
+                } else if (parts.size == 2) {
+                    val v = ((parts[1].toFloatOrNull() ?: continue).coerceIn(0f, 1f) * 255f).roundToInt()
+                    m.color = Color.rgb(v, v, v)
+                }
+                "d" -> parts.getOrNull(parts.indexOfLast { it.toFloatOrNull() != null }.coerceAtLeast(1))?.toFloatOrNull()?.let { m.alpha = it.coerceIn(0f, 1f) }
+                "tr" -> parts.getOrNull(1)?.toFloatOrNull()?.let { m.alpha = (1f - it).coerceIn(0f, 1f) }
+                "map_kd" -> {
+                    val map = objMapArgs(parts)
+                    map.uScale?.let { m.uScale = it }
+                    map.vScale?.let { m.vScale = it }
+                    map.uOffset?.let { m.uOffset = it }
+                    map.vOffset?.let { m.vOffset = it }
+                    val file = map.file
+                    if (file != null) {
+                        val bytes2 = companionResource(file)
+                        m.texture = if (bytes2 != null) registerTexture("obj:" + normalizeResourceRef(file), bytes2) else -1
+                    }
+                }
+                "norm", "map_kn", "map_bump", "bump" -> {
+                    if (m.normalTex >= 0) continue
+                    val map = objMapArgs(parts)
+                    val file = map.file ?: continue
+                    val explicit = key == "norm" || key == "map_kn"
+                    val bytes2 = if (explicit) companionResource(file) else companionResourceQuiet(file) ?: companionResource(file)
+                    if (bytes2 != null && (explicit || NormalMapHeuristic.looksLikeNormalMap(bytes2))) {
+                        m.normalTex = registerNormalTexture("obj:" + normalizeResourceRef(file), bytes2, false, map.bumpMultiplier ?: 1f)
+                    }
+                }
+            }
+        }
+    }
+
     private fun parseObj(stream: InputStream) {
         var vertCoords = FloatArray(60_000)
         var vertColors = IntArray(20_000)
         var vertCount = 0
-        var activeMtlColor = 0
+        var texCoords = FloatArray(0)
+        var texCount = 0
+        var normCoords = FloatArray(0)
+        var normCount = 0
+        val nTmp = FloatArray(9)
         val maxVerts = 3_000_000
-
-        fun colorFromMtlName(name: String): Int {
-            val lower = name.lowercase(Locale.ROOT)
-            return when {
-                lower.contains("red") || lower.contains("crimson") -> Color.rgb(225, 65, 55)
-                lower.contains("blue") || lower.contains("navy") || lower.contains("azure") -> Color.rgb(55, 135, 235)
-                lower.contains("green") || lower.contains("forest") -> Color.rgb(50, 190, 90)
-                lower.contains("yellow") || lower.contains("gold") || lower.contains("brass") -> Color.rgb(235, 195, 50)
-                lower.contains("orange") || lower.contains("copper") || lower.contains("bronze") -> Color.rgb(225, 130, 55)
-                lower.contains("white") || lower.contains("silver") || lower.contains("chrome") -> Color.rgb(225, 228, 235)
-                lower.contains("black") || lower.contains("tire") || lower.contains("rubber") || lower.contains("dark") -> Color.rgb(48, 52, 60)
-                lower.contains("gray") || lower.contains("grey") || lower.contains("steel") || lower.contains("iron") -> Color.rgb(150, 156, 168)
-                lower.contains("wood") || lower.contains("brown") || lower.contains("leather") -> Color.rgb(165, 110, 70)
-                lower.contains("skin") || lower.contains("flesh") || lower.contains("peach") -> Color.rgb(230, 180, 150)
-                else -> {
-                    val hue = ((abs(lower.hashCode()) % 360)).toFloat()
-                    Color.HSVToColor(floatArrayOf(hue, 0.55f, 0.88f))
-                }
-            }
-        }
+        val materials = HashMap<String, ObjMaterial>()
+        var active: ObjMaterial? = null
+        val uvTmp = FloatArray(6)
+        val ws = Regex("\\s+")
 
         BufferedReader(InputStreamReader(stream, StandardCharsets.UTF_8), 64 * 1024).use { reader ->
-            var line: String?
-            val faceIndices = IntArray(64)
+            val faceV = IntArray(256)
+            val faceT = IntArray(256)
+            val faceN = IntArray(256)
+            var pending: String? = null
 
-            while (reader.readLine().also { line = it } != null && !isGeometryTruncated) {
-                val p = line!!.trim()
+            while (!isGeometryTruncated) {
+                var line = reader.readLine() ?: break
+                if (pending != null) {
+                    line = pending + " " + line
+                    pending = null
+                }
+                if (line.endsWith("\\")) {
+                    pending = line.dropLast(1)
+                    continue
+                }
+                val p = line.trim()
                 if (p.isEmpty() || p[0] == '#') continue
-                if (p.startsWith("v ")) {
-                    if (vertCount < maxVerts) {
-                        val parts = p.split(Regex("\\s+"))
-                        if (parts.size >= 4) {
-                            val vx = parts[1].toFloatOrNull()
-                            val vy = parts[2].toFloatOrNull()
-                            val vz = parts[3].toFloatOrNull()
-                            if (vx != null && vy != null && vz != null) {
-                                if ((vertCount + 1) * 3 > vertCoords.size) {
-                                    val nextCap = minOf(maxVerts * 3, vertCoords.size * 2)
-                                    vertCoords = vertCoords.copyOf(nextCap)
-                                    vertColors = vertColors.copyOf(nextCap / 3)
-                                }
-                                val base = vertCount * 3
-                                vertCoords[base] = vx
-                                vertCoords[base + 1] = vy
-                                vertCoords[base + 2] = vz
-                                if (parts.size >= 7) {
-                                    val rRaw = parts[4].toFloatOrNull()
-                                    val gRaw = parts[5].toFloatOrNull()
-                                    val bRaw = parts[6].toFloatOrNull()
-                                    if (rRaw != null && gRaw != null && bRaw != null) {
-                                        val scale = if (rRaw <= 1.0f && gRaw <= 1.0f && bRaw <= 1.0f) 255f else 1f
-                                        val r = (rRaw * scale).toInt().coerceIn(0, 255)
-                                        val g = (gRaw * scale).toInt().coerceIn(0, 255)
-                                        val b = (bRaw * scale).toInt().coerceIn(0, 255)
-                                        vertColors[vertCount] = Color.rgb(maxOf(r, 20), maxOf(g, 20), maxOf(b, 24))
-                                    }
-                                }
-                                vertCount++
-                            }
+                if (p.startsWith("v ") || p.startsWith("v\t")) {
+                    if (vertCount >= maxVerts) continue
+                    val parts = p.split(ws)
+                    if (parts.size < 4) continue
+                    val vx = parts[1].toFloatOrNull() ?: continue
+                    val vy = parts[2].toFloatOrNull() ?: continue
+                    val vz = parts[3].toFloatOrNull() ?: continue
+                    if ((vertCount + 1) * 3 > vertCoords.size) {
+                        val nextCap = minOf(maxVerts * 3, vertCoords.size * 2)
+                        vertCoords = vertCoords.copyOf(nextCap)
+                        vertColors = vertColors.copyOf(nextCap / 3)
+                    }
+                    val base = vertCount * 3
+                    vertCoords[base] = vx
+                    vertCoords[base + 1] = vy
+                    vertCoords[base + 2] = vz
+                    vertColors[vertCount] = 0
+                    if (parts.size >= 7) {
+                        val r = parts[4].toFloatOrNull()
+                        val g = parts[5].toFloatOrNull()
+                        val b = parts[6].toFloatOrNull()
+                        if (r != null && g != null && b != null) {
+                            val scale = if (r <= 1f && g <= 1f && b <= 1f) 255f else 1f
+                            vertColors[vertCount] = Color.rgb((r * scale).roundToInt().coerceIn(0, 255), (g * scale).roundToInt().coerceIn(0, 255), (b * scale).roundToInt().coerceIn(0, 255))
                         }
                     }
-                } else if (p.startsWith("usemtl ")) {
-                    val mtlName = p.substring(7).trim()
-                    if (mtlName.isNotEmpty()) activeMtlColor = colorFromMtlName(mtlName)
-                } else if (p.startsWith("Kd ")) {
-                    val parts = p.split(Regex("\\s+"))
-                    if (parts.size >= 4) {
-                        val r = ((parts[1].toFloatOrNull() ?: 0.8f).coerceIn(0f, 1f) * 255f).toInt()
-                        val g = ((parts[2].toFloatOrNull() ?: 0.8f).coerceIn(0f, 1f) * 255f).toInt()
-                        val b = ((parts[3].toFloatOrNull() ?: 0.8f).coerceIn(0f, 1f) * 255f).toInt()
-                        activeMtlColor = Color.rgb(maxOf(r, 20), maxOf(g, 20), maxOf(b, 24))
+                    vertCount++
+                } else if (p.startsWith("vt ") || p.startsWith("vt\t")) {
+                    val parts = p.split(ws)
+                    val u = parts.getOrNull(1)?.toFloatOrNull() ?: continue
+                    val v = parts.getOrNull(2)?.toFloatOrNull() ?: 0f
+                    if ((texCount + 1) * 2 > texCoords.size) texCoords = texCoords.copyOf(maxOf(1024, texCoords.size * 2))
+                    texCoords[texCount * 2] = u
+                    texCoords[texCount * 2 + 1] = v
+                    texCount++
+                } else if (p.startsWith("vn ") || p.startsWith("vn\t")) {
+                    val parts = p.split(ws)
+                    val nx = parts.getOrNull(1)?.toFloatOrNull() ?: continue
+                    val ny = parts.getOrNull(2)?.toFloatOrNull() ?: continue
+                    val nz = parts.getOrNull(3)?.toFloatOrNull() ?: continue
+                    if ((normCount + 1) * 3 > normCoords.size) normCoords = normCoords.copyOf(maxOf(3072, normCoords.size * 2))
+                    normCoords[normCount * 3] = nx
+                    normCoords[normCount * 3 + 1] = ny
+                    normCoords[normCount * 3 + 2] = nz
+                    normCount++
+                } else if (p.startsWith("mtllib")) {
+                    val names = p.substring(6).trim()
+                    if (names.isNotEmpty()) {
+                        val whole = companionResourceQuiet(names)
+                        if (whole != null) {
+                            parseMtl(whole, materials)
+                        } else {
+                            for (n in names.split(ws)) companionResource(n)?.let { parseMtl(it, materials) }
+                        }
                     }
-                } else if (p.startsWith("f ") && vertCount >= 3) {
-                    val parts = p.split(Regex("\\s+"))
+                } else if (p.startsWith("usemtl")) {
+                    active = materials[p.substring(6).trim()]
+                } else if ((p.startsWith("f ") || p.startsWith("f\t")) && vertCount >= 3) {
+                    val parts = p.split(ws)
                     var fLen = 0
                     for (k in 1 until parts.size) {
-                        if (fLen >= faceIndices.size) break
+                        if (fLen >= faceV.size) break
                         val tok = parts[k]
                         if (tok.isEmpty()) continue
-                        val slashIdx = tok.indexOf('/')
-                        val idxStr = if (slashIdx >= 0) tok.substring(0, slashIdx) else tok
-                        val rawIdx = idxStr.toIntOrNull() ?: continue
-                        val resolved = if (rawIdx < 0) vertCount + rawIdx else rawIdx - 1
-                        if (resolved in 0 until vertCount) {
-                            faceIndices[fLen++] = resolved
+                        val s1 = tok.indexOf('/')
+                        val vi = (if (s1 >= 0) tok.substring(0, s1) else tok).toIntOrNull() ?: continue
+                        val rv = if (vi < 0) vertCount + vi else vi - 1
+                        if (rv !in 0 until vertCount) continue
+                        var rt = -1
+                        var rn = -1
+                        if (s1 >= 0) {
+                            val s2 = tok.indexOf('/', s1 + 1)
+                            val ts = if (s2 >= 0) tok.substring(s1 + 1, s2) else tok.substring(s1 + 1)
+                            ts.toIntOrNull()?.let { ti -> rt = if (ti < 0) texCount + ti else ti - 1 }
+                            if (rt !in 0 until texCount) rt = -1
+                            if (s2 >= 0) {
+                                tok.substring(s2 + 1).toIntOrNull()?.let { ni -> rn = if (ni < 0) normCount + ni else ni - 1 }
+                                if (rn !in 0 until normCount) rn = -1
+                            }
                         }
+                        faceV[fLen] = rv
+                        faceT[fLen] = rt
+                        faceN[fLen] = rn
+                        fLen++
                     }
-                    if (fLen >= 3) {
-                        val idx0 = faceIndices[0]
-                        val b0 = idx0 * 3
-                        val x0 = vertCoords[b0]; val y0 = vertCoords[b0 + 1]; val z0 = vertCoords[b0 + 2]
-                        val faceCol = if (vertColors[idx0] != 0) vertColors[idx0] else activeMtlColor
-                        for (i in 1 until fLen - 1) {
-                            val b1 = faceIndices[i] * 3
-                            val b2 = faceIndices[i + 1] * 3
-                            addTriangle(
-                                x0, y0, z0,
-                                vertCoords[b1], vertCoords[b1 + 1], vertCoords[b1 + 2],
-                                vertCoords[b2], vertCoords[b2 + 1], vertCoords[b2 + 2],
-                                faceCol
-                            )
+                    if (fLen < 3) continue
+                    val mat = active
+                    val tex = mat?.texture ?: -1
+                    val ntex = mat?.normalTex ?: -1
+                    val alpha = ((mat?.alpha ?: 1f) * 255f).roundToInt().coerceIn(0, 255)
+                    val baseColor = when {
+                        tex >= 0 -> Color.argb(alpha, 255, 255, 255)
+                        mat != null && mat.color != 0 -> Color.argb(alpha, Color.red(mat.color), Color.green(mat.color), Color.blue(mat.color))
+                        mat != null && alpha < 255 -> Color.argb(alpha, 200, 200, 200)
+                        else -> 0
+                    }
+                    val i0 = faceV[0]
+                    for (i in 1 until fLen - 1) {
+                        val a = faceV[0]; val b = faceV[i]; val c = faceV[i + 1]
+                        val useUv = (tex >= 0 || ntex >= 0) && faceT[0] >= 0 && faceT[i] >= 0 && faceT[i + 1] >= 0
+                        val useN = faceN[0] >= 0 && faceN[i] >= 0 && faceN[i + 1] >= 0
+                        if (useN) {
+                            val ns = intArrayOf(faceN[0], faceN[i], faceN[i + 1])
+                            for (k in 0 until 3) {
+                                val nx = normCoords[ns[k] * 3]
+                                val ny = normCoords[ns[k] * 3 + 1]
+                                val nz = normCoords[ns[k] * 3 + 2]
+                                val l = sqrt(nx * nx + ny * ny + nz * nz).takeIf { it > 0f } ?: 1f
+                                nTmp[k * 3] = nx / l
+                                nTmp[k * 3 + 1] = ny / l
+                                nTmp[k * 3 + 2] = nz / l
+                            }
                         }
+                        if (useUv) {
+                            val m = mat!!
+                            val ts = intArrayOf(faceT[0], faceT[i], faceT[i + 1])
+                            for (k in 0 until 3) {
+                                uvTmp[k * 2] = texCoords[ts[k] * 2] * m.uScale + m.uOffset
+                                uvTmp[k * 2 + 1] = 1f - (texCoords[ts[k] * 2 + 1] * m.vScale + m.vOffset)
+                            }
+                        }
+                        val hasVc = vertColors[a] != 0 || vertColors[b] != 0 || vertColors[c] != 0
+                        fun vc(idx: Int): Int {
+                            val col = vertColors[idx]
+                            return if (col == 0) 0 else Color.argb(alpha, Color.red(col), Color.green(col), Color.blue(col))
+                        }
+                        addTriangle(
+                            vertCoords[a * 3], vertCoords[a * 3 + 1], vertCoords[a * 3 + 2],
+                            vertCoords[b * 3], vertCoords[b * 3 + 1], vertCoords[b * 3 + 2],
+                            vertCoords[c * 3], vertCoords[c * 3 + 1], vertCoords[c * 3 + 2],
+                            if (hasVc && !useUv) vertColors[i0].let { if (it != 0) vc(i0) else baseColor } else baseColor,
+                            if (useUv) uvTmp else null, 0, if (useUv) tex else -1,
+                            if (hasVc) vc(a) else 0, if (hasVc) vc(b) else 0, if (hasVc) vc(c) else 0,
+                            if (useN) nTmp else null, if (useUv) ntex else -1
+                        )
                     }
                 } else if (p.startsWith("l ") && vertCount >= 2) {
-                    val parts = p.split(Regex("\\s+"))
+                    val parts = p.split(ws)
                     var prevIdx = -1
                     for (k in 1 until parts.size) {
                         val rawIdx = parts[k].substringBefore('/').toIntOrNull() ?: continue
@@ -3452,7 +2747,8 @@ class Stl3dMeshSession(
                                 val b1 = resolved * 3
                                 addLineSegment(
                                     vertCoords[b0], vertCoords[b0 + 1], vertCoords[b0 + 2],
-                                    vertCoords[b1], vertCoords[b1 + 1], vertCoords[b1 + 2]
+                                    vertCoords[b1], vertCoords[b1 + 1], vertCoords[b1 + 2],
+                                    active?.color ?: 0
                                 )
                             }
                             prevIdx = resolved
@@ -4286,177 +3582,45 @@ class Stl3dMeshSession(
         return result
     }
 
-    @Volatile private var glesContext: Gles30OffscreenContext? = null
-    @Volatile private var glesRenderer: Gles30MeshRenderer? = null
+    private var colladaYUp: Boolean? = null
 
-    private fun drawTextLabelsAndHud(
-        canvas: Canvas,
-        width: Float,
-        height: Float,
-        zoomFactor: Float,
-        tileX: Int,
-        tileY: Int,
-        isYUp: Boolean,
-        isLightTheme: Boolean,
-        langOrdinal: Int
-    ) {
-        if (textLabels.isNotEmpty()) {
-            val defaultLabelColor = if (isLightTheme) LIGHT_THEME_LABEL_COLOR else DARK_THEME_LABEL_COLOR
-            val rangeX = (maxX - minX).let { if (it.isFinite() && it > 0f) it else 1f }
-            val rangeY = (maxY - minY).let { if (it.isFinite() && it > 0f) it else 1f }
-            val rangeZ = (maxZ - minZ).let { if (it.isFinite() && it > 0f) it else 1f }
-            val maxRange = maxOf(rangeX, rangeY, rangeZ).coerceAtLeast(1e-4f)
-            val scale = (minOf(width, height) / maxRange) * 0.90f * zoomFactor
-            val centerX = if (minX.isFinite()) minX + rangeX / 2f else 0f
-            val centerY = if (minY.isFinite()) minY + rangeY / 2f else 0f
-            val centerZ = if (minZ.isFinite()) minZ + rangeZ / 2f else 0f
-            val yawRad = tileX * (Math.PI / 180.0).toFloat()
-            val pitchRad = tileY * (Math.PI / 180.0).toFloat()
-            val cosY = cos(yawRad); val sinY = sin(yawRad)
-            val cosP = cos(pitchRad); val sinP = sin(pitchRad)
-            val perspectiveDistance = maxOf(width, height).coerceAtLeast(320f) * 2.2f
-            val nearPlane = perspectiveDistance * 0.15f
-            val minAllowedFinalZ = -perspectiveDistance + nearPlane
+    private val sceneRenderer = com.omnireader.core.engine.MeshSceneRenderer()
 
-            for (lbl in textLabels) {
-                val dx = lbl.x - centerX
-                val dy = lbl.y - centerY
-                val dz = lbl.z - centerZ
-                val wx = dx
-                val wy = if (isYUp) dy else dz
-                val wz = if (isYUp) dz else dy
-                val tx = wx * cosY + wz * sinY
-                val tz = -wx * sinY + wz * cosY
-                val ry = wy * cosP - tz * sinP
-                val rz = wy * sinP + tz * cosP
-                val finalZ = (rz * scale).coerceAtLeast(minAllowedFinalZ)
-                val denom = (perspectiveDistance + finalZ).coerceAtLeast(nearPlane)
-                val scale3D = (perspectiveDistance / denom).coerceIn(0.05f, 6.0f)
-                val screenX = (width / 2f + (tx * scale) * scale3D).coerceIn(-width * 2f, width * 3f)
-                val screenY = (height / 2f - (ry * scale) * scale3D).coerceIn(-height * 2f, height * 3f)
-                val fontPx = (lbl.height * scale * scale3D).coerceIn(14f, 64f)
-                textLabelPaint.textSize = fontPx
-                textLabelPaint.color = if (lbl.color != 0) lbl.color else defaultLabelColor
-                canvas.save()
-                canvas.rotate(-lbl.rotationDeg, screenX, screenY)
-                canvas.drawText(lbl.text, screenX, screenY, textLabelPaint)
-                canvas.restore()
-            }
-        }
-
-        paint.color = if (isLightTheme) LIGHT_THEME_HUD_TEXT_COLOR else DARK_THEME_HUD_TEXT_COLOR
-        paint.textSize = 26f
-        val statusText = formatLocalizedHudStatus(
-            langOrdinal = langOrdinal,
+    override fun exportMeshScene(): com.omnireader.core.engine.MeshScene {
+        val extLower = originalExtension.lowercase(Locale.ROOT)
+        val isYUp = colladaYUp ?: (extLower in setOf("obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx") ||
+                modelType.contains("glTF", ignoreCase = true) ||
+                modelType.contains("USD", ignoreCase = true) ||
+                modelType.contains("FBX", ignoreCase = true))
+        return com.omnireader.core.engine.MeshScene(
+            vertices = rawVertices,
+            vertexCount = vertexCount,
+            polyColors = polyColors,
+            minX = minX, maxX = maxX,
+            minY = minY, maxY = maxY,
+            minZ = minZ, maxZ = maxZ,
+            isYUp = isYUp,
             modelType = modelType,
-            polyCount = vertexCount / 9,
             isTruncated = isGeometryTruncated,
-            maxLimit = maxPolygonsLimit
+            maxPolygons = maxPolygonsLimit,
+            labels = textLabels.map {
+                com.omnireader.core.engine.MeshLabel(it.text, it.x, it.y, it.z, it.height, it.rotationDeg, it.color)
+            },
+            preview = dwgPreviewBitmap?.takeIf { !it.isRecycled },
+            vertexColors = cornerColors,
+            uvs = triUvs?.takeIf { triTex != null && textures.isNotEmpty() },
+            triTextures = triTex?.takeIf { triUvs != null && textures.isNotEmpty() },
+            textures = textures,
+            vertexNormals = cornerNormals,
+            triNormalTextures = triNormalTex?.takeIf { triTex != null && textures.isNotEmpty() },
+            animation = exportAnimation()
         )
-        canvas.drawText(statusText, 30f, height - 32f, paint)
     }
 
     @Synchronized
     override fun renderTile(pageIndex: Int, tileX: Int, tileY: Int, zoomPermille: Int, bitmap: Bitmap) {
         if (isClosed) return
-        val isLightTheme = (pageIndex and LIGHT_THEME_PAGE_FLAG) != 0 || (pageIndex and 0xFF) == 1
-        val langOrdinal = (pageIndex ushr LANG_ORDINAL_SHIFT) and 0xF
-        val width = bitmap.width.toFloat()
-        val height = bitmap.height.toFloat()
-        val zoomFactor = (zoomPermille / 1000f).coerceAtLeast(0.1f)
-
-        val previewBmp = dwgPreviewBitmap
-        if (previewBmp != null && !previewBmp.isRecycled && vertexCount == 0) {
-            val canvas = Canvas(bitmap)
-            canvas.drawColor(if (isLightTheme) LIGHT_THEME_BG_COLOR else DARK_THEME_BG_COLOR)
-            val aspect = previewBmp.width.toFloat() / previewBmp.height.toFloat().coerceAtLeast(1f)
-            val availW = (width - 80f) * zoomFactor
-            val availH = (height - 120f) * zoomFactor
-            val dstW: Float
-            val dstH: Float
-            if (availW / availH.coerceAtLeast(1f) > aspect) {
-                dstH = availH
-                dstW = dstH * aspect
-            } else {
-                dstW = availW
-                dstH = dstW / aspect
-            }
-            val panX = (tileX - 25) * 4f
-            val panY = (tileY - 20) * 4f
-            val left = (width - dstW) / 2f + panX
-            val top = (height - dstH) / 2f + panY
-            canvas.drawBitmap(previewBmp, null, RectF(left, top, left + dstW, top + dstH), bitmapPaint)
-
-            paint.color = if (isLightTheme) LIGHT_THEME_HUD_TEXT_COLOR else DARK_THEME_HUD_TEXT_COLOR
-            paint.textSize = 26f
-            val statusText = formatLocalizedHudStatus(
-                langOrdinal = langOrdinal,
-                modelType = "$modelType (Preview ${previewBmp.width}×${previewBmp.height})",
-                polyCount = 0,
-                isTruncated = false,
-                maxLimit = maxPolygonsLimit
-            )
-            canvas.drawText(statusText, 30f, height - 32f, paint)
-            return
-        }
-
-        val extLowerForOrientation = originalExtension.lowercase(Locale.ROOT)
-        val isYUp = extLowerForOrientation in setOf(
-            "obj", "gltf", "glb", "usdz", "usd", "usda", "usdc", "fbx"
-        ) || modelType.contains("glTF", ignoreCase = true) ||
-                modelType.contains("USD", ignoreCase = true) ||
-                modelType.contains("FBX", ignoreCase = true)
-
-        if (vertexCount > 0) {
-            try {
-                var glesCtx = glesContext
-                if (glesCtx != null && (glesCtx.width != bitmap.width || glesCtx.height != bitmap.height)) {
-                    glesCtx.destroy()
-                    glesContext = null
-                    glesCtx = null
-                }
-                if (glesCtx == null && bitmap.width > 0 && bitmap.height > 0) {
-                    glesCtx = Gles30OffscreenContext(bitmap.width, bitmap.height)
-                    if (glesCtx.isInitialized) {
-                        glesContext = glesCtx
-                        glesCtx.makeCurrent()
-                        glesRenderer = Gles30MeshRenderer()
-                    } else {
-                        glesCtx.destroy()
-                        glesCtx = null
-                    }
-                }
-
-                val renderer = glesRenderer
-                if (glesCtx != null && glesCtx.isInitialized && renderer != null && renderer.isCompiled) {
-                    glesCtx.makeCurrent()
-                    renderer.renderMesh(
-                        vertices = rawVertices,
-                        polyColors = polyColors,
-                        vertexCount = vertexCount,
-                        width = bitmap.width,
-                        height = bitmap.height,
-                        yawDeg = tileX.toFloat(),
-                        pitchDeg = tileY.toFloat(),
-                        scale = zoomFactor,
-                        isYUp = isYUp,
-                        isLightTheme = isLightTheme,
-                        minX = minX, maxX = maxX,
-                        minY = minY, maxY = maxY,
-                        minZ = minZ, maxZ = maxZ
-                    )
-                    glesCtx.readPixelsToBitmap(bitmap)
-                    drawTextLabelsAndHud(Canvas(bitmap), width, height, zoomFactor, tileX, tileY, isYUp, isLightTheme, langOrdinal)
-                    return
-                }
-            } catch (_: Throwable) {}
-        }
-
-        val fallbackCanvas = Canvas(bitmap)
-        fallbackCanvas.drawColor(if (isLightTheme) LIGHT_THEME_BG_COLOR else DARK_THEME_BG_COLOR)
-        if (vertexCount > 0 || textLabels.isNotEmpty()) {
-            drawTextLabelsAndHud(fallbackCanvas, width, height, zoomFactor, tileX, tileY, isYUp, isLightTheme, langOrdinal)
-        }
+        sceneRenderer.render(exportMeshScene(), pageIndex, tileX, tileY, zoomPermille, bitmap)
     }
 
     override fun renderTile(key: PackedTileKey, bitmap: Bitmap) {
@@ -4467,12 +3631,16 @@ class Stl3dMeshSession(
     override fun close() {
         if (isClosed) return
         isClosed = true
-        glesRenderer?.destroy()
-        glesRenderer = null
-        glesContext?.destroy()
-        glesContext = null
+        sceneRenderer.release()
         dwgPreviewBitmap?.let { if (!it.isRecycled) it.recycle() }
         dwgPreviewBitmap = null
+        textures.forEach { if (!it.isRecycled) it.recycle() }
+        textures.clear()
+        companionFiles.clear()
         try { pfd.close() } catch (_: Exception) {}
+    }
+
+    init {
+        parseModel()
     }
 }

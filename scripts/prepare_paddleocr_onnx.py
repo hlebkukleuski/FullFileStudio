@@ -19,9 +19,10 @@ End-to-end download, extraction, ONNX conversion, dynamic-shape binding, and ver
 for FullFileStudio's Dual-Head PaddleOCR pipeline (`app/src/main/assets/models/`).
 
 Prerequisites:
-    pip install paddlepaddle paddle2onnx onnx onnxruntime numpy
+    pip install paddlepaddle paddle2onnx onnx onnxruntime numpy pyyaml
 """
 
+import argparse
 import shutil
 import subprocess
 import tarfile
@@ -35,12 +36,11 @@ DET_DIR = ASSETS_MODELS_DIR / "det"
 REC_DIR = ASSETS_MODELS_DIR / "rec"
 TMP_DIR = PROJECT_ROOT / "build" / "paddle_export_tmp"
 
+PADDLEX_MODEL_BASE = "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0"
 PADDLE_GITHUB_RAW = "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/main/ppocr/utils"
 
 DICT_URLS: Dict[str, str] = {
     "ppocr_keys_v1.txt": f"{PADDLE_GITHUB_RAW}/ppocr_keys_v1.txt",
-    "cyrillic_dict.txt": f"{PADDLE_GITHUB_RAW}/dict/cyrillic_dict.txt",
-    "latin_dict.txt": f"{PADDLE_GITHUB_RAW}/dict/latin_dict.txt",
     "ppocrv5_dict.txt": f"{PADDLE_GITHUB_RAW}/dict/ppocrv5_dict.txt",
 }
 
@@ -60,11 +60,20 @@ MODEL_TARBALLS: List[Dict[str, str]] = [
         "rec_input_height": "48",
     },
     {
-        "name": "cyrillic_rec_model",
-        "url": "https://paddleocr.bj.bcebos.com/PP-OCRv3/multilingual/cyrillic_PP-OCRv3_rec_infer.tar",
-        "output_onnx": str(REC_DIR / "cyrillic_rec.onnx"),
+        "name": "eslav_rec_model",
+        "url": f"{PADDLEX_MODEL_BASE}/eslav_PP-OCRv5_mobile_rec_infer.tar",
+        "output_onnx": str(REC_DIR / "eslav_ppocrv5_rec.onnx"),
+        "output_dict": str(REC_DIR / "eslav_ppocrv5_dict.txt"),
         "is_rec": "true",
-        "rec_input_height": "32",
+        "rec_input_height": "48",
+    },
+    {
+        "name": "latin_rec_model",
+        "url": f"{PADDLEX_MODEL_BASE}/latin_PP-OCRv5_mobile_rec_infer.tar",
+        "output_onnx": str(REC_DIR / "latin_ppocrv5_rec.onnx"),
+        "output_dict": str(REC_DIR / "latin_ppocrv5_dict.txt"),
+        "is_rec": "true",
+        "rec_input_height": "48",
     },
 ]
 
@@ -103,6 +112,26 @@ def locate_extracted_model_dir(root_dir: Path) -> Optional[Path]:
             if has_params and has_model:
                 return candidate
     return None
+
+
+def export_embedded_character_dict(model_dir: Path, output_dict: Path) -> bool:
+    config_path = model_dir / "inference.yml"
+    if not config_path.exists():
+        print(f"[Error] {config_path} not found, cannot export {output_dict.name}")
+        return False
+
+    import yaml
+
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    chars = (config.get("PostProcess") or {}).get("character_dict")
+    if not chars:
+        print(f"[Error] No PostProcess.character_dict in {config_path}")
+        return False
+
+    output_dict.parent.mkdir(parents=True, exist_ok=True)
+    output_dict.write_text("\n".join(str(ch) for ch in chars) + "\n", encoding="utf-8")
+    print(f"[OK] Exported dictionary: {output_dict} ({len(chars)} keys)")
+    return True
 
 
 def verify_onnx_runtime_session(onnx_path: Path, is_rec: bool, expected_h: int) -> bool:
@@ -186,8 +215,11 @@ def export_paddle_to_onnx(
     print(f"[OK] Exported & verified ONNX model: {output_onnx} ({size_mb:.2f} MB)")
 
 
-def build_multilingual_dictionaries() -> None:
+def build_multilingual_dictionaries(force: bool) -> None:
     for name, url in DICT_URLS.items():
+        if (REC_DIR / name).exists() and not force:
+            print(f"[Skip] {name} already exists (use --force to re-download)")
+            continue
         try:
             download_file(url, REC_DIR / name)
         except Exception as exc:
@@ -216,7 +248,7 @@ def build_multilingual_dictionaries() -> None:
     print(f"[OK] Generated {multilingual_out} ({len(existing)} total keys)")
 
 
-def download_and_convert_all_models() -> None:
+def download_and_convert_all_models(force: bool) -> None:
     if shutil.which("paddle2onnx") is None:
         print("[Skip] 'paddle2onnx' CLI not found in PATH. Install via: pip install paddlepaddle paddle2onnx onnx onnxruntime")
         return
@@ -227,6 +259,12 @@ def download_and_convert_all_models() -> None:
         output_onnx = Path(spec["output_onnx"])
         is_rec = spec["is_rec"].lower() == "true"
         rec_h = int(spec.get("rec_input_height", "48"))
+        output_dict = Path(spec["output_dict"]) if "output_dict" in spec else None
+
+        outputs = [output_onnx] + ([output_dict] if output_dict else [])
+        if all(p.exists() for p in outputs) and not force:
+            print(f"[Skip] {name} already exported (use --force to rebuild)")
+            continue
 
         tar_path = TMP_DIR / f"{name}.tar"
         extract_dir = TMP_DIR / name
@@ -242,18 +280,24 @@ def download_and_convert_all_models() -> None:
             if model_dir is None:
                 print(f"[Error] Could not locate inference.pdiparams inside {tar_path}")
                 continue
+            if output_dict is not None and not export_embedded_character_dict(model_dir, output_dict):
+                continue
             export_paddle_to_onnx(model_dir, output_onnx, is_rec=is_rec, fallback_rec_height=rec_h)
         except Exception as exc:
             print(f"[Error] Failed to export {name}: {exc}")
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--force", action="store_true", help="re-download and re-export files that already exist")
+    args = parser.parse_args()
+
     DET_DIR.mkdir(parents=True, exist_ok=True)
     REC_DIR.mkdir(parents=True, exist_ok=True)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-    build_multilingual_dictionaries()
-    download_and_convert_all_models()
+    build_multilingual_dictionaries(args.force)
+    download_and_convert_all_models(args.force)
 
 
 if __name__ == "__main__":
