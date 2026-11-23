@@ -174,6 +174,9 @@ afterEvaluate {
     val appExt = extensions.getByType(com.android.build.api.dsl.ApplicationExtension::class.java)
     val vCode = appExt.defaultConfig.versionCode ?: 1
     val vName = appExt.defaultConfig.versionName ?: "0.9.0"
+
+    // Set to true ONLY when preparing and publishing an official public release
+    val isPublishReleaseNotes = false
     val docsVersionFile = rootProject.file("docs/version.json")
     val docsIndexFile = rootProject.file("docs/index.html")
     val docsChangelogFile = rootProject.file("docs/changelog.html")
@@ -183,12 +186,17 @@ afterEvaluate {
     val generateVersionJsonTask = tasks.register("generateVersionJson") {
         inputs.property("versionCode", vCode)
         inputs.property("versionName", vName)
+        inputs.property("isPublishReleaseNotes", isPublishReleaseNotes)
         outputs.file(docsVersionFile)
         outputs.file(docsIndexFile)
         outputs.file(docsChangelogFile)
         outputs.file(changelogFile)
 
         doLast {
+            if (!isPublishReleaseNotes) {
+                logger.lifecycle("isPublishReleaseNotes = false: Skipping automated CHANGELOG and docs update.")
+                return@doLast
+            }
             val customRelNotes = if (releaseNotesFile.exists()) {
                 releaseNotesFile.readText().lines().firstOrNull { it.isNotBlank() }?.trim() ?: ""
             } else ""
