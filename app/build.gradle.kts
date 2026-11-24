@@ -283,6 +283,14 @@ afterEvaluate {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Release History — FullFileStudio</title>
+    <link rel="icon" type="image/png" href="favicon.png">
+    <link rel="apple-touch-icon" href="favicon.png">
+    <meta property="og:title" content="Release History — FullFileStudio">
+    <meta property="og:description" content="Complete version changelog for FullFileStudio on Android">
+    <meta property="og:image" content="https://fullfile.studio/og-image.png">
+    <meta property="og:type" content="website">
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:image" content="https://fullfile.studio/og-image.png">
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #101014; color: #f5f7fa; margin: 0; padding: 0; line-height: 1.6; }
         .container { max-width: 800px; margin: 0 auto; padding: 40px 20px; text-align: left; }
