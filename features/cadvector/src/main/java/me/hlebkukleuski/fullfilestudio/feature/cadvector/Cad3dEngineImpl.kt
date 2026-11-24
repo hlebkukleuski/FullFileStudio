@@ -243,7 +243,7 @@ class Stl3dMeshSession(
         )
 
         /**
-         * Maps standard AutoCAD Color Index (ACI 1..255) to ARGB color.
+         * Maps standard DWG Color Index (ACI 1..255) to ARGB color.
          */
         internal fun aciToColor(aci: Int): Int {
             return when (abs(aci)) {
@@ -1801,7 +1801,7 @@ class Stl3dMeshSession(
     }
 
     /**
-     * Clean-Room parser for AutoCAD `.dwg` files (`AC1012` R13 through `AC1032` R2018+) without RealDWG.
+     * Clean-Room parser for DWG Compatible `.dwg` files (`AC1012` R13 through `AC1032` R2018+) without RealDWG.
      */
     private fun parseDwgCleanRoom() {
         val statSize = resolveDescriptorFileSize()
@@ -1826,20 +1826,20 @@ class Stl3dMeshSession(
                 openSafeStream { parseDxf(it) }
                 return
             }
-            lastErrorMsg = "File does not have a valid AutoCAD DWG signature (AC10xx)."
+            lastErrorMsg = "File does not have a valid DWG Compatible signature (AC10xx)."
             return
         }
 
         val releaseName = when (verCode) {
-            "AC1012" -> "AutoCAD R13"
-            "AC1014" -> "AutoCAD R14"
-            "AC1015" -> "AutoCAD 2000"
-            "AC1018" -> "AutoCAD 2004"
-            "AC1021" -> "AutoCAD 2007"
-            "AC1024" -> "AutoCAD 2010"
-            "AC1027" -> "AutoCAD 2013"
-            "AC1032" -> "AutoCAD 2018+"
-            else -> "AutoCAD ($verCode)"
+            "AC1012" -> "DWG Compatible R13"
+            "AC1014" -> "DWG Compatible R14"
+            "AC1015" -> "DWG Compatible 2000"
+            "AC1018" -> "DWG Compatible 2004"
+            "AC1021" -> "DWG Compatible 2007"
+            "AC1024" -> "DWG Compatible 2010"
+            "AC1027" -> "DWG Compatible 2013"
+            "AC1032" -> "DWG Compatible 2018+"
+            else -> "DWG Compatible ($verCode)"
         }
         modelType = "DWG ($releaseName)"
 

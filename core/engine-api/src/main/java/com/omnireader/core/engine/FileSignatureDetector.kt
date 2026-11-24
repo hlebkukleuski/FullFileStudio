@@ -342,7 +342,7 @@ object FileSignatureDetector {
                 return DetectedFormat.STL
             }
 
-            // AutoCAD Binary DXF ("AutoCAD Binary DXF")
+            // DWG Compatible Binary DXF ("AutoCAD Binary DXF")
             if (bytes.size >= 18 && String(bytes, 0, 18, StandardCharsets.US_ASCII) == "AutoCAD Binary DXF") {
                 return DetectedFormat.DXF
             }
@@ -357,7 +357,7 @@ object FileSignatureDetector {
                 return DetectedFormat.INDD
             }
 
-            // AutoCAD DWG: "AC1012", "AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"
+            // DWG Compatible: "AC1012", "AC1014", "AC1015", "AC1018", "AC1021", "AC1024", "AC1027", "AC1032"
             if (bytes.size >= 6 && b0 == 'A'.code && b1 == 'C'.code && b2 == '1'.code && b3 == '0'.code &&
                 bytes[4].toInt().toChar().isDigit() && bytes[5].toInt().toChar().isDigit()
             ) {

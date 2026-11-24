@@ -34,7 +34,7 @@ class CadVectorEngineFactory : DynamicEngineFactory {
         ) {
             return true
         }
-        // AutoCAD DWG magic header: "AC1012" .. "AC1032"
+        // DWG Compatible magic header: "AC1012" .. "AC1032"
         if (signature.size >= 6 &&
             signature[0] == 'A'.code.toByte() &&
             signature[1] == 'C'.code.toByte() &&

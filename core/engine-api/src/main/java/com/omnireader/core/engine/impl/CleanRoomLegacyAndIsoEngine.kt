@@ -2713,9 +2713,9 @@ class CleanRoomProprietaryPreviewSession(
     private fun parsePreviewAndMetadata(bytes: ByteArray) {
         val sb = StringBuilder()
         val label = when {
-            format == DetectedFormat.RVT || extension == "rvt" -> "Autodesk Revit BIM Project (.rvt)"
-            format == DetectedFormat.MAX || extension == "max" -> "Autodesk 3ds Max Scene (.max)"
-            format == DetectedFormat.INDD || extension == "indd" -> "Adobe InDesign Document (.indd)"
+            format == DetectedFormat.RVT || extension == "rvt" -> "Revit BIM Project (.rvt)"
+            format == DetectedFormat.MAX || extension == "max" -> "3ds Max Scene (.max)"
+            format == DetectedFormat.INDD || extension == "indd" -> "InDesign Document (.indd)"
             else -> "Project Container (.${extension.uppercase(Locale.ROOT)})"
         }
         sb.append("<h1>").append(label).append("</h1>\n")

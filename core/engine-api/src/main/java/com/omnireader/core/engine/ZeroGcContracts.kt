@@ -95,7 +95,7 @@ object LegalLicensePolicy {
             )
         }
 
-        // 5. AutoCAD DWG (.dwg): Clean-room read-only interoperability without proprietary RealDWG libraries.
+        // 5. DWG Compatible (.dwg): Clean-room read-only interoperability without proprietary RealDWG libraries.
         if (format == DetectedFormat.DWG || cleanExt == "dwg") {
             return Verdict(
                 isLegallyPermitted = true,
