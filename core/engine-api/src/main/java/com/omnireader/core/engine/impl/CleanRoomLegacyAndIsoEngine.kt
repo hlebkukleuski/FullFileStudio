@@ -1856,7 +1856,7 @@ class CleanRoomBuiltIn3dSession(
                         updateBounds(x.toFloat(), y.toFloat(), z.toFloat())
                     }
                 })
-                modelType = "DWG ($verCode)"
+                modelType = "DWG Compatible ($verCode)"
                 if (vertexCount > 0 || meshLabels.isNotEmpty()) return
             }
         } catch (e: DwgFormatException) {
