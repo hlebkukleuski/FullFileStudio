@@ -54,7 +54,8 @@ By decoupling UI rendering from file parsing using unprivileged Linux process sa
 | :--- | :--- |
 | **Documents & E-books** | `PDF`, `DjVu`, `EPUB`, `FB2`, `AZW3`, `MOBI`, `DOC`, `DOCX`, `ODT`, `RTF`, `ONE`, `MHTML`, `HTML`, `TXT`, `TTF/OTF/TTC/WOFF/WOFF2` |
 | **Spreadsheets & Presentations** | `XLSX`, `XLSB`, `XLS`, `ODS`, `CSV`, `TSV`, `PPTX`, `PPT`, `ODP` |
-| **Graphics & 3D / CAD** | `SVG`, `SVGZ`, `STL`, `OBJ`, `DXF`, `DWG`, `BLEND`, `USD/USDA/USDC/USDZ`, `GLTF/GLB` (incl. Draco), `FBX`, `3MF`, `DAE/ZAE`, `STEP/STP`, `IGES/IGS`, `PLY`, `OFF`, `3DS`, `PNG`, `JPG`, `WEBP`, `GIF`, `BMP`, `ICO`, `TIFF`, `HEIC`, `AVIF` |
+| **Graphics & 3D / CAD** | `SVG`, `SVGZ`, `STL`, `OBJ`, `DXF`, `DWG`, `ACIS (SAT/SAB)`, `BLEND`, `USD/USDA/USDC/USDZ`, `GLTF/GLB` (incl. Draco), `FBX`, `3MF`, `DAE/ZAE`, `STEP/STP`, `IGES/IGS`, `PLY`, `OFF`, `3DS`, `PNG`, `JPG`, `WEBP`, `GIF`, `BMP`, `ICO`, `TIFF`, `HEIC`, `AVIF` |
+| **Audio & Video Media** | `MP3`, `WAV`, `AAC`, `FLAC`, `OGG`, `M4A`, `MP4`, `MKV`, `WEBM`, `AVI` (incl. SRT/VTT/SSA subtitles, audio track selection, variable speed, MediaSession) |
 | **Archives & Disk Images** | `ZIP`, `JAR`, `7Z`, `RAR` (v4/v5), `TAR`, `GZ`, `BZ2`, `XZ`, `TGZ`, `ISO` (incl. Rock Ridge) |
 | **Databases & Structured Data** | `SQLite`, `MS Access (MDB/ACCDB)`, `Apache Parquet`, `DuckDB`, `Realm`, `dBase (DBF)`, `BSON`, `JSON/JSONL`, `XML`, `MD`, source code |
 | **Engineering Level** | Built-in **HEX Inspector** for viewing raw bytes of any non-DRM, unencrypted file |
