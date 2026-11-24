@@ -2,7 +2,7 @@
 
 # FullFileStudio
 
-**High-performance, multi-process secure file reader and inspector for Android**
+**High-performance, multi-process secure offline file reader and inspector for Android**
 
 </div>
 
