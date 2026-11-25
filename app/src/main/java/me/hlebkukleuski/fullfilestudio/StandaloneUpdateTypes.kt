@@ -17,13 +17,18 @@
 
 package me.hlebkukleuski.fullfilestudio
 
+import androidx.compose.runtime.Immutable
+
+@Immutable
 internal data class StandaloneReleaseInfo(
     val versionCode: Int,
     val versionName: String,
     val apkUrl: String,
-    val releaseNotes: String
+    val releaseNotes: String,
+    val sha256: String? = null
 )
 
+@Immutable
 internal data class StandaloneUpdateUiState(
     val isChecking: Boolean = false,
     val isUpToDate: Boolean = false,

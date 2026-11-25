@@ -18,34 +18,31 @@
 package me.hlebkukleuski.fullfilestudio.feature.gpl
 
 import android.os.ParcelFileDescriptor
-import com.omnireader.core.engine.DocumentSession
-import com.omnireader.core.engine.impl.CleanRoomAccessDatabaseSession
-import com.omnireader.core.engine.impl.CleanRoomDjvuSession
-import com.omnireader.core.engine.impl.CleanRoomDwgReader
-import com.omnireader.core.engine.impl.DatabaseSessionLocal
-import com.omnireader.core.engine.impl.DwgGeometrySink
-import com.omnireader.core.engine.impl.GplCoreEngineBridge
-import com.omnireader.core.engine.impl.PalmDocMobiCleanRoomSession
-import me.hlebkukleuski.fullfilestudio.feature.cadvector.BlendFile
-import me.hlebkukleuski.fullfilestudio.feature.cadvector.CleanRoomBlend
-import me.hlebkukleuski.fullfilestudio.feature.cadvector.CleanRoomFbx
-import me.hlebkukleuski.fullfilestudio.feature.cadvector.FbxReader
+import me.hlebkukleuski.fullfilestudio.feature.gpl.dwg.DwgReader
+import java.nio.charset.StandardCharsets
+import me.hlebkukleuski.fullfilestudio.core.engine.DatabaseSessionLocal
+import me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.bridge.DwgGeometrySink
+import me.hlebkukleuski.fullfilestudio.core.engine.bridge.GplCoreEngineBridge
 import me.hlebkukleuski.fullfilestudio.feature.cadvector.GltfOutput
 import me.hlebkukleuski.fullfilestudio.feature.cadvector.GplCad3dBridge
-import java.nio.charset.StandardCharsets
+import me.hlebkukleuski.fullfilestudio.feature.gpl.blend.BlendFile
+import me.hlebkukleuski.fullfilestudio.feature.gpl.blend.BlendLoader
+import me.hlebkukleuski.fullfilestudio.feature.gpl.fbx.FbxLoader
+import me.hlebkukleuski.fullfilestudio.feature.gpl.fbx.FbxReader
 
 class GplCoreEngineBridgeImpl : GplCoreEngineBridge {
     override fun createDjvuSession(pfd: ParcelFileDescriptor): DocumentSession =
-        CleanRoomDjvuSession(pfd)
+        DjvuDocumentSession(pfd)
 
     override fun createMobiSession(pfd: ParcelFileDescriptor, extension: String): DocumentSession =
-        PalmDocMobiCleanRoomSession(pfd, extension)
+        PalmDocMobiSession(pfd, extension)
 
     override fun createAccessSession(pfd: ParcelFileDescriptor, password: String?): DatabaseSessionLocal =
-        CleanRoomAccessDatabaseSession(pfd, password)
+        AccessDatabaseSession(pfd, password)
 
     override fun renderDwg(bytes: ByteArray, password: String?, sink: DwgGeometrySink): String {
-        val reader = CleanRoomDwgReader.open(bytes, password)
+        val reader = DwgReader.open(bytes, password)
         reader.render(sink)
         return reader.version.code
     }
@@ -57,7 +54,7 @@ class GplCad3dBridgeImpl : GplCad3dBridge {
         val file = try { BlendFile(bytes) } catch (_: Throwable) { return null }
         val v = file.version
         try {
-            CleanRoomBlend(file, out).load()
+            BlendLoader(file, out).load()
         } catch (_: Throwable) {}
         return "Blender ${v / 100}.${v % 100}"
     }
@@ -71,7 +68,7 @@ class GplCad3dBridgeImpl : GplCad3dBridge {
         } else {
             "FBX ASCII (v$version)"
         }
-        CleanRoomFbx(root, out).load()
+        FbxLoader(root, out).load()
         return modelType
     }
 }

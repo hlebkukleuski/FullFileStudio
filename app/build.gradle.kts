@@ -23,8 +23,13 @@ import java.util.Properties
  */
 
 plugins {
-    alias(libs.plugins.android.application)
+    id("fullfilestudio.android.application")
     alias(libs.plugins.compose.compiler)
+}
+
+composeCompiler {
+    reportsDestination = layout.buildDirectory.dir("compose_compiler")
+    metricsDestination = layout.buildDirectory.dir("compose_compiler")
 }
 
 android {
@@ -35,8 +40,8 @@ android {
         applicationId = "me.hlebkukleuski.fullfilestudio"
         minSdk = 30
         targetSdk = 37
-        versionCode = 3
-        versionName = "0.9.8"
+        versionCode = 4
+        versionName = "0.9.9"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -99,7 +104,7 @@ android {
             enableV3Signing = true
         }
     } else {
-        signingConfigs.getByName("debug")
+        null
     }
 
     signingConfigs.getByName("debug") {
@@ -124,6 +129,12 @@ android {
     }
 }
 
+androidComponents {
+    beforeVariants { variantBuilder ->
+        variantBuilder.enableAndroidTest = false
+    }
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_25)
@@ -133,6 +144,8 @@ kotlin {
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.ktx)
+    implementation(libs.androidx.lifecycle.viewmodel.savedstate)
     implementation(libs.androidx.activity.compose)
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.foundation)
@@ -150,6 +163,10 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
 
     api(project(":core:engine-api"))
+    implementation(project(":core:security"))
+    implementation(project(":core:engine-media"))
+    implementation(project(":core:engine-database"))
+    implementation(project(":core:engine-document"))
     implementation(project(":features:office"))
     implementation(project(":features:cadvector"))
     implementation(project(":features:archives"))
@@ -161,9 +178,6 @@ dependencies {
     testImplementation(libs.robolectric)
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.onnxruntime.jvm)
-    androidTestImplementation(libs.androidx.test.ext.junit)
-    androidTestImplementation(libs.androidx.test.core)
-    androidTestImplementation(libs.androidx.test.runner)
 }
 
 afterEvaluate {
@@ -176,7 +190,7 @@ afterEvaluate {
     val vName = appExt.defaultConfig.versionName ?: "0.9.0"
 
     // Set to true ONLY when preparing and publishing an official public release
-    val isPublishReleaseNotes = false
+    val isPublishReleaseNotes = true
     val docsVersionFile = rootProject.file("docs/version.json")
     val docsIndexFile = rootProject.file("docs/index.html")
     val docsChangelogFile = rootProject.file("docs/changelog.html")
@@ -209,7 +223,7 @@ afterEvaluate {
   "license": "GPL-3.0-or-later",
   "versionCode": $vCode,
   "versionName": "$vName",
-  "apkUrl": "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-hashtagfreeinternet-release.apk",
+  "apkUrl": "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-imp-release.apk",
   "releaseNotes": "$relNotesText"
 }
 """
@@ -218,11 +232,11 @@ afterEvaluate {
             if (docsIndexFile.exists()) {
                 val oldHtml = docsIndexFile.readText()
                 val updatedHtml = oldHtml.replace(
-                    Regex("""https://github\.com/hlebkukleuski/FullFileStudio/releases/(?:latest/download|download/v[0-9.]+)/fullfilestudio-v[0-9.]+-hashtagfreeinternet-release\.apk"""),
-                    "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-hashtagfreeinternet-release.apk"
+                    Regex("""https://github\.com/hlebkukleuski/FullFileStudio/releases/(?:latest/download|download/v[0-9.]+)/fullfilestudio-v[0-9.]+-(?:hashtagfreeinternet|imp)-release\.apk"""),
+                    "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v${vName}/fullfilestudio-v${vName}-imp-release.apk"
                 ).replace(
                     Regex("""https://github\.com/hlebkukleuski/FullFileStudio/releases/latest/download/fullfilestudio-[a-z0-9.\-]+\.apk"""),
-                    "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v$vName/fullfilestudio-v$vName-hashtagfreeinternet-release.apk"
+                    "https://github.com/hlebkukleuski/FullFileStudio/releases/download/v${vName}/fullfilestudio-v${vName}-imp-release.apk"
                 )
                 docsIndexFile.writeText(updatedHtml)
             }
@@ -375,7 +389,7 @@ $cardsHtml
                 include("app-standalone-release.apk")
             }
             into(targetReleaseDir)
-            rename { "fullfilestudio-v${vName}-hashtagfreeinternet-release.apk" }
+            rename { "fullfilestudio-v${vName}-imp-release.apk" }
         }
         assembleReleaseTask.finalizedBy(copyUniversalApk)
         redirectTask?.mustRunAfter(copyUniversalApk)

@@ -17,7 +17,7 @@
 
 package me.hlebkukleuski.fullfilestudio.feature.gpl
 
-import com.omnireader.core.engine.impl.GplCoreEngineBridgeLoader
+import me.hlebkukleuski.fullfilestudio.core.engine.bridge.GplCoreEngineBridgeLoader
 import me.hlebkukleuski.fullfilestudio.feature.cadvector.GplCad3dBridgeLoader
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue

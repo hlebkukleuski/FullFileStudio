@@ -1,5 +1,3 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 /*
  * Copyright (C) 2026 Hleb Kukleuski <hlebkukleuski@gmail.com>
  *
@@ -18,73 +16,24 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
  */
 
 plugins {
-    alias(libs.plugins.android.library)
+    id("fullfilestudio.android.library")
 }
 
 android {
-    namespace = "com.omnireader.core.engine"
-    compileSdk = 37
+    namespace = "me.hlebkukleuski.fullfilestudio.core.engine"
 
     defaultConfig {
-        minSdk = 30
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
-
-        externalNativeBuild {
-            cmake {
-                cppFlags("-std=c++20")
-                abiFilters("arm64-v8a", "x86_64")
-            }
-        }
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_25
-        targetCompatibility = JavaVersion.VERSION_25
     }
 
     buildFeatures {
         aidl = true
     }
-
-    externalNativeBuild {
-        cmake {
-            path("src/main/cpp/CMakeLists.txt")
-            version = "3.22.1"
-        }
-    }
-
-    buildTypes {
-        release {
-            isMinifyEnabled = false
-            proguardFiles(
-                getDefaultProguardFile("proguard-android-optimize.txt"),
-                "proguard-rules.pro"
-            )
-        }
-    }
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_25)
-    }
 }
 
 dependencies {
     implementation(libs.androidx.core.ktx)
-    implementation(libs.androidx.collection)
-    implementation(libs.kotlinx.coroutines.core)
-    implementation("org.brotli:dec:0.1.2")
-
+    api(libs.androidx.collection)
+    api(libs.kotlinx.coroutines.core)
     testImplementation(libs.junit)
-    testImplementation("org.xerial:sqlite-jdbc:3.53.4.0")
-    testImplementation(libs.robolectric)
-    testImplementation("com.github.luben:zstd-jni:1.5.7-28")
-    testImplementation("org.xerial.snappy:snappy-java:1.1.10.12")
-    testImplementation("at.yawk.lz4:lz4-java:1.14.1")
-    testImplementation(libs.androidx.test.core)
-    androidTestImplementation(libs.androidx.test.ext.junit)
-    androidTestImplementation(libs.androidx.test.core)
-    androidTestImplementation(libs.androidx.test.runner)
 }

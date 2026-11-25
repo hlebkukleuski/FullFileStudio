@@ -24,22 +24,18 @@ import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
-import android.media.MediaPlayer
 import android.media.MediaMetadata
+import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
-import android.os.Build
 import android.os.SystemClock
 import android.provider.OpenableColumns
-import com.omnireader.core.engine.impl.CleanRoomSubtitles
-import com.omnireader.core.engine.impl.EmbeddedSubtitle
-import com.omnireader.core.engine.impl.MediaPlaybackSession
-import com.omnireader.core.engine.impl.SubtitleTrack
-import com.omnireader.core.engine.impl.ZeroCopyMediaEngineImpl
+import java.util.WeakHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -52,7 +48,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.WeakHashMap
+import me.hlebkukleuski.fullfilestudio.core.media.AudioQualitySpec
+import me.hlebkukleuski.fullfilestudio.core.media.EmbeddedSubtitle
+import me.hlebkukleuski.fullfilestudio.core.media.MediaEngineImpl
+import me.hlebkukleuski.fullfilestudio.core.media.MediaPlaybackSession
+import me.hlebkukleuski.fullfilestudio.core.media.SubtitleTrack
+import me.hlebkukleuski.fullfilestudio.core.media.SubtitleTrackParser
 
 object MediaPlaybackController {
 
@@ -98,6 +99,16 @@ object MediaPlaybackController {
     val selectedText: StateFlow<Int> = _selectedText.asStateFlow()
 
     @Volatile var metadataProvider: ((MediaPlaybackSession) -> Triple<String, String, String>)? = null
+    @Volatile private var currentAudioQualitySpec: AudioQualitySpec = AudioQualitySpec()
+
+    fun setAudioQualitySpec(spec: AudioQualitySpec) {
+        currentAudioQualitySpec = spec
+        val s = _session.value?.takeIf { !it.isClosed } ?: return
+        val am = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        s.setAudioQualitySpec(spec, am)
+        refreshTracks()
+        notifyState()
+    }
 
     private val known = WeakHashMap<MediaPlaybackSession, Boolean>()
     private val externalSubs = ArrayList<Pair<String, SubtitleTrack>>()
@@ -279,6 +290,8 @@ object MediaPlaybackController {
                 s.mediaPlayer.setOnCompletionListener { main.post { onCompleted(s) } }
                 s.mediaPlayer.setWakeMode(appContext, android.os.PowerManager.PARTIAL_WAKE_LOCK)
             } catch (_: Throwable) {}
+            val am = appContext?.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            s.setAudioQualitySpec(currentAudioQualitySpec, am)
             refreshTracks()
             embeddedJob = scope.launch {
                 s.embeddedSubtitles.collect { list ->
@@ -333,7 +346,7 @@ object MediaPlaybackController {
     }
 
     private fun languageName(code: String): String =
-        java.util.Locale.forLanguageTag(code).getDisplayLanguage().ifEmpty { java.util.Locale(code).getDisplayLanguage() }.ifEmpty { code }
+        java.util.Locale.forLanguageTag(code).getDisplayLanguage().ifEmpty { try { java.util.Locale.Builder().setLanguage(code).build().getDisplayLanguage() } catch (_: Throwable) { "" } }.ifEmpty { code }
 
     fun selectAudioTrack(id: Int) {
         val s = _session.value?.takeIf { !it.isClosed } ?: return
@@ -396,7 +409,7 @@ object MediaPlaybackController {
             }
         } catch (_: Throwable) { null } ?: return false
         val name = displayName(ctx, uri) ?: uri.lastPathSegment ?: "subtitles"
-        val track = CleanRoomSubtitles.parse(bytes, name) ?: return false
+        val track = SubtitleTrackParser.parse(bytes, name) ?: return false
         externalSubs.add(name to track)
         refreshTracks()
         selectTextTrack(EXTERNAL_BASE - (externalSubs.size - 1))
@@ -535,7 +548,7 @@ object MediaPlaybackController {
             val created = withContext(Dispatchers.IO) {
                 try {
                     ctx.contentResolver.openFileDescriptor(Uri.parse(uri), "r")?.use { pfd ->
-                        ZeroCopyMediaEngineImpl().createSession(pfd.fileDescriptor) as? MediaPlaybackSession
+                        MediaEngineImpl().createSession(pfd.fileDescriptor) as? MediaPlaybackSession
                     }
                 } catch (_: Throwable) { null }
             } ?: return@launch
@@ -615,7 +628,7 @@ object MediaPlaybackController {
         val s = _session.value ?: return
         if (s.isClosed) return
         val meta = metadataProvider?.invoke(s) ?: Triple(s.trackTitle, s.trackArtist, "")
-        val title = _queue.value.getOrNull(_index.value)?.title?.takeIf { s.trackTitle == "Аудио / Видео файл" } ?: meta.first
+        val title = _queue.value.getOrNull(_index.value)?.title?.takeIf { !s.hasEmbeddedTitle } ?: meta.first
         publishSession(title, meta.second, meta.third, s.albumArt)
         MediaPlaybackNotificationService.updateNotification(
             context = ctx,

@@ -1,1 +1,1 @@
-License update, new engines, text copying fix and user experience improvement.
+Massive architectural update: production-ready DuckDB & AVI engines, hardware audio detection, and critical core stability improvements.

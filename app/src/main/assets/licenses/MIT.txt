@@ -9,6 +9,8 @@ Copyright (c) Felix Schütt and Ivan Kutskir (fastblur).
 Copyright (c) 2020-2026 DomCR (ACadSharp).
 Copyright (c) 2020-2026 Samuli Raivio (ufbx).
 Copyright (c) 2018-2026 Stichting DuckDB Foundation (DuckDB).
+Copyright (c) 2018-2020 CWI, TU Munich, FSU Jena (FSST / libfsst).
+Copyright (c) 2014 Google Inc. (WOFF2).
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

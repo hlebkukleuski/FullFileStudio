@@ -16,6 +16,15 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program. If not, see <https://gnu.org>.
+ *
+ * BSD-2-Clause conditions for libarchive-derived portions:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that source redistributions retain the above copyright
+ * notice, this list of conditions and the following disclaimer, and binary
+ * redistributions reproduce them in the documentation/materials provided.
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
  */
 
 package me.hlebkukleuski.fullfilestudio.feature.archives
@@ -25,25 +34,6 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.os.ParcelFileDescriptor
-import android.system.Os
-import android.system.OsConstants
-import com.omnireader.core.engine.DetectedFormat
-import com.omnireader.core.engine.DocumentSession
-import com.omnireader.core.engine.FileSignatureDetector
-import com.omnireader.core.engine.PackedTileKey
-import com.omnireader.core.engine.ZeroCacheReadableSource
-import com.omnireader.core.engine.impl.CleanRoomIso9660Session
-import com.omnireader.core.engine.modules.ArchiveNavigatorEngine
-import com.omnireader.core.engine.modules.ArchiveSession
-import org.apache.commons.compress.PasswordRequiredException
-import org.apache.commons.compress.archivers.sevenz.SevenZFile
-import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
-import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
-import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream
-import org.apache.commons.compress.archivers.zip.ZipFile
-import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
-import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
-import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 import java.io.BufferedInputStream
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
@@ -62,31 +52,35 @@ import java.nio.charset.StandardCharsets
 import java.util.Locale
 import java.util.zip.ZipInputStream
 import kotlin.math.min
+import me.hlebkukleuski.fullfilestudio.core.document.Iso9660ArchiveSession
+import me.hlebkukleuski.fullfilestudio.core.engine.DetectedFormat
+import me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.FileSignatureDetector
+import me.hlebkukleuski.fullfilestudio.core.engine.PackedTileKey
+import me.hlebkukleuski.fullfilestudio.core.engine.modules.ArchiveNavigatorEngine
+import me.hlebkukleuski.fullfilestudio.core.engine.modules.ArchiveSession
+import me.hlebkukleuski.fullfilestudio.core.security.ZeroCacheReadableSource
+import org.apache.commons.compress.PasswordRequiredException
+import org.apache.commons.compress.archivers.sevenz.SevenZFile
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.ZipArchiveInputStream
+import org.apache.commons.compress.archivers.zip.ZipFile
+import org.apache.commons.compress.compressors.bzip2.BZip2CompressorInputStream
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
+import org.apache.commons.compress.compressors.xz.XZCompressorInputStream
 
 private fun resolveArchiveDescriptorSize(fd: FileDescriptor, fallbackSize: Long): Long {
-    val statSize = try {
-        Os.fstat(fd).st_size
-    } catch (_: Throwable) {
-        -1L
-    }
-    if (statSize > 0L) return statSize
-
-    val lseekSize = try {
-        val cur = Os.lseek(fd, 0L, OsConstants.SEEK_CUR)
-        val end = Os.lseek(fd, 0L, OsConstants.SEEK_END)
-        Os.lseek(fd, cur, OsConstants.SEEK_SET)
-        end
-    } catch (_: Throwable) {
-        -1L
-    }
-    if (lseekSize > 0L) return lseekSize
+    val detectedSize = ZeroCacheReadableSource(fd).size
+    if (detectedSize > 0L) return detectedSize
     return fallbackSize.coerceAtLeast(0L)
 }
 
 internal class PfdSeekableByteChannel(
-    private val fd: FileDescriptor,
+    fd: FileDescriptor,
     private val totalSize: Long
 ) : SeekableByteChannel {
+    private val source = ZeroCacheReadableSource(fd)
     private var position = 0L
     private var open = true
     private val reusableDirect = ByteBuffer.allocateDirect(64 * 1024)
@@ -130,7 +124,7 @@ internal class PfdSeekableByteChannel(
             val savedLimit = dst.limit()
             dst.limit(dst.position() + maxToRead)
             val r = try {
-                Os.pread(fd, dst, position)
+                source.readAt(position, dst)
             } finally {
                 dst.limit(savedLimit)
             }
@@ -141,7 +135,7 @@ internal class PfdSeekableByteChannel(
             val chunk = min(maxToRead, reusableDirect.capacity())
             reusableDirect.clear()
             reusableDirect.limit(chunk)
-            val r = Os.pread(fd, reusableDirect, position)
+            val r = source.readAt(position, reusableDirect)
             if (r <= 0) return -1
             reusableDirect.flip()
             dst.put(reusableDirect)
@@ -155,11 +149,12 @@ internal class PfdSeekableByteChannel(
 }
 
 internal class PfdPositionalInputStream(
-    private val fd: FileDescriptor,
+    fd: FileDescriptor,
     private val totalSize: Long,
     startOffset: Long = 0L,
     maxLength: Long = -1L
 ) : InputStream() {
+    private val source = ZeroCacheReadableSource(fd)
     private var pos = startOffset
     private val limitOffset: Long = when {
         maxLength >= 0L && totalSize > 0L -> minOf(totalSize, startOffset + maxLength)
@@ -183,11 +178,7 @@ internal class PfdPositionalInputStream(
 
         directBuf.clear()
         directBuf.limit(toRead)
-        val r = try {
-            Os.pread(fd, directBuf, pos)
-        } catch (_: Throwable) {
-            -1
-        }
+        val r = source.readAt(pos, directBuf)
         if (r <= 0) return -1
         directBuf.flip()
         directBuf.get(b, off, r)
@@ -196,7 +187,7 @@ internal class PfdPositionalInputStream(
     }
 }
 
-internal object CleanRoomRar5Parser {
+internal object Rar5Parser {
 
     data class Rar5FileEntry(
         val rawName: String,
@@ -835,22 +826,23 @@ class ArchiveNavigatorEngineImpl : ArchiveNavigatorEngine {
     override fun createArchiveSession(fd: FileDescriptor): ArchiveSession = createArchiveSession(fd, null)
 
     fun createArchiveSession(fd: FileDescriptor, password: String? = null): ArchiveSession {
+        val probeSource = ZeroCacheReadableSource(fd)
         val header = ByteBuffer.allocateDirect(8)
-        val fileSize = resolveArchiveDescriptorSize(fd, -1L)
+        val fileSize = probeSource.size.let { if (it > 0L) it else -1L }
         if (fileSize >= 0x8006L) {
             val isoProbe = ByteBuffer.allocateDirect(5)
-            val r = try { Os.pread(fd, isoProbe, 0x8001L) } catch (_: Exception) { 0 }
+            val r = try { probeSource.readAt(0x8001L, isoProbe) } catch (_: Exception) { 0 }
             if (r == 5) {
                 val arr = ByteArray(5)
                 isoProbe.flip()
                 isoProbe.get(arr)
                 val vdIdent = String(arr, StandardCharsets.US_ASCII)
                 if (vdIdent in setOf("CD001", "BEA01", "NSR02", "NSR03")) {
-                    return CleanRoomIso9660Session(ParcelFileDescriptor.dup(fd))
+                    return Iso9660ArchiveSession(ParcelFileDescriptor.dup(fd))
                 }
             }
         }
-        try { Os.pread(fd, header, 0L) } catch (_: Exception) {}
+        try { probeSource.readAt(0L, header) } catch (_: Exception) {}
         val pfd = ParcelFileDescriptor.dup(fd)
         return ArchiveSessionImpl(pfd, password)
     }
@@ -870,7 +862,7 @@ class ArchiveSessionImpl(
         val rawNameInArchive: String,
         val uncompressedSize: Long,
         val isSingleCompressedStream: Boolean = false,
-        val rar5Entry: CleanRoomRar5Parser.Rar5FileEntry? = null,
+        val rar5Entry: Rar5Parser.Rar5FileEntry? = null,
         val rar4Entry: Rar4Parser.Rar4FileEntry? = null
     )
 
@@ -998,14 +990,14 @@ class ArchiveSessionImpl(
             ArcType.TAR -> parseTarEntries { openPositionalStream() }
             ArcType.GZ -> {
                 val gzName = try {
-                    GzipCompressorInputStream(openPositionalStream(), true).use { gis ->
+                    GzipCompressorInputStream.builder().setInputStream(openPositionalStream()).setDecompressConcatenated(true).get().use { gis ->
                         gis.metaData?.fileName?.takeIf { it.isNotBlank() }
                     }
                 } catch (_: Throwable) { null } ?: "compressed_stream"
-                parseSingleOrTarStream(gzName) { GzipCompressorInputStream(openPositionalStream(), true) }
+                parseSingleOrTarStream(gzName) { GzipCompressorInputStream.builder().setInputStream(openPositionalStream()).setDecompressConcatenated(true).get() }
             }
             ArcType.BZ2 -> parseSingleOrTarStream("compressed_stream") { BZip2CompressorInputStream(openPositionalStream(), true) }
-            ArcType.XZ -> parseSingleOrTarStream("compressed_stream") { XZCompressorInputStream(openPositionalStream(), true) }
+            ArcType.XZ -> parseSingleOrTarStream("compressed_stream") { XZCompressorInputStream.builder().setInputStream(openPositionalStream()).setDecompressConcatenated(true).get() }
             ArcType.RAR4 -> parseRar4Entries()
             ArcType.RAR5 -> parseRar5Entries()
             ArcType.UNKNOWN -> {
@@ -1020,7 +1012,7 @@ class ArchiveSessionImpl(
         rawArchiveKey: String = displayName,
         compressedSize: Long = -1L,
         isSingleStream: Boolean = false,
-        rar5Entry: CleanRoomRar5Parser.Rar5FileEntry? = null,
+        rar5Entry: Rar5Parser.Rar5FileEntry? = null,
         rar4Entry: Rar4Parser.Rar4FileEntry? = null
     ) {
         if (entryMetaList.size >= MAX_ARCHIVE_ENTRIES) return
@@ -1108,7 +1100,7 @@ class ArchiveSessionImpl(
             try {
                 ZipArchiveInputStream(openPositionalStream(), "UTF-8", true, true).use { zais ->
                     while (entryMetaList.size < MAX_ARCHIVE_ENTRIES) {
-                        val entry = try { zais.nextZipEntry } catch (_: Throwable) { null } ?: break
+                        val entry = try { zais.nextEntry } catch (_: Throwable) { null } ?: break
                         if (entry.generalPurposeBit.usesEncryption()) {
                             sawEncryptedEntry = true
                         }
@@ -1336,9 +1328,9 @@ class ArchiveSessionImpl(
         }
     }
 
-    @Volatile private var rar5AllEntries: List<CleanRoomRar5Parser.Rar5FileEntry> = emptyList()
+    @Volatile private var rar5AllEntries: List<Rar5Parser.Rar5FileEntry> = emptyList()
 
-    private fun readRar5Packed(entry: CleanRoomRar5Parser.Rar5FileEntry): ByteArray {
+    private fun readRar5Packed(entry: Rar5Parser.Rar5FileEntry): ByteArray {
         if (entry.packedSize < 0L || entry.packedSize > MAX_SINGLE_EXTRACTED_BYTES || entry.dataOffset + entry.packedSize > actualFileSize) {
             throw IllegalStateException("Invalid RAR5 data area")
         }
@@ -1357,7 +1349,7 @@ class ArchiveSessionImpl(
 
     private fun parseRar5Entries() {
         try {
-            val result = CleanRoomRar5Parser.parseEntries(source, actualFileSize)
+            val result = Rar5Parser.parseEntries(source, actualFileSize)
             rar5AllEntries = result.entries
             if (result.isHeaderEncrypted) {
                 lastErrorMsg = "UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version."
@@ -1391,7 +1383,7 @@ class ArchiveSessionImpl(
     }
 
     private fun createSafeTempFile(prefix: String, suffix: String): File =
-        com.omnireader.core.engine.ScratchFiles.createTempFile(prefix, suffix)
+        me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.createTempFile(prefix, suffix)
 
     override fun openVirtualFile(entryPath: String): ParcelFileDescriptor? {
         if (isClosed) return null
@@ -1413,29 +1405,29 @@ class ArchiveSessionImpl(
 
         var tempFile: File? = null
         return try {
-            tempFile = createSafeTempFile("omni_vfile_", safeSuffix)
+            tempFile = createSafeTempFile("ffs_vfile_", safeSuffix)
             val extractedSuccess = extractEntryToFile(targetMeta, tempFile)
 
-            if (!extractedSuccess || !com.omnireader.core.engine.ScratchFiles.exists(tempFile)) {
-                com.omnireader.core.engine.ScratchFiles.delete(tempFile)
+            if (!extractedSuccess || !me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.exists(tempFile)) {
+                me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.delete(tempFile)
                 return null
             }
 
             synchronized(this) {
                 if (isClosed) {
-                    com.omnireader.core.engine.ScratchFiles.delete(tempFile)
+                    me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.delete(tempFile)
                     return null
                 }
                 tempExtractedFiles.add(tempFile)
             }
 
-            com.omnireader.core.engine.ScratchFiles.openReadOnly(tempFile)
+            me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.openReadOnly(tempFile)
         } catch (sec: SecurityException) {
             lastErrorMsg = sec.message
-            com.omnireader.core.engine.ScratchFiles.delete(tempFile)
+            me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.delete(tempFile)
             null
         } catch (_: Throwable) {
-            com.omnireader.core.engine.ScratchFiles.delete(tempFile)
+            me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.delete(tempFile)
             null
         }
     }
@@ -1451,7 +1443,7 @@ class ArchiveSessionImpl(
     }
 
     private inline fun writeFreshFile(destFile: File, block: (OutputStream) -> Boolean): Boolean {
-        com.omnireader.core.engine.ScratchFiles.openOutput(destFile).use { fos ->
+        me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.openOutput(destFile).use { fos ->
             val ok = block(fos)
             if (ok) fos.flush()
             return ok
@@ -1502,13 +1494,13 @@ class ArchiveSessionImpl(
                 extractFromTarStream({ openPositionalStream() }, target, fos)
             }
             ArcType.GZ -> writeFreshFile(destFile) { fos ->
-                extractFromCompressedStream({ GzipCompressorInputStream(openPositionalStream(), true) }, target, fos)
+                extractFromCompressedStream({ GzipCompressorInputStream.builder().setInputStream(openPositionalStream()).setDecompressConcatenated(true).get() }, target, fos)
             }
             ArcType.BZ2 -> writeFreshFile(destFile) { fos ->
                 extractFromCompressedStream({ BZip2CompressorInputStream(openPositionalStream(), true) }, target, fos)
             }
             ArcType.XZ -> writeFreshFile(destFile) { fos ->
-                extractFromCompressedStream({ XZCompressorInputStream(openPositionalStream(), true) }, target, fos)
+                extractFromCompressedStream({ XZCompressorInputStream.builder().setInputStream(openPositionalStream()).setDecompressConcatenated(true).get() }, target, fos)
             }
             ArcType.RAR4 -> extractRar4EntryToFile(target, destFile)
             ArcType.RAR5 -> extractRar5EntryToFile(target, destFile)
@@ -1568,7 +1560,7 @@ class ArchiveSessionImpl(
             }
         }
 
-        val data = CleanRoomRar5Parser.unpackEntry(rar5AllEntries.ifEmpty { listOf(r5) }, r5, MAX_SINGLE_EXTRACTED_BYTES) {
+        val data = Rar5Parser.unpackEntry(rar5AllEntries.ifEmpty { listOf(r5) }, r5, MAX_SINGLE_EXTRACTED_BYTES) {
             if (it.isEncrypted) throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR 5.0 archives is not supported in this version.")
             readRar5Packed(it)
         }
@@ -1626,7 +1618,7 @@ class ArchiveSessionImpl(
             try {
                 ZipArchiveInputStream(openPositionalStream(), charsetName, true, true).use { zais ->
                     while (true) {
-                        val entry = try { zais.nextZipEntry } catch (_: Throwable) { null } ?: break
+                        val entry = try { zais.nextEntry } catch (_: Throwable) { null } ?: break
                         if (!entry.isDirectory && !entry.isUnixSymlink) {
                             val decoded = decodeZipEntryName(entry)
                             if (matchesTargetEntry(decoded, target) || matchesTargetEntry(entry.name, target)) {
@@ -1773,7 +1765,7 @@ class ArchiveSessionImpl(
         }
         try { pfd.close() } catch (_: Throwable) {}
         filesToDelete.forEach { file ->
-            com.omnireader.core.engine.ScratchFiles.delete(file)
+            me.hlebkukleuski.fullfilestudio.core.engine.ScratchFiles.delete(file)
         }
     }
 }

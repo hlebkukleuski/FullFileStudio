@@ -17,10 +17,10 @@
 
 package me.hlebkukleuski.fullfilestudio.feature.archives
 
-import com.omnireader.core.engine.DocumentSession
-import com.omnireader.core.engine.DynamicEngineFactory
 import java.io.FileDescriptor
 import java.util.Locale
+import me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.DynamicEngineFactory
 
 class ArchiveEngineFactory : DynamicEngineFactory {
     private val engine = ArchiveNavigatorEngineImpl()

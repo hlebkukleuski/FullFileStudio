@@ -18,11 +18,11 @@
 package me.hlebkukleuski.fullfilestudio.feature.cadvector
 
 import android.os.ParcelFileDescriptor
-import com.omnireader.core.engine.DocumentSession
-import com.omnireader.core.engine.FileEngineProvider
-import com.omnireader.core.engine.svg.SvgDocumentSession
 import java.io.FileDescriptor
 import java.util.Locale
+import me.hlebkukleuski.fullfilestudio.core.document.svg.SvgDocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.FileEngineProvider
 
 class SvgVectorEngineImpl : FileEngineProvider {
     override fun canHandle(signature: ByteArray, extension: String): Boolean {

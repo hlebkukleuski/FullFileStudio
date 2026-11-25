@@ -19,11 +19,19 @@ package me.hlebkukleuski.fullfilestudio
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.content.pm.Signature
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
+import androidx.compose.runtime.Stable
 import androidx.core.content.FileProvider
-import com.omnireader.core.engine.OmniServerEndpoints
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URI
+import java.net.URL
+import java.security.MessageDigest
+import java.util.Locale
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,16 +40,59 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import me.hlebkukleuski.fullfilestudio.core.engine.ServerEndpoints
 import me.hlebkukleuski.fullfilestudio.net.Tls13Https
 import org.json.JSONObject
-import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 
+@Stable
 internal class StandaloneUpdateManager(
     private val appContext: Context,
     private val scope: CoroutineScope
 ) {
+    companion object {
+        private const val MAX_APK_SIZE_BYTES = 512L * 1024L * 1024L
+        private const val RELEASE_HOST = "github.com"
+        private const val RELEASE_PATH_PREFIX = "/hlebkukleuski/FullFileStudio/releases/download/"
+        private val ALLOWED_DOWNLOAD_HOSTS = setOf(
+            "github.com",
+            "objects.githubusercontent.com",
+            "release-assets.githubusercontent.com",
+            "github-releases.githubusercontent.com"
+        )
+
+        internal fun isAllowedReleaseUrl(url: String): Boolean {
+            val parsed = try { URI(url.trim()) } catch (_: Throwable) { return false }
+            if (!parsed.scheme.equals("https", ignoreCase = true)) return false
+            if (!parsed.host.equals(RELEASE_HOST, ignoreCase = true)) return false
+            if (parsed.userInfo != null) return false
+            val rawPath = parsed.rawPath ?: return false
+            if (rawPath.contains("..") || rawPath.contains("//")) return false
+            val path = parsed.normalize().path ?: return false
+            if (!path.startsWith(RELEASE_PATH_PREFIX)) return false
+            return path.endsWith(".apk", ignoreCase = true)
+        }
+
+        internal fun isAllowedRedirectUrl(url: String): Boolean {
+            val parsed = try { URI(url.trim()) } catch (_: Throwable) { return false }
+            if (!parsed.scheme.equals("https", ignoreCase = true)) return false
+            if (parsed.userInfo != null) return false
+            val host = parsed.host?.lowercase(Locale.ROOT) ?: return false
+            return host in ALLOWED_DOWNLOAD_HOSTS
+        }
+
+        internal fun sha256Hex(digest: ByteArray): String =
+            digest.joinToString("") { "%02x".format(Locale.US, it) }
+
+        internal fun signaturesMatch(installed: Array<Signature>?, candidate: Array<Signature>?): Boolean {
+            if (installed.isNullOrEmpty() || candidate.isNullOrEmpty()) return false
+            val installedSet = installed.map { it.toByteArray().contentHashCode() to it.toByteArray() }
+            val candidateBytes = candidate.map { it.toByteArray() }
+            return installedSet.any { (_, instBytes) ->
+                candidateBytes.any { candBytes -> instBytes.contentEquals(candBytes) }
+            }
+        }
+    }
+
     private val _state = MutableStateFlow(StandaloneUpdateUiState())
     val state: StateFlow<StandaloneUpdateUiState> = _state.asStateFlow()
 
@@ -52,7 +103,7 @@ internal class StandaloneUpdateManager(
         scope.launch(Dispatchers.IO) {
             _state.update { it.copy(isChecking = true, errorText = null, isUpToDate = false) }
             try {
-                val conn = Tls13Https.open(OmniServerEndpoints.appVersionManifestUrl).apply {
+                val conn = Tls13Https.open("${ServerEndpoints.baseUrl}/version.json").apply {
                     connectTimeout = 5000
                     readTimeout = 5000
                     requestMethod = "GET"
@@ -72,8 +123,9 @@ internal class StandaloneUpdateManager(
                 val remoteName = json.optString("versionName", BuildConfig.VERSION_NAME)
                 val apkUrl = json.optString("apkUrl", "").trim()
                 val notes = json.optString("releaseNotes", "").trim()
+                val sha256 = json.optString("sha256", "").trim().lowercase(Locale.ROOT).takeIf { it.length == 64 && it.all { c -> c in '0'..'9' || c in 'a'..'f' } }
 
-                if (remoteCode > BuildConfig.VERSION_CODE && apkUrl.startsWith("https://")) {
+                if (remoteCode > BuildConfig.VERSION_CODE && isAllowedReleaseUrl(apkUrl)) {
                     _state.update {
                         it.copy(
                             isChecking = false,
@@ -82,7 +134,8 @@ internal class StandaloneUpdateManager(
                                 versionCode = remoteCode,
                                 versionName = remoteName,
                                 apkUrl = apkUrl,
-                                releaseNotes = notes
+                                releaseNotes = notes,
+                                sha256 = sha256
                             )
                         )
                     }
@@ -105,6 +158,31 @@ internal class StandaloneUpdateManager(
         _state.update { it.copy(availableRelease = null, errorText = null) }
     }
 
+    private fun verifyDownloadedApk(apkFile: File, expectedSha256: String?, actualSha256: String) {
+        if (expectedSha256 != null && !expectedSha256.equals(actualSha256, ignoreCase = true)) {
+            throw SecurityException("APK SHA-256 checksum mismatch.")
+        }
+        val pm = appContext.packageManager
+        val archiveInfo = pm.getPackageArchiveInfo(apkFile.absolutePath, PackageManager.GET_SIGNING_CERTIFICATES)
+            ?: throw SecurityException("Downloaded file is not a valid Android APK.")
+        if (archiveInfo.packageName != appContext.packageName) {
+            throw SecurityException("APK package name mismatch: ${archiveInfo.packageName}")
+        }
+        val installedInfo = pm.getPackageInfo(appContext.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
+        if (archiveInfo.longVersionCode <= installedInfo.longVersionCode) {
+            throw SecurityException("Downloaded APK version is not newer than installed version.")
+        }
+        val installedSigs = installedInfo.signingInfo?.let { info ->
+            if (info.hasMultipleSigners()) info.apkContentsSigners else info.signingCertificateHistory
+        }
+        val archiveSigs = archiveInfo.signingInfo?.let { info ->
+            if (info.hasMultipleSigners()) info.apkContentsSigners else info.signingCertificateHistory
+        }
+        if (!signaturesMatch(installedSigs, archiveSigs)) {
+            throw SecurityException("APK signing certificate does not match installed application.")
+        }
+    }
+
     fun downloadAndInstall(activityContext: Context) {
         val release = _state.value.availableRelease ?: return
         if (_state.value.isDownloading) return
@@ -124,14 +202,20 @@ internal class StandaloneUpdateManager(
 
         scope.launch(Dispatchers.IO) {
             _state.update { it.copy(isDownloading = true, downloadProgress = 0f, errorText = null) }
+            val updatesDir = File(appContext.cacheDir, "updates").apply { mkdirs() }
+            val apkFile = File(updatesDir, "fullfilestudio-update.apk")
             try {
-                val updatesDir = File(appContext.cacheDir, "updates").apply { mkdirs() }
-                val apkFile = File(updatesDir, "fullfilestudio-update.apk")
+                if (!isAllowedReleaseUrl(release.apkUrl)) {
+                    throw SecurityException("Untrusted release download URL.")
+                }
                 if (apkFile.exists()) apkFile.delete()
 
                 var currentUrl = release.apkUrl
                 var conn: HttpURLConnection? = null
                 for (redirect in 0..5) {
+                    if (!isAllowedRedirectUrl(currentUrl)) {
+                        throw SecurityException("Redirect to untrusted host blocked.")
+                    }
                     val c = Tls13Https.open(currentUrl).apply {
                         instanceFollowRedirects = false
                         connectTimeout = 10000
@@ -157,6 +241,12 @@ internal class StandaloneUpdateManager(
                 }
 
                 val totalBytes = activeConn.contentLengthLong
+                if (totalBytes > MAX_APK_SIZE_BYTES) {
+                    activeConn.disconnect()
+                    throw SecurityException("APK size exceeds limit.")
+                }
+
+                val sha256Digest = MessageDigest.getInstance("SHA-256")
                 activeConn.inputStream.use { input ->
                     apkFile.outputStream().use { output ->
                         val buf = ByteArray(16384)
@@ -164,8 +254,12 @@ internal class StandaloneUpdateManager(
                         while (true) {
                             val r = input.read(buf)
                             if (r <= 0) break
-                            output.write(buf, 0, r)
                             downloaded += r
+                            if (downloaded > MAX_APK_SIZE_BYTES) {
+                                throw SecurityException("APK download exceeded maximum allowed size.")
+                            }
+                            sha256Digest.update(buf, 0, r)
+                            output.write(buf, 0, r)
                             if (totalBytes > 0L) {
                                 val pct = (downloaded.toFloat() / totalBytes.toFloat()).coerceIn(0f, 0.99f)
                                 _state.update { it.copy(downloadProgress = pct) }
@@ -175,6 +269,8 @@ internal class StandaloneUpdateManager(
                     }
                 }
                 activeConn.disconnect()
+
+                verifyDownloadedApk(apkFile, release.sha256, sha256Hex(sha256Digest.digest()))
 
                 val apkUri = FileProvider.getUriForFile(
                     appContext,
@@ -197,6 +293,7 @@ internal class StandaloneUpdateManager(
                     activityContext.startActivity(installIntent)
                 }
             } catch (e: Throwable) {
+                try { if (apkFile.exists()) apkFile.delete() } catch (_: Throwable) {}
                 _state.update {
                     it.copy(
                         isDownloading = false,

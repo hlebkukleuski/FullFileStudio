@@ -18,14 +18,23 @@
  * libarchive (archive_read_support_format_rar.c),
  * Copyright (c) 2003-2007 Tim Kientzle, Copyright (c) 2011 Andres Mejia,
  * and Copyright (c) 2011 Michihiro NAKAJIMA, BSD-2-Clause License.
+ *
+ * BSD-2-Clause conditions for libarchive-derived portions:
+ * Redistribution and use in source and binary forms, with or without modification,
+ * are permitted provided that source redistributions retain the above copyright
+ * notice, this list of conditions and the following disclaimer, and binary
+ * redistributions reproduce them in the documentation/materials provided.
+ * THIS SOFTWARE IS PROVIDED BY THE AUTHOR(S) "AS IS" AND ANY EXPRESS OR IMPLIED
+ * WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
  */
 
 package me.hlebkukleuski.fullfilestudio.feature.archives
 
-import com.omnireader.core.engine.ZeroCacheReadableSource
 import java.nio.ByteBuffer
 import java.nio.charset.StandardCharsets
 import java.util.zip.CRC32
+import me.hlebkukleuski.fullfilestudio.core.security.ZeroCacheReadableSource
 
 internal object Rar4Parser {
 
@@ -75,9 +84,9 @@ internal object Rar4Parser {
             ((b[o + 3].toLong() and 0xFF) shl 24)
 
     fun parseEntries(source: ZeroCacheReadableSource, fileSize: Long): Rar4ParseResult =
-        parseEntries(CleanRoomRar5Parser.PositionalReader { off, buf -> source.readAt(off, buf) }, fileSize)
+        parseEntries(Rar5Parser.PositionalReader { off, buf -> source.readAt(off, buf) }, fileSize)
 
-    fun parseEntries(source: CleanRoomRar5Parser.PositionalReader, fileSize: Long): Rar4ParseResult {
+    fun parseEntries(source: Rar5Parser.PositionalReader, fileSize: Long): Rar4ParseResult {
         val sigBuf = ByteBuffer.allocateDirect(MARKER_LEN)
         if (source.readAt(0L, sigBuf) < MARKER_LEN) return Rar4ParseResult(emptyList(), false)
         if (sigBuf.get(0) != 0x52.toByte() || sigBuf.get(1) != 0x61.toByte() ||
@@ -293,10 +302,19 @@ internal object Rar4Parser {
 
         val winSize = maxOf(chain.maxOf { it.dictSizeBytes }, 1 shl 16).coerceAtMost(1 shl 22)
         val unpacker = Rar29Unpacker(winSize, maxFileBytes)
+        val maxSolidChainBytes = maxOf(maxFileBytes, 64L * 1024L * 1024L) * 4L
+        var solidChainBytes = 0L
         var result: ByteArray? = null
         for (e in chain) {
             if (e.isEncrypted) throw SecurityException("UNSUPPORTED_ENCRYPTION: Password decryption for encrypted RAR archives is not supported in this version.")
             if (e.isSplit) throw IllegalStateException("Multi-volume RAR4 archives are not supported")
+            if (e.unpackedSize < 0L || e.unpackedSize > maxFileBytes) {
+                throw SecurityException("RAR4 entry exceeds maximum safe unpack size.")
+            }
+            solidChainBytes += e.unpackedSize
+            if (solidChainBytes > maxSolidChainBytes) {
+                throw SecurityException("RAR4 solid chain exceeds maximum safe unpack size.")
+            }
             val packed = readPacked(e)
             val data = when {
                 e.unpVer >= 29 -> unpacker.unpack29(packed, e.unpackedSize, e.isSolid)

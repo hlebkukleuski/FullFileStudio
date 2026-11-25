@@ -17,7 +17,7 @@
 
 package me.hlebkukleuski.fullfilestudio.feature.cadvector
 
-import com.omnireader.core.engine.MeshAnimation
+import me.hlebkukleuski.fullfilestudio.core.document.mesh.MeshAnimation
 
 internal class AnimSink(private val files: Map<String, ByteArray> = emptyMap()) : GltfOutput {
     val verts = ArrayList<Float>()
@@ -102,7 +102,7 @@ internal class AnimSink(private val files: Map<String, ByteArray> = emptyMap()) 
     }
     override fun resource(uri: String): ByteArray? = files[uri]
 
-    override fun pixels(bytes: ByteArray): DecodedPixels? = CleanRoomTextureDecoders.decode(bytes) ?: try {
+    override fun pixels(bytes: ByteArray): DecodedPixels? = TextureDecoders.decode(bytes) ?: try {
         javax.imageio.ImageIO.read(java.io.ByteArrayInputStream(bytes))?.let { img ->
             val px = IntArray(img.width * img.height)
             img.getRGB(0, 0, img.width, img.height, px, 0, img.width)

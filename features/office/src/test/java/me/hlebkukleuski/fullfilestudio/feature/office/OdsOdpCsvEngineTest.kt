@@ -17,13 +17,13 @@
 
 package me.hlebkukleuski.fullfilestudio.feature.office
 
-import com.omnireader.core.engine.impl.SheetCellFlags
+import java.nio.charset.StandardCharsets
+import me.hlebkukleuski.fullfilestudio.core.document.SheetCellFlags
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import java.nio.charset.StandardCharsets
 
 class OdsOdpCsvEngineTest {
     private fun utf8(s: String) = s.toByteArray(StandardCharsets.UTF_8)
@@ -124,7 +124,7 @@ class OdsOdpCsvEngineTest {
   </office:body>
 </office:document-content>"""
 
-        val doc = CleanRoomOdpEngine.parse(mapOf("styles.xml" to utf8(stylesXml), "content.xml" to utf8(contentXml)))
+        val doc = OdpEngine.parse(mapOf("styles.xml" to utf8(stylesXml), "content.xml" to utf8(contentXml)))
         assertNotNull(doc)
         doc!!
         assertEquals(33.867f, doc.pageWidthCm, 0.01f)
@@ -144,13 +144,13 @@ class OdsOdpCsvEngineTest {
         assertEquals("2. ", listEl.paragraphs[1].bullet)
         val tblEl = slide.elements.first { it.table != null }
         assertEquals(2, tblEl.table!!.rows[0][0].colSpan)
-        assertEquals(0xFF2563EB.toInt(), tblEl.table!!.rows[0][0].bgColor)
+        assertEquals(0xFF2563EB.toInt(), tblEl.table.rows[0][0].bgColor)
     }
 
     @Test
     fun encryptedOdfManifestDetectedAsPasswordRequired() {
         val manifest = """<?xml version="1.0"?><manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0"><manifest:file-entry manifest:full-path="content.xml"><manifest:encryption-data/></manifest:file-entry></manifest:manifest>"""
-        assertTrue(CleanRoomOdpEngine.isEncryptedOdf(mapOf("META-INF/manifest.xml" to utf8(manifest))))
+        assertTrue(OdpEngine.isEncryptedOdf(mapOf("META-INF/manifest.xml" to utf8(manifest))))
         val ods = OdsSpreadsheetSession(mapOf("META-INF/manifest.xml" to utf8(manifest), "content.xml" to ByteArray(16)))
         assertTrue(ods.getLastError()?.startsWith("PASSWORD_REQUIRED") == true)
     }
@@ -209,7 +209,7 @@ class OdsOdpCsvEngineTest {
     @Test
     fun csvHandlesSepDirectiveMultilineQuotesMidFieldQuoteCrLfAndAutoWidths() {
         val sepCsv = "sep=;\nProduct;Specs;Price\nMonitor;27\" UHD;\"\$1,299.00\"\nCable;\"  multi\n\"\"quoted\"\"  \";\"\$19.50\"\rMouse;Wireless;\$49.99"
-        val model = CleanRoomCsvParser.parseBytes(utf8(sepCsv), "csv")
+        val model = CsvParser.parseBytes(utf8(sepCsv), "csv")
         assertEquals(4, model.rowCount)
         assertEquals("Product", model.text(0, 0))
         assertEquals("27\" UHD", model.text(1, 1))

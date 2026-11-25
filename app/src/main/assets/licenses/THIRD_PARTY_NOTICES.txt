@@ -133,25 +133,25 @@ Copyright (C) 2001-2002 NaN Holding B.V. (Decimate modifier, IK solver, noise)
 Copyright (C) 2011-2026 Nicholas Bishop (Skin modifier)
 License: GNU General Public License, version 2 or later (GPL-2.0-or-later)
 Source: https://www.blender.org/
-Files: features/gpl-engines/.../CleanRoomBlend*.kt (including multiresolution
-  displacement in CleanRoomBlendSubdiv.kt, Skin modifier in CleanRoomBlendSkin.kt,
-  Boolean modifier in CleanRoomBlendBoolean.kt, and reference presets in
-  CleanRoomBlendModifierReferenceTest.kt)
+Files: features/gpl-engines/.../blend/Blend*.kt (including multiresolution
+  displacement in BlendSubdiv.kt, Skin modifier in BlendSkin.kt,
+  Boolean modifier in BlendBoolean.kt, and reference presets in
+  BlendModifierReferenceTest.kt)
 Upstream Sub-Component Notices Retained from Blender Source:
 - FreeBSD / UC Berkeley / Apple Darwin Libc stdlib/qsort.c & stdlib/heapsort.c
-  (in CleanRoomBlendBevel.kt): Copyright (c) 1991, 1992, 1993 The Regents of the
+  (in BlendBevel.kt): Copyright (c) 1991, 1992, 1993 The Regents of the
   University of California. All rights reserved. Derived from software contributed
   to Berkeley by Ronnie Kon at Mindcraft Inc., Kevin Lew and Elmer Yglesias; and
   Jon Bentley and M. Douglas McIlroy (BSD-3-Clause — licenses/BSD-3-Clause.txt).
-- Easing Equations (in CleanRoomBlendAnim.kt): Copyright (c) 2001 Robert Penner.
+- Easing Equations (in BlendAnim.kt): Copyright (c) 2001 Robert Penner.
   All rights reserved. (BSD-3-Clause — licenses/BSD-3-Clause.txt).
-- Euler Angle Conversions (in CleanRoomBlendAnim.kt): Ken Shoemake, Graphics Gems IV (1994).
-- Procedural Noise Tables & Functions (in CleanRoomBlendNoiseTables.kt and
-  CleanRoomBlendTexture.kt): Copyright (c) 2009-2010 Sony Pictures Imageworks Inc.,
+- Euler Angle Conversions (in BlendAnim.kt): Ken Shoemake, Graphics Gems IV (1994).
+- Procedural Noise Tables & Functions (in BlendNoiseTables.kt and
+  BlendTexture.kt): Copyright (c) 2009-2010 Sony Pictures Imageworks Inc.,
   et al. All Rights Reserved. (BSD-3-Clause — licenses/BSD-3-Clause.txt).
-- Watertight Ray-Triangle Intersection (in CleanRoomBlendShrinkwrap.kt): Sven Woop,
+- Watertight Ray-Triangle Intersection (in BlendShrinkwrap.kt): Sven Woop,
   Carsten Benthin, and Ingo Wald (JCGT 2013) / Intel Corporation Embree (Apache-2.0).
-- Selectively Damped Least Squares IK (in CleanRoomBlendRig.kt): Samuel R. Buss
+- Selectively Damped Least Squares IK (in BlendRig.kt): Samuel R. Buss
   and Jin-Su Kim (IK_QJacobian.cpp).
 Modification Notice: Ported from C/C++ to Kotlin and adapted for read-only
   Android viewing in FullFileStudio (2026).
@@ -162,7 +162,7 @@ Modification Notice: Ported from C/C++ to Kotlin and adapted for read-only
 Copyright 2013-2026 Pixar / DreamWorks Animation LLC
 License: Modified Apache 2.0 License / TOST 1.0 (licenses/TOST-1.0.txt)
 Source: https://graphics.pixar.com/opensubdiv/
-File: features/gpl-engines/.../CleanRoomBlendSubdiv.kt (combined with Blender
+File: features/gpl-engines/.../blend/BlendSubdiv.kt (combined with Blender
   multiresolution displacement routines under GPL-2.0-or-later / GPL-3.0-or-later)
 Modification Notice: Ported to Kotlin and adapted for FullFileStudio (2026).
 
@@ -185,7 +185,7 @@ Copyright Contributors to the MaterialX Project (Academy Software Foundation)
 License: Modified Apache 2.0 License / TOST 1.0 (licenses/TOST-1.0.txt) and
   Apache License, Version 2.0 (MaterialX standard shader node definitions)
 Source: https://openusd.org/ , https://materialx.org/
-Files: features/cadvector/.../CleanRoomUsd.kt, CleanRoomUsdLayer.kt
+Files: features/cadvector/.../UsdReader.kt, UsdLayer.kt
 Modification Notice: Ported to Kotlin and adapted for FullFileStudio (2026).
 
 NOTICE (verbatim from OpenUSD NOTICE.txt, TOST-1.0 §4(d)):
@@ -212,7 +212,7 @@ Licenses:
 - Pascal Getreuer IIR Gaussian blur: BSD 2-Clause License (licenses/BSD-2-Clause.txt)
 - Unicode UAX #50 Vertical Orientation table (unicode-vo): Unicode-3.0
 Source: https://github.com/linebender/resvg
-Files: core/engine-api/.../svg/*.kt
+Files: core/engine-document/.../svg/*.kt
 Modification Notice: Ported from Rust to Kotlin and adapted for Android
   Canvas rendering in FullFileStudio (2026).
 
@@ -223,7 +223,7 @@ Copyright (c) 1999-2001 LizardTech, Inc. / AT&T Labs / Leon Bottou,
   Yann LeCun, Patrick Haffner, Paul G. Howard, and Bill Riemers
 License: GNU General Public License, version 2 or later (GPL-2.0-or-later)
 Source: https://djvu.sourceforge.net/
-File: features/gpl-engines/.../CleanRoomDjvuDecoder.kt
+File: features/gpl-engines/.../djvu/DjvuDecoder.kt
 Modification Notice: Ported to Kotlin and adapted for FullFileStudio (2026).
 
 ------------------------------------------------------------------------
@@ -234,7 +234,7 @@ Copyright (c) 2003-2026 Tim Kientzle, Andres Mejia, Michihiro NAKAJIMA,
 License: BSD 2-Clause License (licenses/BSD-2-Clause.txt)
 Source: https://github.com/libarchive/libarchive
 Files: features/archives/.../Rar4Parser.kt, ArchiveNavigatorEngineImpl.kt
-  (CleanRoomRar5Parser)
+  (Rar5Parser)
 Modification Notice: Ported to Kotlin and adapted for FullFileStudio (2026).
 
 ------------------------------------------------------------------------
@@ -250,7 +250,7 @@ File: features/archives/.../Rar4Ppmd7Decoder.kt
 Copyright 2016-2026 The Draco Authors.
 License: Apache License, Version 2.0 (licenses/Apache-2.0.txt)
 Source: https://github.com/google/draco
-File: features/cadvector/.../CleanRoomDraco.kt
+File: features/cadvector/.../DracoDecoder.kt
 Modification Notice: Ported to Kotlin and modified for FullFileStudio (2026).
 
 ------------------------------------------------------------------------
@@ -259,7 +259,7 @@ Modification Notice: Ported to Kotlin and modified for FullFileStudio (2026).
 Copyright (c) 2016-2026 Arseny Kapoulkine
 License: MIT License (licenses/MIT.txt)
 Source: https://github.com/zeux/meshoptimizer
-File: features/cadvector/.../CleanRoomMeshopt.kt
+File: features/cadvector/.../MeshoptDecoder.kt
 Modification Notice: Ported to Kotlin and modified for FullFileStudio (2026).
 
 ------------------------------------------------------------------------
@@ -269,8 +269,8 @@ Standard: ECMA-376 Part 1 Annex D (Office Open XML File Formats)
 Copyright Ecma International (Bylaws §9.4 / Microsoft OSP), as distributed
   in Apache POI (org/apache/poi/sl/draw/geom/presetShapeDefinitions.xml),
   Copyright 2003-2026 The Apache Software Foundation (Apache-2.0).
-Files: core/engine-api/src/main/assets/drawingml/presetShapeDefinitions.xml,
-  core/engine-api/.../CleanRoomDmlGeometry.kt
+Files: core/engine-document/src/main/assets/drawingml/presetShapeDefinitions.xml,
+  core/engine-document/.../DmlGeometry.kt
 Modification Notice (Apache-2.0 §4(b)): Modified for FullFileStudio in 2026
   by stripping <ahLst> and <cxnLst> handle/connection lists and wrapping
   preset definitions in a <presets> root element.
@@ -280,40 +280,45 @@ Modification Notice (Apache-2.0 §4(b)): Modified for FullFileStudio in 2026
 ------------------------------------------------------------------------
 - Android Open Source Project Minikin (.hyb binary hyphenation trie format):
   Copyright (C) 2015 The Android Open Source Project (Apache-2.0 —
-  core/engine-api/.../word/WordHyphenator.kt).
+  core/engine-document/.../word/WordHyphenator.kt).
 - Apache POI & Apache Parquet Format / Thrift Compact Protocol:
   Copyright 2003-2026 The Apache Software Foundation (Apache-2.0 —
-  core/engine-api/.../word/DocReader.kt, DocSprms.kt, CleanRoomPpt.kt,
-  CleanRoomXlsCharts.kt, CleanRoomOfficeCrypto.kt, CleanRoomLegacyAndIsoEngine.kt,
-  CleanRoomParquetReader.kt).
+  core/engine-document/.../word/DocReader.kt, DocSprms.kt, PptParser.kt,
+  PptRenderer.kt, XlsChartsParser.kt, OfficeCrypto.kt, LegacyAndIsoEngine.kt,
+  Ole2CfbContainer.kt, core/engine-database/.../ParquetReader.kt).
 - Open Asset Import Library (Assimp), ufbx, and Blender FBX I/O:
   Copyright (c) 2006-2026 assimp team (BSD-3-Clause), Copyright (c) 2020-2026
   Samuli Raivio (MIT License), and Copyright (C) 2013-2026 Blender Foundation
-  (GPL-2.0-or-later — features/gpl-engines/.../CleanRoomFbx.kt).
+  (GPL-2.0-or-later — features/gpl-engines/.../fbx/FbxLoader.kt).
 - Calibre (MOBI HUFF/CDIC decompression & trailing entries):
   Copyright (C) 2008-2026 Kovid Goyal and Calibre Contributors (GPL-3.0-or-later —
-  features/gpl-engines/.../CleanRoomMobiParser.kt).
+  features/gpl-engines/.../mobi/MobiParser.kt).
 - GNU LibreDWG, ACadSharp, and FreeCAD InventorLoader (DWG & ACIS SAT/SAB):
   Copyright (C) 2009-2026 Free Software Foundation, Inc. (GPL-3.0-or-later),
   Copyright (c) 2020-2026 DomCR (MIT License), and Copyright (c) 2018-2024
-  Jens M. Plonka (LGPL-2.1-or-later — features/gpl-engines/.../CleanRoomDwgContainer.kt,
-  CleanRoomDwgReader.kt, CleanRoomAcis.kt).
+  Jens M. Plonka (LGPL-2.1-or-later — features/gpl-engines/.../dwg/DwgContainer.kt,
+  DwgReader.kt, AcisGeometryParser.kt).
 - Jackcess & MDB Tools (Jet3/Jet4/ACE .mdb/.accdb format structures):
   Copyright (c) 2008-2026 Health Market Science, Inc. / James Ahlborn (Apache-2.0) and
   Copyright (c) 2000-2026 Brian Bruns and contributors (LGPL-2.0-or-later / GPL-2.0-or-later —
-  features/gpl-engines/.../CleanRoomAccessReader.kt).
-- DuckDB, Realm Core, and SQLite 3 Storage Formats:
-  Copyright 2018-2026 Stichting DuckDB Foundation (MIT License — CleanRoomDuckDbReader.kt),
-  Copyright 2016-2026 Realm Inc. / MongoDB, Inc. (Apache-2.0 — CleanRoomRealmReader.kt),
+  features/gpl-engines/.../access/AccessDatabaseReader.kt).
+- DuckDB (with FSST & FastPFor), Realm Core, and SQLite 3 Storage Formats:
+  Copyright 2018-2026 Stichting DuckDB Foundation (MIT License — DuckDbReader.kt),
+  Copyright 2018-2020 CWI, TU Munich, FSU Jena (FSST, MIT License — DuckDbReader.kt),
+  Daniel Lemire (FastPFor bitpacking layout, Apache-2.0 — DuckDbReader.kt),
+  Copyright 2016-2026 Realm Inc. / MongoDB, Inc. (Apache-2.0 — RealmReader.kt),
   and SQLite 3 File Format Specification by D. Richard Hipp / Hwaci (Public Domain —
-  CleanRoomSqliteReader.kt).
+  SqliteReader.kt).
+- W3C WOFF File Format 2.0 & Google woff2 Format:
+  W3C Recommendation & Copyright 2014 Google Inc. (MIT License —
+  core/engine-document/.../Woff2Decoder.kt).
 - Snappy, LZ4, and Zstandard (RFC 8878) Block Decompression Specifications:
   Copyright 2011 Google Inc. (BSD-3-Clause), Copyright (c) 2011-2020 Yann Collet
   (BSD-2-Clause), and Copyright (c) Meta Platforms, Inc. and affiliates (BSD-3-Clause —
-  core/engine-api/.../CompressionCodecs.kt).
+  core/security/.../CompressionCodecs.kt).
 - Normal Mapping Cotangent Frame (cotangent_frame GLSL routine):
   Christian Schüler, "Normal Mapping Without Precomputed Tangents", ShaderX 5
-  (core/engine-api/.../Gles30MeshRenderer.kt).
+  (core/engine-document/.../mesh/Gles30MeshRenderer.kt).
 
 ========================================================================
 3. BUNDLED FREE OPEN-SOURCE FONTS (UNMODIFIED)

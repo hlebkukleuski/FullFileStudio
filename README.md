@@ -13,10 +13,10 @@
 | **Minimum SDK** | API 30 (Android 11+) |
 | **Target SDK** | API 37 |
 | **Runtime & Language** | Kotlin, Java 25, C++20 |
-| **Architecture** | Process Isolation (AIDL IPC), Zero-Copy / Zero-GC |
+| **Architecture** | 10-Module DAG, UDF (`ReaderViewModel`), Process Isolation (AIDL IPC) & 16 KB `SharedMemory` |
 | **License** | `GPL-3.0-or-later` (Dual Licensing available for clean-room modules — see [LICENSING.md](LICENSING.md)) |
 
-[Features](#features) • [Security & Privacy](#security--privacy) • [Supported Formats](#supported-formats) • [Project Structure](#project-structure) • [Third-Party Licenses](#third-party-licenses) • [License](#license)
+[Features](#features) • [Security & Privacy](#security--privacy) • [Supported Formats](#supported-formats) • [Project Structure](#project-structure) • [Engineering Docs](docs/ARCHITECTURE.md) • [Third-Party Licenses](#third-party-licenses) • [License](#license)
 
 ---
 
@@ -31,7 +31,7 @@ By decoupling UI rendering from file parsing using unprivileged Linux process sa
 ## Features
 
 - **Crash-Proof Process Isolation:** Heavy parsing operates inside an isolated background process (`:render`), ensuring the primary UI remains responsive and isolated from malformed inputs.
-- **Fluid Native-Refresh Rendering:** Graphics are delivered over read-only kernel shared memory (`SharedMemory`) without copying pixel buffers across process boundaries.
+- **Fluid Native-Refresh Rendering:** Tiles are rendered into pooled bitmaps (`AdaptiveRingBitmapPool`) and transferred across process boundaries via kernel `SharedMemory` without Binder pixel serialization.
 - **On-Device Neural OCR:** Local PP-OCRv4 / PP-OCRv5 optical text recognition via embedded ONNX Runtime with zero cloud dependencies.
 - **All-In-One Offline Engines:** Office, CAD/3D, and Archive engines plus 16 free metric-compatible open-source font families (SIL OFL 1.1, GUST Font License, DejaVu) are bundled directly into the app—no proprietary SDKs or online downloads required.
 - **100% GPL-3.0-Compatible Open Architecture:** Built exclusively with GPL-3.0-compatible open-source code and open format specifications, without proprietary UnRAR or Google Play Services SDKs.
@@ -66,16 +66,21 @@ By decoupling UI rendering from file parsing using unprivileged Linux process sa
 
 ```text
 FullFileStudio/
-├── app/                        # UI (Jetpack Compose), MainReaderViewModel, IsolatedRenderService, PaddleOcrManager
+├── build-logic/                # Gradle Convention Plugins (-Werror, SDK 37, architecture & split-package gates)
+├── app/                        # Jetpack Compose UI, UDF ReaderViewModel + SavedStateHandle, AppContainer DI, IsolatedRenderService, PaddleOcrManager
 ├── core/
-│   └── engine-api/             # AIDL contracts, C++20 SecurityArena (JNI/NEON), base engines (PDF, Word, SVG, DB, Media, HEX) & free Office fonts
+│   ├── engine-api/             # Pure AIDL contracts (IIsolatedEngineService), DocumentSession, FileSignatureDetector, SPI bridges
+│   ├── security/               # C++20 seccomp-bpf/fadvise/NEON helper, ZeroCacheReadableSource, MaliciousHeaderSanitizer, codecs
+│   ├── engine-media/           # Audio/video playback controller, ADPCM WAV decoder, MKV/MP4 subtitle & track demuxers
+│   ├── engine-database/        # SQLite, DuckDB, Realm, Apache Parquet, DBF, JSONL/BSON & UniversalHexInspectorImpl
+│   └── engine-document/        # PDF, Word (DOC/DOCX/ODT/RTF), XLS/PPT/ONE, SVG (MPL-2.0), GLES30 mesh renderer, images & free Office fonts
 ├── features/
-│   ├── office/                 # Library module for Office spreadsheets, presentations, and e-books
-│   ├── cadvector/              # Library module for clean-room 3D/CAD models (USD, GLTF/Draco, DAE/ZAE, STEP, IGES, IFC, DXF, STL, OBJ, 3MF, PLY, OFF, 3DS)
-│   ├── archives/               # Library module for archives and disk images (ZIP, 7Z, RAR4/5, TAR, GZ, BZ2, XZ, ISO)
-│   └── gpl-engines/            # Strictly GPL-3.0-or-later library module isolating GPL-derived engines (BLEND, FBX, DjVu, DWG/ACIS, MOBI/AZW3, MS Access)
-└── scripts/
-    └── prepare_paddleocr_onnx.py  # Script for downloading dictionaries and exporting PaddleOCR models to ONNX
+│   ├── office/                 # OOXML/ODF spreadsheets, presentations, and RFC 4180 CSV/TSV streaming grid
+│   ├── cadvector/              # Clean-room 3D/CAD models (USD, GLTF/Draco/meshopt, DAE/ZAE, STEP, IGES, DXF, STL, OBJ, 3MF, PLY, OFF, 3DS)
+│   ├── archives/               # Streaming archives & disk images (ZIP, 7Z, RAR4/5, TAR, GZ, BZ2, XZ, ISO)
+│   └── gpl-engines/            # Strictly GPL-3.0-or-later module isolating GPL-derived engines (BLEND, FBX, DjVu, DWG/ACIS, MOBI/AZW3, MS Access)
+├── docs/                       # System architecture (ARCHITECTURE.md), performance budget (PERFORMANCE.md), ADRs (docs/adr/)
+└── scripts/                    # CI release binary compliance & 16 KB ELF verifier + PaddleOCR ONNX export script
 ```
 
 ---
@@ -96,8 +101,8 @@ FullFileStudio incorporates GPL-3.0-compatible open-source components including 
 
 This project's application source code and compiled binaries are licensed under the **GNU General Public License v3.0 or later (`GPL-3.0-or-later`)** — see [LICENSE](LICENSE) for details.
 
-**Dual Licensing (Clean-Room Modules):** The author's original clean-room modules (`:core:engine-api` excluding file-level `MPL-2.0` `svg/*.kt`, `:features:office`, `:features:archives`, and `:features:cadvector`) are physically separated from `:features:gpl-engines` and are also available under alternative (non-copyleft) written licenses from the copyright holder (for example, for charitable/humanitarian organizations, healthcare/medical organizations, or commercial agreements). The `:features:gpl-engines` module is strictly `GPL-3.0-or-later` only. See [LICENSING.md](LICENSING.md) for full details and [CLA.md](CLA.md) for contributor terms.
+**Dual Licensing (Clean-Room Modules):** The author's original clean-room modules (`:core:engine-api`, `:core:security`, `:core:engine-media`, `:core:engine-database`, `:core:engine-document` excluding file-level `MPL-2.0` `svg/*.kt`, `:features:office`, `:features:archives`, and `:features:cadvector`) are physically separated from `:features:gpl-engines` and are also available under alternative (non-copyleft) written licenses from the copyright holder (for example, for charitable/humanitarian organizations, healthcare/medical organizations, or commercial agreements). The `:features:gpl-engines` module is strictly `GPL-3.0-or-later` only. See [LICENSING.md](LICENSING.md) for full details and [CLA.md](CLA.md) for contributor terms.
 
-Unmodified open-source font assets under `core/engine-api/src/main/assets/fonts/office/` are bundled as separate data assets ("mere aggregation" under GPL-3.0 §5) under their respective free font licenses (SIL OFL 1.1, GUST Font License 1.0 / LPPL 1.3c, and DejaVu / Bitstream Vera License).
+Unmodified open-source font assets under `core/engine-document/src/main/assets/fonts/office/` are bundled as separate data assets ("mere aggregation" under GPL-3.0 §5) under their respective free font licenses (SIL OFL 1.1, GUST Font License 1.0 / LPPL 1.3c, and DejaVu / Bitstream Vera License).
 
 **Trademarks:** All third-party product names, file format designations, and trademarks (including Microsoft Word/Excel/PowerPoint/Access/Office, Adobe PDF, Autodesk AutoCAD/DWG/DXF/FBX, Amazon Kindle, RAR/WinRAR, Google Play, Android, Blender, and Pixar OpenUSD/OpenSubdiv) belong to their respective owners and are used solely to indicate file format compatibility. FullFileStudio is an independent open-source project and is not affiliated with or endorsed by them.

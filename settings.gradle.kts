@@ -16,6 +16,7 @@
  */
 
 pluginManagement {
+    includeBuild("build-logic")
     repositories {
         google {
             content {
@@ -40,7 +41,12 @@ dependencyResolutionManagement {
 rootProject.name = "FullFileStudio"
 
 include(":app")
+
 include(":core:engine-api")
+include(":core:security")
+include(":core:engine-media")
+include(":core:engine-database")
+include(":core:engine-document")
 
 include(":features:office")
 include(":features:cadvector")

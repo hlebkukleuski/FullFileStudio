@@ -18,106 +18,46 @@
 package me.hlebkukleuski.fullfilestudio.bootstrap
 
 import android.content.Context
+import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.Stable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import me.hlebkukleuski.fullfilestudio.ui.theme.AppSettingsManager
+import me.hlebkukleuski.fullfilestudio.data.settings.AppSettingsManager
 
+@Immutable
 data class BootstrapState(
-    val isDownloading: Boolean = false,
-    val progressPercent: Int = 0,
-    val isComplete: Boolean = false,
-    val currentModule: String = "",
-    val errorMessage: String? = null
+    val isComplete: Boolean = false
 )
 
-class FirstLaunchEngineBootstrapper(context: Context) {
-
-    private val _state = MutableStateFlow(BootstrapState())
+@Stable
+class FirstLaunchEngineBootstrapper(
+    context: Context,
+    val settingsManager: AppSettingsManager = AppSettingsManager(context)
+) {
+    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    private val _state = MutableStateFlow(BootstrapState(isComplete = isFirstLaunchCompleted()))
     val state: StateFlow<BootstrapState> = _state.asStateFlow()
 
-    val playPluginManager = PlayFeaturePluginManager(context)
-    val settingsManager = AppSettingsManager(context)
+    fun isFirstLaunchCompleted(): Boolean = prefs.getBoolean(KEY_FIRST_LAUNCH_COMPLETE, false)
 
     fun startMonitoring() {
-        if (playPluginManager.isFirstLaunchCompleted()) {
-            _state.value = _state.value.copy(isComplete = true, progressPercent = 100)
+        if (isFirstLaunchCompleted()) {
+            _state.value = _state.value.copy(isComplete = true)
         }
     }
 
     fun stopMonitoring() {
     }
 
-    fun downloadAllBundles() {
-        val allModuleIds = playPluginManager.availableBundles.map { it.id }
-        downloadSelectedBundles(allModuleIds, completeBootstrapOnSuccess = true)
-    }
-
-    fun downloadSelectedBundles(
-        bundleIds: List<String>,
-        completeBootstrapOnSuccess: Boolean = true,
-        onDone: () -> Unit = {}
-    ) {
-        if (_state.value.isDownloading) return
-        if (bundleIds.isEmpty()) {
-            if (completeBootstrapOnSuccess) skipFirstLaunch()
-            onDone()
-            return
-        }
-
-        _state.value = _state.value.copy(
-            isDownloading = true,
-            progressPercent = 0,
-            currentModule = bundleIds.joinToString(", "),
-            errorMessage = null
-        )
-
-        playPluginManager.downloadModules(
-            moduleNames = bundleIds,
-            onProgress = { progress ->
-                val percent = (progress * 100).toInt().coerceIn(0, 100)
-                _state.value = _state.value.copy(
-                    progressPercent = percent,
-                    currentModule = "$percent%"
-                )
-            },
-            onSuccess = {
-                if (completeBootstrapOnSuccess) {
-                    playPluginManager.setFirstLaunchCompleted()
-                }
-                _state.value = _state.value.copy(
-                    isDownloading = false,
-                    isComplete = if (completeBootstrapOnSuccess) true else _state.value.isComplete,
-                    progressPercent = 100,
-                    currentModule = ""
-                )
-                onDone()
-            },
-            onError = { errorCode ->
-                _state.value = _state.value.copy(
-                    isDownloading = false,
-                    errorMessage = "Engine initialization error (code: $errorCode)"
-                )
-            }
-        )
-    }
-
-    fun downloadSingleBundle(bundleId: String, onDone: () -> Unit = {}) {
-        downloadSelectedBundles(
-            bundleIds = listOf(bundleId),
-            completeBootstrapOnSuccess = false,
-            onDone = onDone
-        )
-    }
-
     fun skipFirstLaunch() {
         settingsManager.confirmInitialLanguageSelection()
-        playPluginManager.setFirstLaunchCompleted()
-        _state.value = _state.value.copy(
-            isDownloading = false,
-            isComplete = true,
-            progressPercent = 100,
-            errorMessage = null
-        )
+        prefs.edit().putBoolean(KEY_FIRST_LAUNCH_COMPLETE, true).apply()
+        _state.value = _state.value.copy(isComplete = true)
+    }
+
+    companion object {
+        private const val PREFS_NAME = "fullfilestudio_onboarding_prefs"
+        private const val KEY_FIRST_LAUNCH_COMPLETE = "first_launch_complete"
     }
 }

@@ -1,0 +1,46 @@
+/*
+ * Copyright (C) 2026 Hleb Kukleuski <hlebkukleuski@gmail.com>
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <https://gnu.org>.
+ */
+
+package me.hlebkukleuski.fullfilestudio.core.engine.modules
+
+import java.io.FileDescriptor
+import me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.FileEngineProvider
+
+/**
+ * Windowed reader for large tabular and SQLite database files.
+ */
+interface DatabaseInspectorEngine : FileEngineProvider {
+
+    /**
+     * Opens the database strictly in read-only mode.
+     */
+    fun openSafeDatabase(fd: FileDescriptor): DatabaseSession
+}
+
+interface DatabaseSession : DocumentSession {
+
+    /**
+     * Indicates whether `PRAGMA trusted_schema` is enabled (must always remain false to prevent trigger/view exploits).
+     */
+    val isSchemaTrustedStatus: Boolean
+
+    /**
+     * Reads a window of rows for the currently visible viewport.
+     */
+    fun fetchVisibleRows(offsetIndex: Long, limit: Int): Any
+}

@@ -18,11 +18,13 @@
 package me.hlebkukleuski.fullfilestudio
 
 import android.content.Context
+import androidx.compose.runtime.Stable
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+@Stable
 internal class StandaloneUpdateManager(
     @Suppress("UNUSED_PARAMETER") appContext: Context,
     @Suppress("UNUSED_PARAMETER") scope: CoroutineScope

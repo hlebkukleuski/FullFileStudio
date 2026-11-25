@@ -19,38 +19,38 @@ package me.hlebkukleuski.fullfilestudio.service
 
 import android.app.Service
 import android.content.ComponentCallbacks2
-import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.IBinder
 import android.os.ParcelFileDescriptor
 import android.os.SharedMemory
-import android.system.Os
-import android.system.OsConstants
 import android.util.Log
-import com.omnireader.core.engine.AdaptiveRingBitmapPool
-import com.omnireader.core.engine.DetectedFormat
-import com.omnireader.core.engine.DocumentSession
-import com.omnireader.core.engine.DynamicEngineFactory
-import com.omnireader.core.engine.FileSignatureDetector
-import com.omnireader.core.engine.IIsolatedEngineService
-import com.omnireader.core.engine.ISessionStateCallback
-import com.omnireader.core.engine.LegalLicensePolicy
-import com.omnireader.core.engine.MaliciousHeaderSanitizer
-import com.omnireader.core.engine.SecurityArena
-import com.omnireader.core.engine.impl.CleanRoomLegacyAndIsoEngine
-import com.omnireader.core.engine.impl.DatabaseInspectorEngineImpl
-import com.omnireader.core.engine.impl.DocumentRendererEngineImpl
-import com.omnireader.core.engine.impl.SqliteDatabaseSession
-import com.omnireader.core.engine.impl.UniversalHexInspectorImpl
-import com.omnireader.core.engine.modules.ArchiveSession
 import java.io.File
 import java.io.FileDescriptor
 import java.nio.ByteBuffer
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import me.hlebkukleuski.fullfilestudio.core.database.DatabaseInspectorEngineImpl
+import me.hlebkukleuski.fullfilestudio.core.database.SqliteDatabaseSession
+import me.hlebkukleuski.fullfilestudio.core.database.UniversalHexInspectorImpl
+import me.hlebkukleuski.fullfilestudio.core.document.DocumentRendererEngineImpl
+import me.hlebkukleuski.fullfilestudio.core.engine.AdaptiveRingBitmapPool
+import me.hlebkukleuski.fullfilestudio.core.engine.DetectedFormat
+import me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.DynamicEngineFactory
+import me.hlebkukleuski.fullfilestudio.core.engine.FileSignatureDetector
+import me.hlebkukleuski.fullfilestudio.core.engine.IIsolatedEngineService
+import me.hlebkukleuski.fullfilestudio.core.engine.ISessionStateCallback
+import me.hlebkukleuski.fullfilestudio.core.engine.LegalLicensePolicy
+import me.hlebkukleuski.fullfilestudio.core.engine.modules.ArchiveSession
+import me.hlebkukleuski.fullfilestudio.core.security.MaliciousHeaderSanitizer
+import me.hlebkukleuski.fullfilestudio.core.security.SecurityArena
+import me.hlebkukleuski.fullfilestudio.core.security.ZeroCacheReadableSource
+import me.hlebkukleuski.fullfilestudio.feature.archives.ArchiveEngineFactory
+import me.hlebkukleuski.fullfilestudio.feature.cadvector.CadVectorEngineFactory
+import me.hlebkukleuski.fullfilestudio.feature.office.OfficeEngineFactory
 
 private class ErrorReportingDocumentSession(
     private val errorMessage: String
@@ -69,54 +69,21 @@ class IsolatedRenderService : Service() {
     private val activeSessions = ConcurrentHashMap<Int, DocumentSession>()
     private val sessionRenderLocks = ConcurrentHashMap<Int, Any>()
     private val stateCallbacks = ConcurrentHashMap<Int, ISessionStateCallback>()
-    private val cachedFactories = ConcurrentHashMap<String, DynamicEngineFactory>()
+    private val cadVectorFactory: DynamicEngineFactory by lazy { CadVectorEngineFactory() }
+    private val officeFactory: DynamicEngineFactory by lazy { OfficeEngineFactory() }
+    private val archiveFactory: DynamicEngineFactory by lazy { ArchiveEngineFactory() }
 
     override fun onCreate() {
         super.onCreate()
         if (!android.os.Process.isIsolated()) {
             try {
-                cacheDir?.absolutePath?.let { System.setProperty("omnireader.cache.dir", it) }
+                cacheDir?.absolutePath?.let { System.setProperty("fullfilestudio.cache.dir", it) }
             } catch (_: Throwable) {}
         }
-        try { com.omnireader.core.engine.impl.OfficeFonts.install(assets) } catch (_: Throwable) {}
+        try { me.hlebkukleuski.fullfilestudio.core.document.OfficeFonts.install(assets) } catch (_: Throwable) {}
         if (android.os.Process.isIsolated()) {
             val seccompActive = SecurityArena.safeSetupSeccomp()
             android.util.Log.i("IsolatedRenderService", "seccomp deny-list active=$seccompActive")
-        }
-    }
-
-    private fun loadDynamicFactory(className: String): DynamicEngineFactory? {
-        cachedFactories[className]?.let { return it }
-        val candidateLoaders = listOfNotNull(
-            classLoader,
-            applicationContext?.classLoader,
-            IsolatedRenderService::class.java.classLoader,
-            Thread.currentThread().contextClassLoader
-        )
-        for (loader in candidateLoaders) {
-            try {
-                val clazz = Class.forName(className, true, loader)
-                val instance = clazz.getDeclaredConstructor().newInstance() as? DynamicEngineFactory
-                if (instance != null) {
-                    cachedFactories[className] = instance
-                    return instance
-                }
-            } catch (_: Throwable) {}
-        }
-        Log.w(TAG, "Engine factory $className unavailable, using built-in clean-room engine")
-        return null
-    }
-
-    private fun resolveDescriptorSize(fd: FileDescriptor): Long {
-        val statSize = try { Os.fstat(fd).st_size } catch (_: Throwable) { -1L }
-        if (statSize > 0L) return statSize
-        return try {
-            val cur = Os.lseek(fd, 0L, OsConstants.SEEK_CUR)
-            val end = Os.lseek(fd, 0L, OsConstants.SEEK_END)
-            Os.lseek(fd, cur, OsConstants.SEEK_SET)
-            if (end > 0L) end else -1L
-        } catch (_: Throwable) {
-            -1L
         }
     }
 
@@ -165,16 +132,12 @@ class IsolatedRenderService : Service() {
     private fun routeSession(fd: FileDescriptor, ext: String, password: String? = null): DocumentSession {
         val cleanExt = ext.lowercase(Locale.ROOT).trim()
 
-        if (cleanExt in setOf("hex", "bin", "elf", "dex", "so")) {
-            return UniversalHexInspectorImpl().createSession(fd)
-        }
-
+        val headerSource = ZeroCacheReadableSource(fd)
         val headerBuffer = ByteBuffer.allocateDirect(4096)
-        val fileSize = resolveDescriptorSize(fd)
+        val fileSize = headerSource.size.let { if (it > 0L) it else -1L }
 
         try {
-            try { Os.lseek(fd, 0L, OsConstants.SEEK_SET) } catch (_: Throwable) {}
-            Os.read(fd, headerBuffer)
+            headerSource.readAt(0L, headerBuffer)
         } catch (_: Exception) {}
         headerBuffer.flip()
 
@@ -188,6 +151,17 @@ class IsolatedRenderService : Service() {
         )
         if (!legalVerdict.isLegallyPermitted) {
             return ErrorReportingDocumentSession(legalVerdict.explanation)
+        }
+
+        if (cleanExt in setOf("hex", "bin", "elf", "dex", "so") &&
+            format in setOf(
+                DetectedFormat.UNKNOWN,
+                DetectedFormat.PLAINTEXT,
+                DetectedFormat.ELF,
+                DetectedFormat.DEX
+            )
+        ) {
+            return UniversalHexInspectorImpl().createSession(fd)
         }
 
         if (!MaliciousHeaderSanitizer.isSafeToParse(headerBuffer, format)) {
@@ -240,9 +214,7 @@ class IsolatedRenderService : Service() {
                 DetectedFormat.DWG -> "dwg"
                 else -> cleanExt
             }
-            loadDynamicFactory("me.hlebkukleuski.fullfilestudio.feature.cadvector.CadVectorEngineFactory")
-                ?.let { return it.createSessionWithPassword(fd, resolvedCadExt, password) }
-            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedCadExt, password)
+            return cadVectorFactory.createSessionWithPassword(fd, resolvedCadExt, password)
         }
 
         val officeExtensions = setOf(
@@ -280,23 +252,7 @@ class IsolatedRenderService : Service() {
                 DetectedFormat.MOBI -> "mobi"
                 else -> cleanExt
             }
-            loadDynamicFactory("me.hlebkukleuski.fullfilestudio.feature.office.OfficeEngineFactory")
-                ?.let { return it.createSessionWithPassword(fd, resolvedOfficeExt, password) }
-
-            if (format in setOf(
-                    DetectedFormat.DOC, DetectedFormat.XLS, DetectedFormat.PPT,
-                    DetectedFormat.RTF, DetectedFormat.ONE,
-                    DetectedFormat.XLSX, DetectedFormat.ODS,
-                    DetectedFormat.PPTX, DetectedFormat.ODP
-                ) || resolvedOfficeExt in setOf(
-                    "doc", "dot", "xls", "xlt", "ppt", "pps", "pot", "rtf", "one",
-                    "xlsx", "xlsm", "xlsb", "xltx", "xltm", "ods", "ots", "csv", "tsv",
-                    "pptx", "pptm", "ppsx", "ppsm", "potx", "potm", "odp", "otp"
-                )
-            ) {
-                return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedOfficeExt, password)
-            }
-            return DocumentRendererEngineImpl().createSessionForFormat(fd, format, resolvedOfficeExt, password)
+            return officeFactory.createSessionWithPassword(fd, resolvedOfficeExt, password)
         }
 
         val isOfficeOrEbookOr3dZipExtension = cleanExt in setOf(
@@ -325,9 +281,7 @@ class IsolatedRenderService : Service() {
                 DetectedFormat.ZIP -> if (cleanExt in setOf("apk", "jar")) cleanExt else "zip"
                 else -> cleanExt
             }
-            loadDynamicFactory("me.hlebkukleuski.fullfilestudio.feature.archives.ArchiveEngineFactory")
-                ?.let { return it.createSessionWithPassword(fd, resolvedArcExt, password) }
-            return CleanRoomLegacyAndIsoEngine.createSession(fd, format, resolvedArcExt, password)
+            return archiveFactory.createSessionWithPassword(fd, resolvedArcExt, password)
         }
 
         return DocumentRendererEngineImpl().createSessionForFormat(fd, format, cleanExt, password)
@@ -427,16 +381,16 @@ class IsolatedRenderService : Service() {
         override fun is3dSession(sessionId: Int): Boolean = activeSessions[sessionId]?.is3dContent ?: false
 
         override fun exportMeshScene(sessionId: Int): SharedMemory? {
-            val session = activeSessions[sessionId] as? com.omnireader.core.engine.MeshSceneSource ?: return null
+            val session = activeSessions[sessionId] as? me.hlebkukleuski.fullfilestudio.core.document.mesh.MeshSceneSource ?: return null
             val renderLock = sessionRenderLocks.getOrPut(sessionId) { Any() }
             synchronized(renderLock) {
                 val scene = session.exportMeshScene() ?: return null
-                val size = com.omnireader.core.engine.MeshSceneCodec.encodedSize(scene)
+                val size = me.hlebkukleuski.fullfilestudio.core.document.mesh.MeshSceneCodec.encodedSize(scene)
                 val memory = SharedMemory.create("mesh_scene_$sessionId", size.coerceAtLeast(1))
                 var mapped: ByteBuffer? = null
                 return try {
                     mapped = memory.mapReadWrite()
-                    com.omnireader.core.engine.MeshSceneCodec.encode(scene, mapped)
+                    me.hlebkukleuski.fullfilestudio.core.document.mesh.MeshSceneCodec.encode(scene, mapped)
                     SharedMemory.unmap(mapped)
                     mapped = null
                     memory.setProtect(android.system.OsConstants.PROT_READ)
@@ -561,54 +515,32 @@ class IsolatedRenderService : Service() {
 
         override fun closeSession(sessionId: Int) {
             stateCallbacks.remove(sessionId)
-            sessionRenderLocks.remove(sessionId)
-            try {
-                activeSessions.remove(sessionId)?.close()
-            } catch (_: Throwable) {}
+            val renderLock = sessionRenderLocks.getOrPut(sessionId) { Any() }
+            synchronized(renderLock) {
+                val session = activeSessions.remove(sessionId)
+                sessionRenderLocks.remove(sessionId)
+                try {
+                    session?.close()
+                } catch (_: Throwable) {}
+            }
             if (activeSessions.isEmpty()) {
                 AdaptiveRingBitmapPool.trimToZero()
             }
         }
 
-        override fun isArchiveSession(sessionId: Int): Boolean {
-            val session = activeSessions[sessionId]
-            return session is ArchiveSession || session?.javaClass?.name?.contains("ArchiveSession") == true
-        }
+        override fun isArchiveSession(sessionId: Int): Boolean =
+            activeSessions[sessionId] is ArchiveSession
 
         override fun isCopyRestricted(sessionId: Int): Boolean {
             return activeSessions[sessionId]?.isCopyRestricted == true
         }
 
-        override fun getArchiveEntries(sessionId: Int): Array<String> {
-            val session = activeSessions[sessionId]
-            if (session is ArchiveSession) {
-                return session.sanitizedFileEntries.toTypedArray()
-            }
-            if (session?.javaClass?.name?.contains("ArchiveSession") == true) {
-                try {
-                    val method = session.javaClass.getMethod("getSanitizedFileEntries")
-                    val list = method.invoke(session) as? List<*>
-                    return list?.map { it.toString() }?.toTypedArray() ?: emptyArray()
-                } catch (_: Exception) {}
-            }
-            return emptyArray()
-        }
+        override fun getArchiveEntries(sessionId: Int): Array<String> =
+            (activeSessions[sessionId] as? ArchiveSession)?.sanitizedFileEntries?.toTypedArray() ?: emptyArray()
 
         override fun openVirtualFile(sessionId: Int, entryPath: String?): ParcelFileDescriptor? {
             if (entryPath == null) return null
-            val session = activeSessions[sessionId]
-            if (session is ArchiveSession) {
-                val pfd = session.openVirtualFile(entryPath)
-                if (pfd != null) return pfd
-            }
-            if (session?.javaClass?.name?.contains("ArchiveSession") == true) {
-                try {
-                    val method = session.javaClass.getMethod("openVirtualFile", String::class.java)
-                    val pfd = method.invoke(session, entryPath) as? ParcelFileDescriptor
-                    if (pfd != null) return pfd
-                } catch (_: Exception) {}
-            }
-            return null
+            return (activeSessions[sessionId] as? ArchiveSession)?.openVirtualFile(entryPath)
         }
     }
 
@@ -626,19 +558,25 @@ class IsolatedRenderService : Service() {
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
-        if (level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW || level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
+        @Suppress("DEPRECATION")
+        val isLowRunning = level >= ComponentCallbacks2.TRIM_MEMORY_RUNNING_LOW
+        if (isLowRunning || level >= ComponentCallbacks2.TRIM_MEMORY_UI_HIDDEN) {
             AdaptiveRingBitmapPool.trimToZero()
         }
     }
 
     private fun closeAllActiveSessions() {
         stateCallbacks.clear()
-        sessionRenderLocks.clear()
-        val sessions = activeSessions.values.toList()
-        activeSessions.clear()
-        sessions.forEach {
-            try { it.close() } catch (_: Throwable) {}
+        val ids = activeSessions.keys.toList()
+        for (id in ids) {
+            val renderLock = sessionRenderLocks.getOrPut(id) { Any() }
+            synchronized(renderLock) {
+                val session = activeSessions.remove(id)
+                sessionRenderLocks.remove(id)
+                try { session?.close() } catch (_: Throwable) {}
+            }
         }
+        sessionRenderLocks.clear()
         AdaptiveRingBitmapPool.trimToZero()
     }
 

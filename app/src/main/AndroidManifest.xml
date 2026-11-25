@@ -24,7 +24,7 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
-        android:name=".OmniReaderApp"
+        android:name=".FullFileStudioApp"
         android:allowBackup="false"
         android:enableOnBackInvokedCallback="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -34,7 +34,6 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.FullFileStudio"
-        android:extractNativeLibs="false"
         android:usesCleartextTraffic="false"
         tools:targetApi="37">
 
@@ -76,15 +75,5 @@
             android:name=".service.MediaPlaybackNotificationService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
-
-        <provider
-            android:name="androidx.core.content.FileProvider"
-            android:authorities="${applicationId}.fileprovider"
-            android:exported="false"
-            android:grantUriPermissions="true">
-            <meta-data
-                android:name="android.support.FILE_PROVIDER_PATHS"
-                android:resource="@xml/file_paths" />
-        </provider>
     </application>
 </manifest>

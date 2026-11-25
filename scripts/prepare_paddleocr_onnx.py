@@ -275,7 +275,19 @@ def download_and_convert_all_models(force: bool) -> None:
         try:
             download_file(url, tar_path)
             with tarfile.open(tar_path, "r:*") as tar:
-                tar.extractall(path=extract_dir)
+                base_dir = extract_dir.resolve()
+                for member in tar.getmembers():
+                    if member.issym() or member.islnk() or member.isdev():
+                        raise ValueError(f"Unsafe tar member type: {member.name}")
+                    member_path = (base_dir / member.name).resolve()
+                    try:
+                        member_path.relative_to(base_dir)
+                    except ValueError as exc:
+                        raise ValueError(f"Tar path traversal blocked: {member.name}") from exc
+                if hasattr(tarfile, "data_filter"):
+                    tar.extractall(path=extract_dir, filter="data")
+                else:
+                    tar.extractall(path=extract_dir)
             model_dir = locate_extracted_model_dir(extract_dir)
             if model_dir is None:
                 print(f"[Error] Could not locate inference.pdiparams inside {tar_path}")

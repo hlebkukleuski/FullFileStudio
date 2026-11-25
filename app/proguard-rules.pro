@@ -14,15 +14,15 @@
 # along with this program. If not, see <https://gnu.org>.
 
 # 1. Keep dynamic module factory interface and implementations (instantiated via Class.forName)
--keep interface com.omnireader.core.engine.DynamicEngineFactory { *; }
--keep class * implements com.omnireader.core.engine.DynamicEngineFactory {
+-keep interface me.hlebkukleuski.fullfilestudio.core.engine.DynamicEngineFactory { *; }
+-keep class * implements me.hlebkukleuski.fullfilestudio.core.engine.DynamicEngineFactory {
     public <init>();
     public *** canHandle(...);
     public *** createSession(...);
     public *** createSessionWithPassword(...);
 }
--keep interface com.omnireader.core.engine.impl.GplCoreEngineBridge { *; }
--keep class * implements com.omnireader.core.engine.impl.GplCoreEngineBridge {
+-keep interface me.hlebkukleuski.fullfilestudio.core.engine.bridge.GplCoreEngineBridge { *; }
+-keep class * implements me.hlebkukleuski.fullfilestudio.core.engine.bridge.GplCoreEngineBridge {
     public <init>();
     public *** createDjvuSession(...);
     public *** createMobiSession(...);
@@ -37,21 +37,21 @@
 }
 
 # 2. Keep ArchiveSession contract (invoked in IsolatedRenderService)
--keep interface com.omnireader.core.engine.modules.ArchiveSession {
+-keep interface me.hlebkukleuski.fullfilestudio.core.engine.modules.ArchiveSession {
     public *** getSanitizedFileEntries();
     public *** openVirtualFile(java.lang.String);
 }
--keep class * implements com.omnireader.core.engine.modules.ArchiveSession {
+-keep class * implements me.hlebkukleuski.fullfilestudio.core.engine.modules.ArchiveSession {
     public *** getSanitizedFileEntries();
     public *** openVirtualFile(java.lang.String);
 }
 
-# 3. Keep class names of DocumentSession implementations (used by UI heuristics in TiledZoomableCanvas)
--keepnames class * implements com.omnireader.core.engine.DocumentSession
+# 3. Keep class names of DocumentSession implementations (used by UI heuristics)
+-keepnames class * implements me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
 
 # 4. Keep native security arena JNI class (bound to native_security_arena.cpp)
--keep class com.omnireader.core.engine.SecurityArena {
-    public static final com.omnireader.core.engine.SecurityArena INSTANCE;
+-keep class me.hlebkukleuski.fullfilestudio.core.security.SecurityArena {
+    public static final me.hlebkukleuski.fullfilestudio.core.security.SecurityArena INSTANCE;
     public static <methods>;
     native <methods>;
 }
@@ -70,8 +70,8 @@
 -keep class me.hlebkukleuski.fullfilestudio.service.** { *; }
 
 # 9. Canonical AIDL IPC rules for IsolatedRenderService cross-process communication
--keep class com.omnireader.core.engine.IIsolatedEngineService* { *; }
--keep class com.omnireader.core.engine.ISessionStateCallback* { *; }
+-keep class me.hlebkukleuski.fullfilestudio.core.engine.IIsolatedEngineService* { *; }
+-keep class me.hlebkukleuski.fullfilestudio.core.engine.ISessionStateCallback* { *; }
 -keep class * implements android.os.Parcelable {
     public static final android.os.Parcelable$Creator *;
 }

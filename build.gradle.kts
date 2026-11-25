@@ -24,3 +24,36 @@ plugins {
 tasks.register("clean", Delete::class) {
     delete(rootProject.layout.buildDirectory)
 }
+
+tasks.register("verifyZeroSplitPackages") {
+    group = "verification"
+    description = "Verifies that no Kotlin/Java package is split across multiple Gradle modules."
+    val moduleMainRoots = subprojects.associate { sub ->
+        sub.path to sub.file("src/main/java")
+    }
+    doLast {
+        val pkgToModules = linkedMapOf<String, MutableSet<String>>()
+        for ((modPath, javaRoot) in moduleMainRoots) {
+            if (!javaRoot.isDirectory) continue
+            javaRoot.walkTopDown()
+                .filter { it.isFile && (it.extension == "kt" || it.extension == "java") }
+                .forEach { file ->
+                    val pkg = file.useLines { lines ->
+                        lines.firstOrNull { it.trim().startsWith("package ") }
+                            ?.trim()
+                            ?.removePrefix("package ")
+                            ?.removeSuffix(";")
+                            ?.trim()
+                    }.orEmpty()
+                    if (pkg.isNotEmpty()) {
+                        pkgToModules.getOrPut(pkg) { linkedSetOf() }.add(modPath)
+                    }
+                }
+        }
+        val splits = pkgToModules.filterValues { it.size > 1 }
+        if (splits.isNotEmpty()) {
+            val details = splits.entries.joinToString("\n") { (pkg, mods) -> " - $pkg -> $mods" }
+            throw GradleException("Split packages detected across Gradle modules:\n$details")
+        }
+    }
+}

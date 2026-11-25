@@ -40,33 +40,34 @@ All verbatim third-party license texts and notices are bundled offline inside th
 
 | Upstream Project | Copyright | Upstream License | Location in FullFileStudio |
 | :--- | :--- | :--- | :--- |
-| **Blender** | Blender Foundation & Authors; NaN Holding B.V. (Decimate, IK, noise); Nicholas Bishop (Skin) | GPL-2.0-or-later | `features/gpl-engines/.../CleanRoomBlend*.kt` (all files, including `Skin`, `Boolean`, and multires displacement in `Subdiv`) |
-| **FreeBSD / UC Berkeley `qsort.c` & `heapsort.c`** | The Regents of the University of California (1991–1993); Ronnie Kon, Kevin Lew, Elmer Yglesias, Jon Bentley, M. Douglas McIlroy | BSD-3-Clause | `features/gpl-engines/.../CleanRoomBlendBevel.kt` (`darwinQsort`, `heapsort`) |
-| **Blender Sub-Components (Penner Easing, Shoemake Euler, SPI Noise, Woop/Embree Ray-Tri, Buss/Kim SDLS IK)** | Robert Penner (2001, BSD-3-Clause); Ken Shoemake (1994); Sony Pictures Imageworks Inc. (2009–2010, BSD-3-Clause); Sven Woop, Carsten Benthin, Ingo Wald / Intel Corp. (Apache-2.0); Samuel R. Buss & Jin-Su Kim | BSD-3-Clause / Apache-2.0 | `features/gpl-engines/.../CleanRoomBlendAnim.kt`, `CleanRoomBlendNoiseTables.kt`, `CleanRoomBlendTexture.kt`, `CleanRoomBlendShrinkwrap.kt`, `CleanRoomBlendRig.kt` |
-| **OpenSubdiv** | Pixar / DreamWorks Animation LLC / Autodesk / Google / DigitalFish | Modified Apache-2.0 (TOST 1.0) | `features/gpl-engines/.../CleanRoomBlendSubdiv.kt` |
-| **OpenUSD & ASWF MaterialX Node Definitions** | Pixar / Alliance for OpenUSD; MaterialX Contributors (ASWF) | Modified Apache-2.0 (TOST 1.0) / Apache-2.0 | `features/cadvector/.../CleanRoomUsd.kt`, `CleanRoomUsdLayer.kt` |
-| **resvg / usvg / svgtypes / simplecss / roxmltree / unicode-vo / ttf-parser / fontdb / tiny-skia / kurbo** | Yevhenii Reizner, The resvg Authors, The Linebender Authors; Google Inc. (2011, Skia / `tiny-skia`); The Kurbo Authors / Raph Levien (2018); Pascal Getreuer (2011, IIR blur); Felix Schütt & Ivan Kutskir (`fastblur`); W3C (`feTurbulence`) | MPL-2.0 / Apache-2.0 / MIT / BSD-3-Clause (`tiny-skia`) / BSD-2-Clause (IIR blur) / Unicode-3.0 | `core/engine-api/.../svg/*.kt` |
-| **DjVuLibre** | LizardTech, Inc. / AT&T Labs / Leon Bottou, Yann LeCun, Patrick Haffner, Paul G. Howard, Bill Riemers | GPL-2.0-or-later | `features/gpl-engines/.../CleanRoomDjvuDecoder.kt` |
-| **libarchive** | Tim Kientzle, Andres Mejia, Michihiro NAKAJIMA, Grzegorz Antoniak, contributors | BSD-2-Clause | `features/archives/.../Rar4Parser.kt`, `ArchiveNavigatorEngineImpl.kt` (`CleanRoomRar5Parser`) |
+| **Blender** | Blender Foundation & Authors; NaN Holding B.V. (Decimate, IK, noise); Nicholas Bishop (Skin) | GPL-2.0-or-later | `features/gpl-engines/.../blend/Blend*.kt` (all files, including `BlendSkin`, `BlendBoolean`, and multires displacement in `BlendSubdiv`) |
+| **FreeBSD / UC Berkeley `qsort.c` & `heapsort.c`** | The Regents of the University of California (1991–1993); Ronnie Kon, Kevin Lew, Elmer Yglesias, Jon Bentley, M. Douglas McIlroy | BSD-3-Clause | `features/gpl-engines/.../blend/BlendBevel.kt` (`darwinQsort`, `heapsort`) |
+| **Blender Sub-Components (Penner Easing, Shoemake Euler, SPI Noise, Woop/Embree Ray-Tri, Buss/Kim SDLS IK)** | Robert Penner (2001, BSD-3-Clause); Ken Shoemake (1994); Sony Pictures Imageworks Inc. (2009–2010, BSD-3-Clause); Sven Woop, Carsten Benthin, Ingo Wald / Intel Corp. (Apache-2.0); Samuel R. Buss & Jin-Su Kim | BSD-3-Clause / Apache-2.0 | `features/gpl-engines/.../blend/{BlendAnim.kt, BlendNoiseTables.kt, BlendTexture.kt, BlendShrinkwrap.kt, BlendRig.kt}` |
+| **OpenSubdiv** | Pixar / DreamWorks Animation LLC / Autodesk / Google / DigitalFish | Modified Apache-2.0 (TOST 1.0) | `features/gpl-engines/.../blend/BlendSubdiv.kt` |
+| **OpenUSD & ASWF MaterialX Node Definitions** | Pixar / Alliance for OpenUSD; MaterialX Contributors (ASWF) | Modified Apache-2.0 (TOST 1.0) / Apache-2.0 | `features/cadvector/.../{UsdReader.kt, UsdLayer.kt}` |
+| **resvg / usvg / svgtypes / simplecss / roxmltree / unicode-vo / ttf-parser / fontdb / tiny-skia / kurbo** | Yevhenii Reizner, The resvg Authors, The Linebender Authors; Google Inc. (2011, Skia / `tiny-skia`); The Kurbo Authors / Raph Levien (2018); Pascal Getreuer (2011, IIR blur); Felix Schütt & Ivan Kutskir (`fastblur`); W3C (`feTurbulence`) | MPL-2.0 / Apache-2.0 / MIT / BSD-3-Clause (`tiny-skia`) / BSD-2-Clause (IIR blur) / Unicode-3.0 | `core/engine-document/.../svg/*.kt` |
+| **DjVuLibre** | LizardTech, Inc. / AT&T Labs / Leon Bottou, Yann LeCun, Patrick Haffner, Paul G. Howard, Bill Riemers | GPL-2.0-or-later | `features/gpl-engines/.../djvu/DjvuDecoder.kt` |
+| **libarchive** | Tim Kientzle, Andres Mejia, Michihiro NAKAJIMA, Grzegorz Antoniak, contributors | BSD-2-Clause | `features/archives/.../Rar4Parser.kt`, `ArchiveNavigatorEngineImpl.kt` (`Rar5Parser`) |
 | **PPMd7 / PPMd var.H** | Igor Pavlov (2010), Dmitry Shkarin (2001) | Public Domain | `features/archives/.../Rar4Ppmd7Decoder.kt` |
-| **Google Draco** | The Draco Authors (2016–2026) | Apache-2.0 | `features/cadvector/.../CleanRoomDraco.kt` |
-| **meshoptimizer** | Arseny Kapoulkine (2016–2026) | MIT | `features/cadvector/.../CleanRoomMeshopt.kt` |
-| **ECMA-376 Part 1 Annex D (Apache POI Adaptation)** | Ecma International (Bylaws §9.4 / Microsoft OSP); The Apache Software Foundation (Apache POI, 2003–2026) | Open Specification / Apache-2.0 (stripped `<ahLst>`/`<cxnLst>`) | `core/engine-api/src/main/assets/drawingml/presetShapeDefinitions.xml`, `CleanRoomDmlGeometry.kt` |
-| **AOSP Minikin (`.hyb` Hyphenation Trie Format)** | The Android Open Source Project (2015) | Apache-2.0 | `core/engine-api/.../word/WordHyphenator.kt` |
-| **Apache POI & Apache Parquet Format** | The Apache Software Foundation (2003–2026) | Apache-2.0 | `DocReader.kt`, `DocSprms.kt`, `CleanRoomPpt.kt`, `CleanRoomXlsCharts.kt`, `CleanRoomOfficeCrypto.kt`, `CleanRoomLegacyAndIsoEngine.kt`, `CleanRoomParquetReader.kt` |
-| **Assimp, ufbx & Blender FBX I/O** | assimp team (2006–2026); Samuli Raivio (2020–2026); Blender Foundation (2013–2026) | BSD-3-Clause / MIT / GPL-2.0-or-later | `features/gpl-engines/.../CleanRoomFbx.kt` |
-| **Calibre (MOBI HUFF/CDIC & Trailing Entries)** | Kovid Goyal & Calibre Contributors (2008–2026) | GPL-3.0-or-later | `features/gpl-engines/.../CleanRoomMobiParser.kt` |
-| **GNU LibreDWG, ACadSharp & FreeCAD InventorLoader** | Free Software Foundation, Inc. (2009–2026); DomCR (2020–2026); Jens M. Plonka (2018–2024) | GPL-3.0-or-later / MIT / LGPL-2.1-or-later | `features/gpl-engines/.../CleanRoomDwgContainer.kt`, `CleanRoomDwgReader.kt`, `CleanRoomAcis.kt` |
-| **Jackcess & MDB Tools (Jet3/Jet4/ACE Format)** | Health Market Science, Inc. / James Ahlborn (2008–2026); Brian Bruns & contributors (2000–2026) | Apache-2.0 / LGPL-2.0-or-later / GPL-2.0-or-later | `features/gpl-engines/.../CleanRoomAccessReader.kt` |
-| **DuckDB, Realm Core & SQLite 3 Formats** | Stichting DuckDB Foundation (2018–2026); Realm Inc. / MongoDB, Inc. (2016–2026); D. Richard Hipp / Hwaci | MIT / Apache-2.0 / Public Domain | `CleanRoomDuckDbReader.kt`, `CleanRoomRealmReader.kt`, `CleanRoomSqliteReader.kt` |
-| **Snappy, LZ4 & Zstandard (RFC 8878) Formats** | Google Inc. (2011); Yann Collet (2011–2020); Meta Platforms, Inc. | BSD-3-Clause / BSD-2-Clause | `core/engine-api/.../CompressionCodecs.kt` |
-| **Cotangent Frame Normal Mapping (`cotangent_frame`)** | Christian Schüler (*ShaderX 5*, 2007) | Published Algorithm | `core/engine-api/.../Gles30MeshRenderer.kt` |
+| **Google Draco** | The Draco Authors (2016–2026) | Apache-2.0 | `features/cadvector/.../DracoDecoder.kt` |
+| **meshoptimizer** | Arseny Kapoulkine (2016–2026) | MIT | `features/cadvector/.../MeshoptDecoder.kt` |
+| **ECMA-376 Part 1 Annex D (Apache POI Adaptation)** | Ecma International (Bylaws §9.4 / Microsoft OSP); The Apache Software Foundation (Apache POI, 2003–2026) | Open Specification / Apache-2.0 (stripped `<ahLst>`/`<cxnLst>`) | `core/engine-document/src/main/assets/drawingml/presetShapeDefinitions.xml`, `core/engine-document/.../DmlGeometry.kt` |
+| **AOSP Minikin (`.hyb` Hyphenation Trie Format)** | The Android Open Source Project (2015) | Apache-2.0 | `core/engine-document/.../word/WordHyphenator.kt` |
+| **Apache POI & Apache Parquet Format** | The Apache Software Foundation (2003–2026) | Apache-2.0 | `core/engine-document/.../{word/DocReader.kt, word/DocSprms.kt, PptParser.kt, PptRenderer.kt, XlsChartsParser.kt, OfficeCrypto.kt, LegacyAndIsoEngine.kt, Ole2CfbContainer.kt}`, `core/engine-database/.../ParquetReader.kt` |
+| **Assimp, ufbx & Blender FBX I/O** | assimp team (2006–2026); Samuli Raivio (2020–2026); Blender Foundation (2013–2026) | BSD-3-Clause / MIT / GPL-2.0-or-later | `features/gpl-engines/.../fbx/FbxLoader.kt` |
+| **Calibre (MOBI HUFF/CDIC & Trailing Entries)** | Kovid Goyal & Calibre Contributors (2008–2026) | GPL-3.0-or-later | `features/gpl-engines/.../mobi/MobiParser.kt` |
+| **GNU LibreDWG, ACadSharp & FreeCAD InventorLoader** | Free Software Foundation, Inc. (2009–2026); DomCR (2020–2026); Jens M. Plonka (2018–2024) | GPL-3.0-or-later / MIT / LGPL-2.1-or-later | `features/gpl-engines/.../dwg/{DwgContainer.kt, DwgReader.kt, AcisGeometryParser.kt}` |
+| **Jackcess & MDB Tools (Jet3/Jet4/ACE Format)** | Health Market Science, Inc. / James Ahlborn (2008–2026); Brian Bruns & contributors (2000–2026) | Apache-2.0 / LGPL-2.0-or-later / GPL-2.0-or-later | `features/gpl-engines/.../access/AccessDatabaseReader.kt` |
+| **DuckDB (with FSST & FastPFor), Realm Core & SQLite 3 Formats** | Stichting DuckDB Foundation (2018–2026); CWI, TU Munich, FSU Jena (FSST, 2018–2020); Daniel Lemire (FastPFor); Realm Inc. / MongoDB, Inc. (2016–2026); D. Richard Hipp / Hwaci | MIT / Apache-2.0 / Public Domain | `core/engine-database/.../{DuckDbReader.kt, RealmReader.kt, SqliteReader.kt}` |
+| **W3C WOFF 2.0 & Google woff2 Format** | W3C; Google Inc. (2014) | W3C Document / MIT | `core/engine-document/.../Woff2Decoder.kt` |
+| **Snappy, LZ4 & Zstandard (RFC 8878) Formats** | Google Inc. (2011); Yann Collet (2011–2020); Meta Platforms, Inc. | BSD-3-Clause / BSD-2-Clause | `core/security/.../CompressionCodecs.kt` |
+| **Cotangent Frame Normal Mapping (`cotangent_frame`)** | Christian Schüler (*ShaderX 5*, 2007) | Published Algorithm | `core/engine-document/.../mesh/Gles30MeshRenderer.kt` |
 
 ---
 
 ## 3. Bundled Free Open-Source Fonts (Unmodified)
 
-FullFileStudio's application source code and compiled binaries are licensed under **`GPL-3.0-or-later`**. All font binaries under `core/engine-api/src/main/assets/fonts/office/` are redistributed unmodified as discrete, separate data assets ("mere aggregation" under GPL-3.0 §5), governed independently by their respective free font licenses below, with Reserved Font Names (RFNs) preserved intact and verbatim upstream license files alongside the fonts:
+FullFileStudio's application source code and compiled binaries are licensed under **`GPL-3.0-or-later`**. All font binaries under `core/engine-document/src/main/assets/fonts/office/` are redistributed unmodified as discrete, separate data assets ("mere aggregation" under GPL-3.0 §5), governed independently by their respective free font licenses below, with Reserved Font Names (RFNs) preserved intact and verbatim upstream license files alongside the fonts:
 
 | Font Family | Copyright / Author | License | Reserved Font Name |
 | :--- | :--- | :--- | :--- |
@@ -86,12 +87,15 @@ FullFileStudio's application source code and compiled binaries are licensed unde
 
 - **JUnit 4** (EPL-1.0), **Robolectric** (MIT), **XPP3** (Indiana University Extreme! Lab License), **Apache POI** (Apache-2.0), **Jackcess** (Apache-2.0), **SQLite-JDBC** (Apache-2.0), **Zstd-JNI** (BSD-2-Clause), **Snappy / LZ4-Java** (Apache-2.0).
 - Test sample files under `*/src/test/resources/` carry per-directory `LICENSE` / `NOTICE` files and are never packaged into release or debug APKs:
-  - `core/engine-api/src/test/resources/doc/`: Apache POI test documents (`Apache-2.0`, `LICENSE-APACHE` & `NOTICE`).
-  - `core/engine-api/src/test/resources/svg-reference/`: resvg test suite (`Apache-2.0 OR MIT`) and Google Noto test fonts (`SIL OFL 1.1`, `Noto-LICENSE-OFL.txt`).
-  - `core/engine-api/src/test/resources/{adpcm,ccitt,mkvsubs,parquet,ppt,pptx,xls}/`: synthetic test fixtures created for FullFileStudio (`GPL-3.0-or-later`).
+  - `core/engine-document/src/test/resources/doc/`: Apache POI test documents (`Apache-2.0`, `LICENSE-APACHE` & `NOTICE`).
+  - `core/engine-database/src/test/resources/duckdb/`: DuckDB test database fixtures (`MIT`, `LICENSE-DuckDB-MIT.txt`).
+  - `core/engine-document/src/test/resources/woff2/`: Google Roboto subset font fixture (`Apache-2.0`, `LICENSE-Roboto-Apache-2.0.txt`).
+  - `core/engine-document/src/test/resources/svg-reference/`: resvg test suite (`Apache-2.0 OR MIT`) and Google Noto test fonts (`SIL OFL 1.1`, `Noto-LICENSE-OFL.txt`).
+  - `core/{engine-document,engine-database,engine-media,security}/src/test/resources/`: synthetic test fixtures created for FullFileStudio (`GPL-3.0-or-later`).
   - `features/archives/src/test/resources/{rar4,rar5}/`: sanitized libarchive RAR4/RAR5 test fixtures (`BSD-2-Clause`, `LICENSE`).
   - `features/gpl-engines/src/test/resources/blend/`: Khronos glTF-Blender-IO & Blender test scenes (`Apache-2.0` / `GPL-2.0-or-later`, `LICENSE-glTF-Blender-IO.txt`).
-  - `features/gpl-engines/src/test/resources/{djvu,mobi,access}/`: synthetic DjVu, MOBI, and Access test fixtures (`GPL-3.0-or-later`).
+  - `features/gpl-engines/src/test/resources/access/`: Jackcess test database fixtures (`Apache-2.0`, `NOTICE`).
+  - `features/gpl-engines/src/test/resources/{djvu,mobi}/`: synthetic DjVu and MOBI test fixtures (`GPL-3.0-or-later`, `LICENSE`).
   - `features/gpl-engines/src/test/resources/fbx/`: Assimp BSD test fixture (`test/models/FBX/huesitos.fbx`, `BSD-3-Clause`) and synthetic FBX scenes (`GPL-3.0-or-later`, `LICENSE-assimp-test-models.txt`).
   - `features/cadvector/src/test/resources/draco/` & `gltf/`: Khronos glTF-Sample-Assets (`CC-BY-4.0` / `CC0-1.0`, `NOTICE` & `LICENSE`).
   - `features/cadvector/src/test/resources/tex/`: synthetic DDS/TGA texture test fixtures (`GPL-3.0-or-later`, `LICENSE`).

@@ -17,11 +17,11 @@
 
 package me.hlebkukleuski.fullfilestudio.feature.cadvector
 
-import com.omnireader.core.engine.DocumentSession
-import com.omnireader.core.engine.DynamicEngineFactory
 import java.io.FileDescriptor
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import me.hlebkukleuski.fullfilestudio.core.engine.DocumentSession
+import me.hlebkukleuski.fullfilestudio.core.engine.DynamicEngineFactory
 
 class CadVectorEngineFactory : DynamicEngineFactory {
     override fun canHandle(signature: ByteArray, extension: String): Boolean {

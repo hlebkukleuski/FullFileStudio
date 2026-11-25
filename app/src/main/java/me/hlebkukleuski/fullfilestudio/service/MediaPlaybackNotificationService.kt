@@ -169,7 +169,7 @@ class MediaPlaybackNotificationService : Service() {
         val lang = java.util.Locale.getDefault().language.lowercase()
         val table = mapOf(
             "pause" to mapOf("ru" to "Пауза", "uk" to "Пауза", "de" to "Pause", "es" to "Pausa", "fr" to "Pause", "pl" to "Pauza", "zh" to "暂停", "en" to "Pause"),
-            "play" to mapOf("ru" to "Воспроизвести", "uk" to "Грати", "de" to "Wiedergabe", "es" to "Reproducir", "fr" to "Lecture", "pl" to "Odtwórz", "zh" to "播放", "en" to "Play"),
+            "play" to mapOf("ru" to "Воспроизвести", "uk" to "Відтворити", "de" to "Wiedergabe", "es" to "Reproducir", "fr" to "Lecture", "pl" to "Odtwórz", "zh" to "播放", "en" to "Play"),
             "next" to mapOf("ru" to "Следующий", "uk" to "Наступний", "de" to "Weiter", "es" to "Siguiente", "fr" to "Suivant", "pl" to "Następny", "zh" to "下一个", "en" to "Next"),
             "prev" to mapOf("ru" to "Предыдущий", "uk" to "Попередній", "de" to "Zurück", "es" to "Anterior", "fr" to "Précédent", "pl" to "Poprzedni", "zh" to "上一个", "en" to "Previous"),
             "close" to mapOf("ru" to "Закрыть", "uk" to "Закрити", "de" to "Schließen", "es" to "Cerrar", "fr" to "Fermer", "pl" to "Zamknij", "zh" to "关闭", "en" to "Close")
@@ -182,7 +182,7 @@ class MediaPlaybackNotificationService : Service() {
         val lang = java.util.Locale.getDefault().language.lowercase()
         val name = when (lang) {
             "ru" -> "FullFileStudio Воспроизведение"
-            "uk" -> "FullFileStudio Грати музочку"
+            "uk" -> "FullFileStudio Відтворення медіа"
             "de" -> "FullFileStudio Medienwiedergabe"
             "es" -> "FullFileStudio Reproducción de medios"
             "fr" -> "FullFileStudio Lecture média"
@@ -222,18 +222,21 @@ class MediaPlaybackNotificationService : Service() {
             .setShowWhen(false)
             .setCategory(Notification.CATEGORY_TRANSPORT)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
-        builder.addAction(Notification.Action.Builder(android.R.drawable.ic_media_previous, label("prev"), serviceIntent(ACTION_PREVIOUS, 2)).build())
+        fun action(iconRes: Int, title: String, requestCode: Int, actionStr: String): Notification.Action =
+            Notification.Action.Builder(android.graphics.drawable.Icon.createWithResource(this, iconRes), title, serviceIntent(actionStr, requestCode)).build()
+
+        builder.addAction(action(android.R.drawable.ic_media_previous, label("prev"), 2, ACTION_PREVIOUS))
         builder.addAction(
-            if (st.isPlaying) Notification.Action.Builder(android.R.drawable.ic_media_pause, label("pause"), serviceIntent(ACTION_PAUSE, 3)).build()
-            else Notification.Action.Builder(android.R.drawable.ic_media_play, label("play"), serviceIntent(ACTION_PLAY, 4)).build()
+            if (st.isPlaying) action(android.R.drawable.ic_media_pause, label("pause"), 3, ACTION_PAUSE)
+            else action(android.R.drawable.ic_media_play, label("play"), 4, ACTION_PLAY)
         )
         val compact = ArrayList<Int>()
         compact.add(0); compact.add(1)
         if (st.hasNext) {
-            builder.addAction(Notification.Action.Builder(android.R.drawable.ic_media_next, label("next"), serviceIntent(ACTION_NEXT, 5)).build())
+            builder.addAction(action(android.R.drawable.ic_media_next, label("next"), 5, ACTION_NEXT))
             compact.add(2)
         }
-        builder.addAction(Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel, label("close"), serviceIntent(ACTION_CLOSE, 7)).build())
+        builder.addAction(action(android.R.drawable.ic_menu_close_clear_cancel, label("close"), 7, ACTION_CLOSE))
         MediaPlaybackController.sessionToken?.let { token ->
             builder.setStyle(Notification.MediaStyle().setMediaSession(token).setShowActionsInCompactView(*compact.toIntArray()))
         }

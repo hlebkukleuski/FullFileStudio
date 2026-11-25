@@ -17,23 +17,23 @@
 
 package me.hlebkukleuski.fullfilestudio.feature.archives
 
+import java.io.ByteArrayOutputStream
+import java.io.File
+import java.nio.charset.StandardCharsets
+import java.util.zip.CRC32
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Test
-import java.io.ByteArrayOutputStream
-import java.io.File
-import java.nio.charset.StandardCharsets
-import java.util.zip.CRC32
 
 class Rar4ParserTest {
 
     private val dir = File(javaClass.classLoader!!.getResource("rar4/test_read_format_rar_windows.rar")!!.toURI()).parentFile!!
 
     private fun parse(bytes: ByteArray) = Rar4Parser.parseEntries(
-        CleanRoomRar5Parser.PositionalReader { offset, buffer ->
+        Rar5Parser.PositionalReader { offset, buffer ->
             if (offset >= bytes.size) -1 else {
                 val n = minOf(buffer.remaining().toLong(), bytes.size - offset).toInt()
                 buffer.put(bytes, offset.toInt(), n)

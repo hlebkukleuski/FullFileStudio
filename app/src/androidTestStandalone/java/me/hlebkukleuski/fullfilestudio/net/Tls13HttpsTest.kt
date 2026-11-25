@@ -18,21 +18,21 @@
 package me.hlebkukleuski.fullfilestudio.net
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import com.omnireader.core.engine.OmniServerEndpoints
+import javax.net.ssl.SSLSocket
 import me.hlebkukleuski.fullfilestudio.BuildConfig
+import me.hlebkukleuski.fullfilestudio.core.engine.ServerEndpoints
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
-import javax.net.ssl.SSLSocket
 
 @RunWith(AndroidJUnit4::class)
 class Tls13HttpsTest {
 
     @Test
     fun updateManifestIsFetchedOverTls13() {
-        OmniServerEndpoints.baseUrl = BuildConfig.SERVER_BASE_URL
-        val conn = Tls13Https.open(OmniServerEndpoints.appVersionManifestUrl)
+        ServerEndpoints.baseUrl = BuildConfig.SERVER_BASE_URL
+        val conn = Tls13Https.open("${ServerEndpoints.baseUrl}/version.json")
         conn.connectTimeout = 15000
         conn.readTimeout = 15000
         try {

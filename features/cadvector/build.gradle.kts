@@ -1,5 +1,3 @@
-import org.jetbrains.kotlin.gradle.dsl.JvmTarget
-
 /*
  * Copyright (C) 2026 Hleb Kukleuski <hlebkukleuski@gmail.com>
  *
@@ -18,33 +16,20 @@ import org.jetbrains.kotlin.gradle.dsl.JvmTarget
  */
 
 plugins {
-    alias(libs.plugins.android.library)
+    id("fullfilestudio.android.library")
 }
 
 android {
     namespace = "me.hlebkukleuski.fullfilestudio.feature.cadvector"
-    compileSdk = 37
-
-    defaultConfig {
-        minSdk = 30
-    }
-
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_25
-        targetCompatibility = JavaVersion.VERSION_25
-    }
-}
-
-kotlin {
-    compilerOptions {
-        jvmTarget.set(JvmTarget.JVM_25)
-    }
 }
 
 dependencies {
     implementation(project(":core:engine-api"))
+    implementation(project(":core:security"))
+    implementation(project(":core:engine-document"))
     implementation(libs.androidx.core.ktx)
     implementation(libs.kotlinx.coroutines.core)
+
     testImplementation(libs.junit)
     testImplementation(libs.robolectric)
 }

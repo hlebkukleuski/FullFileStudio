@@ -53,10 +53,10 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import me.hlebkukleuski.fullfilestudio.bootstrap.FirstLaunchEngineBootstrapper
-import me.hlebkukleuski.fullfilestudio.ui.theme.AppLanguage
+import me.hlebkukleuski.fullfilestudio.data.settings.AppLanguage
+import me.hlebkukleuski.fullfilestudio.ui.settings.ThemeDropdownSelector
 import me.hlebkukleuski.fullfilestudio.ui.theme.LocalAppPalette
 import me.hlebkukleuski.fullfilestudio.ui.theme.LocalAppStrings
-import me.hlebkukleuski.fullfilestudio.ui.theme.ThemeDropdownSelector
 
 @Composable
 fun FirstLaunchBootstrapScreen(

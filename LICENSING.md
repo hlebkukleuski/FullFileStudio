@@ -10,9 +10,11 @@ Under `GPL-3.0-or-later`, anyone may use, study, modify, and redistribute FullFi
 
 ---
 
-## 2. Alternative / Non-Copyleft Licensing for Clean-Room Modules
+## 2. Alternative / Non-Copyleft Licensing for Non-GPL Modules
 
-In addition to `GPL-3.0-or-later`, the copyright holder (**Hleb Kukleuski**) offers separate, written **alternative (non-copyleft) licenses** for the original clean-room engine modules listed below, allowing licensees to integrate those modules into closed-source or non-GPL applications without copyleft disclosure of the licensee's own application code.
+In addition to `GPL-3.0-or-later`, the copyright holder (**Hleb Kukleuski**) offers separate, written **alternative (non-copyleft) licenses** covering Hleb Kukleuski's copyrightable code in the non-GPL modules listed below, allowing licensees to integrate those modules into closed-source or non-GPL applications without copyleft disclosure of the licensee's own application code.
+
+Note that several parsers inside these modules adapt or port permissively licensed upstream open-source projects (`Apache-2.0`, `MIT`, `BSD-2-Clause`, `BSD-3-Clause`, `0BSD`, `TOST-1.0`, Public Domain — see Section 5 and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)). Those permissive upstream components remain governed by their own permissive licenses and attribution/NOTICE requirements under any alternative license; none of those modules contain third-party GPL or LGPL code.
 
 Alternative licenses are granted **exclusively in writing** by the copyright holder, on a case-by-case basis and at the copyright holder's sole discretion. Examples include:
 
@@ -32,11 +34,15 @@ FullFileStudio physically separates third-party GPL-derived engines from the aut
 
 | Module | Public License | Eligible for Alternative License? | Notes |
 | :--- | :--- | :--- | :--- |
-| `:core:engine-api` *(excluding `svg/*.kt`)* | `GPL-3.0-or-later` | **Yes** | AIDL contracts, C++20 `SecurityArena`, PDF, Word (DOC/DOCX/ODT/RTF), PPT/PPTX, XLS/XLSX, Office Crypto, Parquet, DuckDB, Realm, SQLite, DBF, HEX, Media, and permissive codecs. |
-| `:features:office` | `GPL-3.0-or-later` | **Yes** | Spreadsheets, presentations, e-books (EPUB/FB2/MHTML/HTML/TXT), and font preview. |
+| `:core:engine-api` | `GPL-3.0-or-later` | **Yes** | Pure AIDL contracts, `DocumentSession`, `FileSignatureDetector`, `LegalLicensePolicy`, `AdaptiveRingBitmapPool`, `ScratchFiles`, and SPI bridges. |
+| `:core:security` | `GPL-3.0-or-later` | **Yes** | C++20 `seccomp-bpf` / `posix_fadvise` / NEON helper, `ZeroCacheReadableSource`, `MaliciousHeaderSanitizer`, and permissive Snappy/LZ4/Zstd/CCITT codecs. |
+| `:core:engine-media` | `GPL-3.0-or-later` | **Yes** | Audio/video playback controller, ADPCM WAV decoder, and MKV/MP4 subtitle/track demuxers. |
+| `:core:engine-database` | `GPL-3.0-or-later` | **Yes** | SQLite 3, DuckDB, Realm, Apache Parquet, DBF, JSONL/BSON, and `UniversalHexInspectorImpl`. |
+| `:core:engine-document` *(excluding `svg/*.kt`)* | `GPL-3.0-or-later` | **Yes** | PDF, Word (`DOC`/`DOCX`/`ODT`/`RTF`), legacy `XLS`/`PPT`/`ONE`, Office Crypto, e-books (`EPUB`/`FB2`/`MHTML`), OpenGL ES 3.0 mesh renderer, images, and font specimen viewer. |
+| `:features:office` | `GPL-3.0-or-later` | **Yes** | OOXML/ODF spreadsheets (`XLSX`/`XLSB`/`ODS`), presentations (`PPTX`/`ODP`), and streaming `CSV`/`TSV`. |
 | `:features:archives` | `GPL-3.0-or-later` | **Yes** | Clean-room archive & disk image parsers (ZIP, JAR, 7Z, RAR4/RAR5 via BSD-2-Clause `libarchive` / Public Domain PPMd7, TAR, GZ, BZ2, XZ, ISO). |
-| `:features:cadvector` | `GPL-3.0-or-later` | **Yes** | Clean-room 3D/CAD engines (OpenUSD, glTF/GLB + Draco + meshopt, COLLADA/ZAE, STEP, IGES, IFC, DXF, STL, OBJ, 3MF, PLY, OFF, 3DS). |
-| `:core:engine-api` (`.../engine/svg/*.kt`) | `GPL-3.0-or-later` / `MPL-2.0` | **File-level `MPL-2.0` only** | Ported from `resvg` (`MPL-2.0`). Under `MPL-2.0`, these specific files may be combined with closed-source code in a larger work, provided the `svg/*.kt` files (and any modifications to them) remain open-source under `MPL-2.0`. |
+| `:features:cadvector` | `GPL-3.0-or-later` | **Yes** | Clean-room 3D/CAD engines (OpenUSD, glTF/GLB + Draco + meshopt, COLLADA/ZAE, STEP, IGES, DXF, STL, OBJ, 3MF, PLY, OFF, 3DS). |
+| `:core:engine-document` (`.../document/svg/*.kt`) | `GPL-3.0-or-later` / `MPL-2.0` | **File-level `MPL-2.0` only** | Ported from `resvg` (`MPL-2.0`). Under `MPL-2.0`, these specific files may be combined with closed-source code in a larger work, provided the `svg/*.kt` files (and any modifications to them) remain open-source under `MPL-2.0`. |
 | `:features:gpl-engines` | **`GPL-3.0-or-later` ONLY** | **No** | **Strictly excluded from alternative licensing.** See Section 4 below. |
 | `:app` | `GPL-3.0-or-later` | **Case-by-case** *(only without `:features:gpl-engines`)* | Full application UI & `IsolatedRenderService`. Any build that includes `:features:gpl-engines` is strictly `GPL-3.0-or-later`. |
 
@@ -46,12 +52,12 @@ FullFileStudio physically separates third-party GPL-derived engines from the aut
 
 The `:features:gpl-engines` module contains engines ported from or derived from upstream third-party GPL-licensed projects:
 
-- **Blender** (`CleanRoomBlend*.kt`) — upstream `GPL-2.0-or-later`
-- **Blender FBX I/O** (`CleanRoomFbx.kt`) — upstream `GPL-2.0-or-later` (with `Assimp` BSD-3-Clause / `ufbx` MIT)
-- **DjVuLibre** (`CleanRoomDjvuDecoder.kt`) — upstream `GPL-2.0-or-later`
-- **GNU LibreDWG / FreeCAD InventorLoader** (`CleanRoomDwgContainer.kt`, `CleanRoomDwgReader.kt`, `CleanRoomAcis.kt`) — upstream `GPL-3.0-or-later` / `LGPL-2.1-or-later`
-- **Calibre** (`CleanRoomMobiParser.kt`) — upstream `GPL-3.0-or-later`
-- **MDB Tools** (`CleanRoomAccessReader.kt`) — upstream `GPL-2.0-or-later` / `LGPL-2.0-or-later`
+- **Blender** (`blend/Blend*.kt`) — upstream `GPL-2.0-or-later`
+- **Blender FBX I/O** (`fbx/FbxLoader.kt`) — upstream `GPL-2.0-or-later` (with `Assimp` BSD-3-Clause / `ufbx` MIT)
+- **DjVuLibre** (`djvu/DjvuDecoder.kt`) — upstream `GPL-2.0-or-later`
+- **GNU LibreDWG / FreeCAD InventorLoader** (`dwg/DwgContainer.kt`, `dwg/DwgReader.kt`, `dwg/AcisGeometryParser.kt`) — upstream `GPL-3.0-or-later` / `LGPL-2.1-or-later`
+- **Calibre** (`mobi/MobiParser.kt`) — upstream `GPL-3.0-or-later`
+- **MDB Tools** (`access/AccessDatabaseReader.kt`) — upstream `GPL-2.0-or-later` / `LGPL-2.0-or-later`
 
 Because third-party copyright holders own those upstream works, **`:features:gpl-engines` is NOT available under any non-GPL license**. Licensees operating under an alternative license **must exclude `:features:gpl-engines`** from their build (the clean-room modules discover `:features:gpl-engines` only at runtime via optional SPI bridges and compile and run cleanly without it).
 
