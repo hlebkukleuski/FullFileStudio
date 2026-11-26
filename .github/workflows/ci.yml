@@ -58,19 +58,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Run unit tests across all modules and flavors
-        run: >-
-          ./gradlew
-          :core:engine-api:testDebugUnitTest
-          :core:security:testDebugUnitTest
-          :core:engine-media:testDebugUnitTest
-          :core:engine-database:testDebugUnitTest
-          :core:engine-document:testDebugUnitTest
-          :features:office:testDebugUnitTest
-          :features:cadvector:testDebugUnitTest
-          :features:archives:testDebugUnitTest
-          :features:gpl-engines:testDebugUnitTest
-          :app:testGooglePlayDebugUnitTest
-          :app:testStandaloneDebugUnitTest
+        run: ./gradlew testDebugUnitTest --no-daemon --max-workers=2
 
       - name: Upload JUnit XML test results
         if: always()
