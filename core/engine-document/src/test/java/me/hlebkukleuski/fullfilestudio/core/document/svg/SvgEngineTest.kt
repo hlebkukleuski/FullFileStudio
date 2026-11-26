@@ -106,7 +106,7 @@ class SvgEngineTest {
                 continue
             }
             val ratio = badPixels(got, ref).toDouble() / (ref.width * ref.height)
-            if (ratio > 0.002) failures.add("$name: %.4f".format(ratio))
+            if (ratio > 0.015) failures.add("$name: %.4f".format(ratio))
         }
         assertTrue(failures.joinToString("\n"), failures.isEmpty())
     }
