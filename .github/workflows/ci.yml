@@ -95,13 +95,13 @@ jobs:
               -keysize 2048 \
               -validity 10000 \
               -storepass cistorepass \
-              -keypass cikeypass \
+              -keypass cistorepass \
               -dname "CN=FullFileStudio CI,O=FullFileStudio,C=PL"
             cat > keystore.properties <<PROPS
           storeFile=ci-release.jks
           storePassword=cistorepass
           keyAlias=ci_key
-          keyPassword=cikeypass
+          keyPassword=cistorepass
           PROPS
           fi
 
